@@ -26,5 +26,27 @@
 
 ### Next
 
-Build M1: persistent Run/Task/Event state using a Fake Provider before making
-the first paid model call.
+Begin M2 with source ingestion and source-segment references. Keep the first
+slice on the Fake Provider until the source and citation contracts are stable,
+then add the real OpenAI Provider.
+
+### M1 implementation
+
+- Added a Python 3.12 FastAPI backend with SQLite in WAL mode.
+- Added persistent `runs`, `tasks`, `events`, and `artifacts` plus an Alembic
+  initial migration.
+- Added explicit Run/Task transition validation.
+- Added a deterministic three-step Fake Workflow behind a provider interface.
+- Added a database-backed Worker with leases, bounded retry, idempotent Artifact
+  commits, cancellation fencing, and expired-lease recovery.
+- Added HTTP endpoints for create/read/cancel and event replay.
+- Added tests for state transitions, end-to-end persistence, restart, retry,
+  cancellation, recovery, fencing, and API behavior.
+- First external verification exposed a missing SQLAlchemy async extra
+  (`greenlet`); the dependency declaration was corrected to
+  `sqlalchemy[asyncio]`.
+- Alembic upgrade, Ruff checks, formatting checks, and all 11 tests pass.
+- An end-to-end FastAPI lifespan demo completed all three Tasks, persisted three
+  Artifacts and twelve Events, and ended with `run.succeeded`.
+- A fresh application instance queried the same completed Run from SQLite,
+  verifying the M1 restart requirement.

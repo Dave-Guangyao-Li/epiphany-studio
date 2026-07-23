@@ -10,20 +10,21 @@
 - [x] 产品 Spec
 - [x] 轻量架构
 - [x] ADR-0001
-- [ ] 创建 GitHub 远端
+- [x] 创建 GitHub 远端
 - [ ] 建立 Issues / Milestones
 
 完成标准：任何新会话都能从仓库文档理解产品目标、边界和第一步。
 
 ## M1：持久化 Run
 
-- [ ] FastAPI 项目骨架
-- [ ] SQLite migration
-- [ ] `runs`、`tasks`、`events`、`artifacts`
-- [ ] Run/Task 状态机
-- [ ] Fake Provider
-- [ ] Worker 启动、领取、完成任务
-- [ ] 状态转换单元测试
+- [x] FastAPI 项目骨架
+- [x] SQLite migration
+- [x] `runs`、`tasks`、`events`、`artifacts`
+- [x] Run/Task 状态机
+- [x] Fake Provider
+- [x] Worker 启动、领取、完成任务
+- [x] 状态转换、重试、取消、恢复测试
+- [x] migration、Ruff 与完整测试套件通过
 
 演示：创建 Run，Worker 完成三步 Fake Workflow，重启后仍能查询完整事件。
 

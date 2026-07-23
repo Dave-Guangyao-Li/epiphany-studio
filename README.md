@@ -79,9 +79,10 @@ ChatGPT subscription usage and OpenAI API usage are separate. This project uses
 an OpenAI Platform API key, which is billed through the API account at standard
 API rates.
 
-The model is configurable. The initial low-cost default is
-`gpt-5.6-luna`, with a mock provider for tests. Per-run call limits, parallelism,
-token usage, and estimated cost will be recorded.
+The model will be configurable when the real provider is added in M2. M1 uses a
+deterministic Fake Provider and needs no API key. Per-run call limits,
+parallelism, token usage, and estimated cost will be recorded once real model
+calls are introduced.
 
 No key or personal source material belongs in Git.
 
@@ -101,7 +102,10 @@ Official references:
 
 ## Status
 
-Planning and architecture baseline. Application code is the next milestone.
+M1 is complete: the FastAPI API, SQLite runtime tables, three-step Fake
+Workflow, durable Worker, retry/cancel/recovery paths, and Alembic migration are
+implemented. The full suite passes with 11 tests, and a restart demonstration
+confirms that completed Runs remain queryable from SQLite.
 
 ## License
 
