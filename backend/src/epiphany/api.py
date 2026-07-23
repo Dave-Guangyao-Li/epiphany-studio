@@ -5,7 +5,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from epiphany.schemas import CreateRunRequest, EventView, RunView
-from epiphany.services import RunAlreadyTerminal, RunNotFound, RunService
+from epiphany.services import (
+    InvalidRunPayload,
+    RunAlreadyTerminal,
+    RunNotFound,
+    RunService,
+    RunSourceNotFound,
+)
 
 router = APIRouter()
 
@@ -28,10 +34,15 @@ async def create_run(
     body: CreateRunRequest,
     service: RunServiceDependency,
 ) -> RunView:
-    return await service.create_run(
-        workflow_type=body.workflow_type,
-        payload=body.payload,
-    )
+    try:
+        return await service.create_run(
+            workflow_type=body.workflow_type,
+            payload=body.payload,
+        )
+    except InvalidRunPayload as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except RunSourceNotFound as error:
+        raise HTTPException(status_code=404, detail=f"source not found: {error}") from error
 
 
 @router.get("/runs/{run_id}", response_model=RunView)

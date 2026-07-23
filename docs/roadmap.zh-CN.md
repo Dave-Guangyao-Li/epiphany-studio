@@ -56,14 +56,19 @@
 
 ### M2.2：Fake 双 Agent 编排
 
-- [ ] Timeline Researcher 严格输出 schema
-- [ ] Theme Researcher 严格输出 schema
-- [ ] 两个同级 Child Task 并行 fan-out
-- [ ] 等待全部 Child 完成后 fan-in
-- [ ] Fake Provider fixtures
-- [ ] 来源引用校验与失败测试
+- [x] Timeline Researcher 严格输出 schema
+- [x] Theme Researcher 严格输出 schema
+- [x] 两个同级 Child Task 并行 fan-out
+- [x] 等待全部 Child 完成后 fan-in
+- [x] Fake Provider fixtures
+- [x] 来源引用校验与失败测试
 
 演示：不调用模型，从已导入素材生成两份带合法引用的结构化候选 Artifact。
+
+验收：并发探针确认两个 Child Provider 调用发生重叠；HTTP 集成测试从
+Source 导入走到三份 Artifact；非法引用故障注入会失败父任务、取消兄弟
+任务并拒绝迟到写入。M2.2 不改变数据库结构，因此没有新增 migration；
+`alembic check` 必须继续无差异。
 
 ### M2.3：真实模型 Provider
 

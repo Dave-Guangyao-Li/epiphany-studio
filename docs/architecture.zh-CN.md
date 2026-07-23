@@ -185,15 +185,18 @@ MVP 只有一个 Worker 进程，但任务存在 SQLite 中，不只存在内存
 
 Worker 循环：
 
-1. 在事务中领取一个 `queued` Task。
-2. 写入 `lease_token` 和过期时间。
-3. 运行模型调用或确定性 Handler。
-4. 持久化 Artifact。
-5. 使用当前 lease/fencing token 提交终态。
-6. 追加 Event。
-7. 触发 Orchestrator 判断下一个可运行步骤。
+1. 依次在短事务中领取最多两个 `queued` Task。
+2. 为每个 Task 写入独立的 `lease_token` 和过期时间。
+3. 使用 `asyncio.gather` 并行运行模型调用或确定性 Handler。
+4. 严格校验结构化输出和本次 Task 允许的 Source 引用。
+5. 持久化幂等 Artifact。
+6. 使用当前 lease/fencing token 提交终态并追加 Event。
+7. 触发 Orchestrator 判断是否仍需等待，或执行确定性 fan-in。
 
-同一进程内通过 `asyncio.Semaphore(2)` 控制并发。
+同一进程内并发上限固定为二。M2.2 的单 Worker 在一个短的 finalization
+临界区中串行提交 Child 终态，避免两个同时完成的 Child 都看见过期的
+兄弟状态；耗时的 Provider 调用仍然真实并发。未来多 Worker 需要借助
+PostgreSQL 行锁或等价的数据库协调后再解除这个单进程约束。
 
 进程启动时将已过期的 `running` Task 重新排队。后续如果需要多 Worker，
 再迁移 PostgreSQL，不在 SQLite 上模拟分布式队列。
@@ -282,6 +285,12 @@ Run/Event API 呈现可回放状态。浏览器控制台不能成为唯一调试
 - 稳定的日志 event 名称；
 - 可从 API 或持久化 Event 复现问题；
 - 必要的手工演示和文档同步。
+
+M2.2 的稳定事件包括 `workflow.fan_out.started`、
+`workflow.fan_in.waiting` 和 `workflow.fan_in.completed`。Child 失败时
+Event 还会记录 Manager 失败及兄弟 Task 的 `sibling_failed` 取消原因；
+stdout 对应 `worker.task.failed` 和迟到结果的
+`worker.task.stale_result`，均不包含素材正文或模型输出。
 
 ## 13. 升级触发条件
 

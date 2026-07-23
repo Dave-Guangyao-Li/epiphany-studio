@@ -10,6 +10,7 @@ from epiphany.db import Database
 from epiphany.events import append_event
 from epiphany.ids import new_id
 from epiphany.models import Artifact, Run, Task
+from epiphany.research_schemas import validate_research_output
 from epiphany.runtime.orchestrator import Orchestrator
 from epiphany.runtime.providers import (
     ModelProvider,
@@ -40,6 +41,7 @@ class Worker:
         lease_seconds: int,
         timeout_seconds: float,
         poll_interval_seconds: float,
+        max_concurrency: int = 2,
     ) -> None:
         self.database = database
         self.orchestrator = orchestrator
@@ -47,6 +49,8 @@ class Worker:
         self.lease_seconds = lease_seconds
         self.timeout_seconds = timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
+        self.max_concurrency = max_concurrency
+        self._finalization_lock = asyncio.Lock()
 
     async def claim_next(self) -> TaskInvocation | None:
         async with self.database.sessions() as session, session.begin():
@@ -138,6 +142,22 @@ class Worker:
         provider: str,
         model: str,
     ) -> None:
+        async with self._finalization_lock:
+            await self._complete(
+                invocation,
+                content=content,
+                provider=provider,
+                model=model,
+            )
+
+    async def _complete(
+        self,
+        invocation: TaskInvocation,
+        *,
+        content: dict[str, object],
+        provider: str,
+        model: str,
+    ) -> None:
         async with self.database.sessions() as session, session.begin():
             task = await session.get(Task, invocation.task_id)
             if task is None:
@@ -148,7 +168,7 @@ class Worker:
             if (
                 task.status != TaskStatus.RUNNING
                 or task.lease_token != invocation.lease_token
-                or run.status == RunStatus.CANCELLED
+                or run.status != RunStatus.RUNNING
             ):
                 raise StaleLease(f"lease no longer owns task {task.id}")
 
@@ -216,6 +236,10 @@ class Worker:
         )
 
     async def fail(self, invocation: TaskInvocation, error: Exception) -> None:
+        async with self._finalization_lock:
+            await self._fail(invocation, error)
+
+    async def _fail(self, invocation: TaskInvocation, error: Exception) -> None:
         async with self.database.sessions() as session, session.begin():
             task = await session.get(Task, invocation.task_id)
             run = await session.get(Run, invocation.run_id)
@@ -261,8 +285,6 @@ class Worker:
 
             validate_task_transition(task.status, TaskStatus.FAILED)
             task.status = TaskStatus.FAILED
-            validate_run_transition(run.status, RunStatus.FAILED)
-            run.status = RunStatus.FAILED
             await append_event(
                 session,
                 run_id=run.id,
@@ -275,11 +297,10 @@ class Worker:
                     "retryable": retryable,
                 },
             )
-            await append_event(
+            await self.orchestrator.fail_after_task(
                 session,
-                run_id=run.id,
-                event_type="run.failed",
-                payload={"task_id": task.id, "error_code": task.error_code},
+                run=run,
+                failed_task=task,
             )
             logger.error(
                 "Worker failed task",
@@ -326,9 +347,6 @@ class Worker:
                     task.status = TaskStatus.FAILED
                     task.error_code = "lease_expired"
                     task.error_message = "task lease expired and attempts were exhausted"
-                    if run.status == RunStatus.RUNNING:
-                        validate_run_transition(run.status, RunStatus.FAILED)
-                        run.status = RunStatus.FAILED
                     event_type = "task.failed"
 
                 await append_event(
@@ -339,11 +357,10 @@ class Worker:
                     payload={"kind": task.kind, "reason": "lease_expired"},
                 )
                 if event_type == "task.failed":
-                    await append_event(
+                    await self.orchestrator.fail_after_task(
                         session,
-                        run_id=run.id,
-                        event_type="run.failed",
-                        payload={"task_id": task.id, "error_code": task.error_code},
+                        run=run,
+                        failed_task=task,
                     )
                 recovered += 1
         if recovered:
@@ -360,14 +377,23 @@ class Worker:
         invocation = await self.claim_next()
         if invocation is None:
             return False
+        await self._execute_invocation(invocation)
+        return True
+
+    async def _execute_invocation(self, invocation: TaskInvocation) -> None:
         try:
             result = await asyncio.wait_for(
                 self.provider.generate(invocation),
                 timeout=self.timeout_seconds,
             )
+            validated_content = validate_research_output(
+                task_kind=invocation.kind,
+                task_input=invocation.input_json,
+                content=result.content,
+            )
             await self.complete(
                 invocation,
-                content=result.content,
+                content=validated_content,
                 provider=result.provider,
                 model=result.model,
             )
@@ -389,12 +415,36 @@ class Worker:
             )
         except Exception as error:  # Worker boundary persists the error before continuing.
             await self.fail(invocation, error)
-        return True
+
+    async def run_batch(self, *, limit: int | None = None) -> int:
+        batch_limit = min(limit or self.max_concurrency, self.max_concurrency)
+        invocations: list[TaskInvocation] = []
+        for _ in range(batch_limit):
+            invocation = await self.claim_next()
+            if invocation is None:
+                break
+            invocations.append(invocation)
+
+        if not invocations:
+            return 0
+
+        logger.info(
+            "Worker executing task batch",
+            extra={
+                "event": "worker.batch.started",
+                "concurrency": len(invocations),
+            },
+        )
+        await asyncio.gather(*(self._execute_invocation(invocation) for invocation in invocations))
+        return len(invocations)
 
     async def run_until_idle(self, *, max_tasks: int = 100) -> int:
         processed = 0
-        while processed < max_tasks and await self.run_once():
-            processed += 1
+        while processed < max_tasks:
+            batch_size = await self.run_batch(limit=max_tasks - processed)
+            if batch_size == 0:
+                break
+            processed += batch_size
         return processed
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
@@ -402,7 +452,7 @@ class Worker:
         try:
             await self.recover_expired()
             while not stop_event.is_set():
-                if await self.run_once():
+                if await self.run_batch():
                     continue
                 try:
                     await asyncio.wait_for(

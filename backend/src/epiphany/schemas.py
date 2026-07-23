@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class CreateRunRequest(BaseModel):
-    workflow_type: Literal["fake-podcast"] = "fake-podcast"
+    workflow_type: Literal["fake-podcast", "episode-research"] = "fake-podcast"
     payload: dict[str, Any] = Field(default_factory=dict)
 
 

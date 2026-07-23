@@ -1,12 +1,25 @@
 # Epiphany Studio Backend
 
-M1 implements a single-user, single-machine durable task runner. It intentionally
-uses a deterministic `FakeProvider`; no OpenAI key or paid model call is needed.
+The backend currently implements a single-user, single-machine durable task
+runner plus the M2.2 parallel research workflow. It intentionally uses a
+deterministic `FakeProvider`; no OpenAI key or paid model call is needed.
 
 The first workflow is deliberately small:
 
 ```text
 prepare_sources -> fake_research -> assemble_artifact
+```
+
+The first parent/child workflow is:
+
+```text
+research_manager
+  -> fan-out (maximum 2)
+       |- timeline_research
+       `- theme_research
+  -> validate strict schemas and Source references
+  -> fan-in
+  -> episode_research_bundle
 ```
 
 Each step is a persisted Task. The worker claims it with a lease, writes an
@@ -95,6 +108,53 @@ Re-importing the same normalized text returns HTTP 200 with `created: false`
 and the existing stable IDs. A new Source returns HTTP 201. The whole normalized
 text stays in local SQLite and is not returned by the API; callers receive the
 ordered segments needed for future citations.
+
+## M2.2 parallel research API
+
+Import a Source as shown above, copy its `source.id`, and start a Run:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/runs \
+  -H 'content-type: application/json' \
+  -H 'x-request-id: req_research_demo' \
+  -d '{
+    "workflow_type": "episode-research",
+    "payload": {"source_ids": ["src_REPLACE_ME"]}
+  }'
+```
+
+The response initially contains a running `research_manager` and two queued
+children with the Manager's ID in `parent_task_id`. With the default Worker
+enabled, poll the returned Run ID:
+
+```bash
+curl http://127.0.0.1:8000/runs/run_REPLACE_ME
+curl http://127.0.0.1:8000/runs/run_REPLACE_ME/events
+```
+
+The completed Run has:
+
+- three succeeded Tasks: one Manager and two sibling Researchers;
+- two validated child result Artifacts plus one `episode_research_bundle`;
+- `model_call_count: 2`, representing two Fake Provider executions;
+- durable `workflow.fan_out.started`, `workflow.fan_in.waiting`, and
+  `workflow.fan_in.completed` Events.
+
+The Fake Provider is not pretending to provide useful AI research. It validates
+the orchestration contract before a real provider is introduced: true bounded
+parallel execution, strict structured output, citation scope, exact quote
+matching, failure propagation, idempotent fan-in, and late-result fencing.
+
+Focused verification:
+
+```bash
+pytest tests/test_research_schemas.py tests/test_research_workflow.py -q
+```
+
+The failure-injection test returns an out-of-scope Source reference from one
+child while delaying the other. It verifies that the child and Manager fail,
+the sibling is cancelled, the late result is rejected, and no Artifact is
+written.
 
 ## Debugging and logs
 

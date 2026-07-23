@@ -138,6 +138,22 @@ Subagent 对话。
 - 输出 `ThemeFinding[]` 和 `QuoteCandidate[]`；
 - 区分用户原话与模型推断。
 
+### M2.2 结构化输出契约
+
+- Timeline 的每个事件候选至少有一条 `SourceReference`、置信度、标签和
+  描述；
+- Theme 的每个主题候选至少有一条 `SourceReference`，原话候选包含一条
+  精确引用；
+- 输出对象和嵌套引用都采用 strict schema，不允许额外字段；
+- 引用的 `(source_id, source_segment_id)` 必须属于该 Child Task 获准读取
+  的片段；
+- Quote 文本必须逐字存在于引用片段，不能把模型改写伪装成用户原话；
+- 任一 Child 输出无效时，Manager 失败、仍在运行的同级 Child 被取消，
+  lease 被清除，迟到结果不能写入 Artifact。
+
+M2.2 使用确定性 Fake Provider 验证以上契约，不评价研究内容质量；真实
+模型质量从 M2.3 开始验证。
+
 ### Interviewer
 
 MVP 中先作为确定性 Workflow 的一次模型调用，而不是独立并发 Agent。

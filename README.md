@@ -116,6 +116,15 @@ local `Source`, deterministically split into ordered `SourceSegment` records,
 deduplicated on retry, and queried again after restart. No source content is
 sent to a model in this slice.
 
+M2.2 adds the first parent/child Agent workflow without a paid model call. An
+`episode-research` Run creates one durable Manager Task and fans out a Timeline
+Researcher and Theme Researcher with a maximum concurrency of two. Their strict
+outputs must cite only the Source Segments assigned to the Task; quote
+candidates must exist verbatim in the cited segment. The Manager waits for both
+results and creates one deterministic research bundle. Invalid citations fail
+the parent, cancel the sibling, and fence late writes. The full suite passes
+with 28 tests.
+
 ## License
 
 [MIT](LICENSE)

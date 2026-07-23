@@ -23,6 +23,8 @@ class FakeProvider:
             "prepare_sources": self._prepare_sources,
             "fake_research": self._fake_research,
             "assemble_artifact": self._assemble_artifact,
+            "timeline_research": self._timeline_research,
+            "theme_research": self._theme_research,
         }
         try:
             content = handlers[invocation.kind](invocation.input_json)
@@ -72,4 +74,52 @@ class FakeProvider:
             "summary": "The durable three-step workflow completed without a model call.",
             "research_artifact_id": input_json.get("previous_artifact_id"),
             "observations": previous.get("observations", []),
+        }
+
+    @staticmethod
+    def _timeline_research(input_json: dict[str, Any]) -> dict[str, Any]:
+        segments = input_json["source_segments"]
+        return {
+            "timeline_events": [
+                {
+                    "label": f"Candidate moment {index}",
+                    "description": "A deterministic timeline candidate from the cited segment.",
+                    "time_expression": None,
+                    "confidence": 0.8,
+                    "source_refs": [
+                        {
+                            "source_id": segment["source_id"],
+                            "source_segment_id": segment["source_segment_id"],
+                        }
+                    ],
+                }
+                for index, segment in enumerate(segments[:3], start=1)
+            ],
+            "open_questions": [],
+        }
+
+    @staticmethod
+    def _theme_research(input_json: dict[str, Any]) -> dict[str, Any]:
+        segment = input_json["source_segments"][0]
+        quote = segment["text"][: min(len(segment["text"]), 160)]
+        source_ref = {
+            "source_id": segment["source_id"],
+            "source_segment_id": segment["source_segment_id"],
+        }
+        return {
+            "themes": [
+                {
+                    "theme": "Change outside the plan",
+                    "insight": "A deterministic theme candidate grounded in the cited segment.",
+                    "confidence": 0.85,
+                    "source_refs": [source_ref],
+                }
+            ],
+            "quotes": [
+                {
+                    "quote": quote,
+                    "context": "Exact text retained for later human review.",
+                    "source_ref": source_ref,
+                }
+            ],
         }

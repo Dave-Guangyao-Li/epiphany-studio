@@ -45,6 +45,7 @@ def create_app(
         lease_seconds=resolved_settings.worker_lease_seconds,
         timeout_seconds=resolved_settings.task_timeout_seconds,
         poll_interval_seconds=resolved_settings.worker_poll_interval_seconds,
+        max_concurrency=resolved_settings.worker_max_concurrency,
     )
 
     @asynccontextmanager

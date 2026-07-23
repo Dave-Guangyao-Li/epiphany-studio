@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     worker_enabled: bool = True
     worker_poll_interval_seconds: float = Field(default=0.25, gt=0)
+    worker_max_concurrency: int = Field(default=2, ge=1, le=2)
     worker_lease_seconds: int = Field(default=30, gt=0)
     task_timeout_seconds: float = Field(default=30, gt=0)
     task_max_attempts: int = Field(default=2, ge=1, le=5)

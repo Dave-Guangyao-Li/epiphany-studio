@@ -3,12 +3,14 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from epiphany.db import Database
 from epiphany.events import append_event
-from epiphany.models import Event, Run, Task
+from epiphany.models import Event, Run, Source, Task
+from epiphany.research_schemas import EpisodeResearchPayload
 from epiphany.runtime.orchestrator import Orchestrator
 from epiphany.schemas import ArtifactView, EventView, RunView, TaskView
 from epiphany.state_machine import (
@@ -29,6 +31,14 @@ class RunAlreadyTerminal(ValueError):
     pass
 
 
+class InvalidRunPayload(ValueError):
+    pass
+
+
+class RunSourceNotFound(LookupError):
+    pass
+
+
 class RunService:
     def __init__(self, database: Database, orchestrator: Orchestrator) -> None:
         self.database = database
@@ -41,11 +51,53 @@ class RunService:
         payload: dict[str, object],
     ) -> RunView:
         async with self.database.sessions() as session, session.begin():
+            research_source_segments: list[dict[str, str]] | None = None
+            if workflow_type == "episode-research":
+                try:
+                    research_payload = EpisodeResearchPayload.model_validate(payload)
+                except ValidationError as error:
+                    raise InvalidRunPayload("invalid episode-research payload") from error
+
+                sources = (
+                    (
+                        await session.execute(
+                            select(Source)
+                            .where(Source.id.in_(research_payload.source_ids))
+                            .options(selectinload(Source.segments))
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                sources_by_id = {source.id: source for source in sources}
+                missing_source_ids = [
+                    source_id
+                    for source_id in research_payload.source_ids
+                    if source_id not in sources_by_id
+                ]
+                if missing_source_ids:
+                    raise RunSourceNotFound(missing_source_ids[0])
+
+                payload = research_payload.model_dump(mode="json")
+                research_source_segments = [
+                    {
+                        "source_id": source.id,
+                        "source_segment_id": segment.id,
+                        "text": segment.text,
+                    }
+                    for source_id in research_payload.source_ids
+                    for source in [sources_by_id[source_id]]
+                    for segment in sorted(source.segments, key=lambda item: item.position)
+                ]
+
+            initial_step = (
+                "research_fan_out" if workflow_type == "episode-research" else "prepare_sources"
+            )
             run = Run(
                 workflow_type=workflow_type,
                 workflow_version="v1",
                 status=RunStatus.QUEUED,
-                current_step="prepare_sources",
+                current_step=initial_step,
                 input_json=payload,
             )
             session.add(run)
@@ -59,7 +111,11 @@ class RunService:
                     "workflow_version": run.workflow_version,
                 },
             )
-            await self.orchestrator.enqueue_initial_task(session, run)
+            await self.orchestrator.start_run(
+                session,
+                run,
+                research_source_segments=research_source_segments,
+            )
             run_id = run.id
 
         logger.info(

@@ -33,9 +33,10 @@
 
 ### Next
 
-Begin M2.2 with strict Timeline/Theme output schemas and Fake Provider fixtures,
-then add one-level parallel fan-out/fan-in. Do not add the real OpenAI Provider
-until the citation validator rejects invalid references deterministically.
+Begin M2.3 with the official OpenAI Provider behind the existing Task contract.
+Keep the Fake Provider as the deterministic orchestration test double. Do not
+change fan-out/fan-in semantics while adding model calls; add token, latency,
+call-limit, and cost records before using personal source material.
 
 ### M1 implementation
 
@@ -89,3 +90,22 @@ until the citation validator rejects invalid references deterministically.
   tests pass.
 - Manual API verification imported two ordered segments, returned the same IDs
   on a duplicate import, and queried them from a fresh application instance.
+
+### M2.2 fake parallel research agents
+
+- Added an `episode-research` Workflow with a durable Manager and two sibling
+  Child Tasks: Timeline Researcher and Theme Researcher.
+- Added strict Pydantic outputs with required source references, bounded
+  confidence, forbidden extra fields, and exact quote-to-segment validation.
+- Added a deterministic Fake Provider fixture for both research roles.
+- Added bounded Worker batches with a maximum of two concurrent Provider calls.
+- Added deterministic fan-in that waits for both children and creates one
+  idempotent `episode_research_bundle`.
+- Added child-to-parent failure propagation, sibling cancellation, lease
+  clearing, and stale-result fencing.
+- Added stable fan-out/fan-in Events and operational batch/failure/stale-result
+  logs without source or generated content.
+- Added unit, concurrency-probe, failure-injection, and HTTP integration tests.
+- M2.2 changes no database tables; Alembic remains at `0002_source_contract`.
+- Ruff, formatting, and all 28 tests pass. The HTTP integration path imports a
+  Source, starts the Run, executes both children, and returns three Artifacts.
