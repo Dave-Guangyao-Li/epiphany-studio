@@ -24,10 +24,15 @@ async def test_create_and_read_run_api(tmp_path: Path) -> None:
             json={"payload": {"topic": "API smoke test"}},
         )
         assert response.status_code == 201
+        assert response.headers["x-request-id"].startswith("req_")
         run_id = response.json()["id"]
 
-        response = await client.get(f"/runs/{run_id}")
+        response = await client.get(
+            f"/runs/{run_id}",
+            headers={"x-request-id": "req_test_manual"},
+        )
         assert response.status_code == 200
+        assert response.headers["x-request-id"] == "req_test_manual"
         assert response.json()["status"] == "queued"
 
         response = await client.get(f"/runs/{run_id}/events")

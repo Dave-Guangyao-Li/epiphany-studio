@@ -63,3 +63,21 @@ curl http://127.0.0.1:8000/runs/run_REPLACE_ME/events
 
 Restarting Uvicorn does not remove completed Runs because SQLite is the source
 of truth. The in-process worker requeues expired leases on startup.
+
+## Debugging and logs
+
+The backend writes one-line JSON logs to stdout. HTTP responses include
+`X-Request-ID`; sending the same header lets a caller choose a correlation ID.
+Run and Worker logs include stable event names plus `run_id`, `task_id`,
+`attempt`, status, and duration where applicable.
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/runs \
+  -H 'content-type: application/json' \
+  -H 'x-request-id: req_local_debug' \
+  -d '{"payload":{"topic":"成年十年"}}'
+```
+
+Use database Events to replay what happened in a Workflow. Use stdout logs to
+diagnose API latency, Worker ownership, retries, failures, and recovery. Logs
+must never include source text, prompts, generated model content, or secrets.

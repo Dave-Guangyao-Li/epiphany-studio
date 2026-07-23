@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 
 from sqlalchemy import event
@@ -12,6 +13,8 @@ from sqlalchemy.ext.asyncio import (
 
 from epiphany.config import ensure_sqlite_parent
 from epiphany.models import Base
+
+logger = logging.getLogger("epiphany.database")
 
 
 class Database:
@@ -35,6 +38,10 @@ class Database:
     async def create_schema(self) -> None:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+        logger.info(
+            "Database schema ready",
+            extra={"event": "database.schema.ready"},
+        )
 
     async def drop_schema(self) -> None:
         async with self.engine.begin() as connection:

@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from time import perf_counter
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 
 from epiphany.api import router
 from epiphany.config import Settings
 from epiphany.db import Database
+from epiphany.ids import new_id
+from epiphany.observability import (
+    REQUEST_ID_HEADER,
+    bind_request_id,
+    configure_logging,
+    reset_request_id,
+)
 from epiphany.runtime.orchestrator import Orchestrator
 from epiphany.runtime.providers import FakeProvider, ModelProvider
 from epiphany.runtime.worker import Worker
 from epiphany.services import RunService
+
+logger = logging.getLogger("epiphany.http")
 
 
 def create_app(
@@ -35,6 +46,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        configure_logging(resolved_settings.log_level)
         if resolved_settings.create_schema_on_start:
             await database.create_schema()
 
@@ -58,6 +70,44 @@ def create_app(
     app.state.run_service = run_service
     app.state.worker = worker
     app.include_router(router)
+
+    @app.middleware("http")
+    async def log_request(request: Request, call_next: object) -> Response:
+        request_id = request.headers.get(REQUEST_ID_HEADER) or new_id("req")
+        token = bind_request_id(request_id)
+        started_at = perf_counter()
+        try:
+            try:
+                response = await call_next(request)
+            except Exception:
+                logger.exception(
+                    "HTTP request failed",
+                    extra={
+                        "event": "http.request.failed",
+                        "request_id": request_id,
+                        "method": request.method,
+                        "path": request.url.path,
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                    },
+                )
+                raise
+
+            response.headers[REQUEST_ID_HEADER] = request_id
+            logger.info(
+                "HTTP request completed",
+                extra={
+                    "event": "http.request.completed",
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": response.status_code,
+                    "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                },
+            )
+            return response
+        finally:
+            reset_request_id(token)
+
     return app
 
 

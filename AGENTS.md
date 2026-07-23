@@ -36,6 +36,13 @@ a useful end-to-end workflow before generality, scale, or framework adoption.
   ADR in the same commit as the behavior they describe.
 - Mark a roadmap item complete only after its migration, tests, and manual
   demonstration have passed.
+- Every backend slice must emit structured operational logs with stable event
+  names and correlation IDs. Never log source text, prompts, model responses,
+  API keys, or other personal content.
+- Durable workflow Events explain product execution; stdout logs explain
+  operational behavior. Do not use one as a substitute for the other.
+- Every frontend slice must expose recoverable errors, preserve the backend
+  request ID, and provide enough state to reproduce a failed request.
 - Add tests for state transitions, retry behavior, cancellation, and recovery.
 - Prefer structured model outputs with strict validation.
 - Keep each commit focused on one behavior and describe its user-visible or

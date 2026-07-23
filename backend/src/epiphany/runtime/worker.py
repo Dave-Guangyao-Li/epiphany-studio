@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
@@ -21,6 +22,8 @@ from epiphany.state_machine import (
     validate_run_transition,
     validate_task_transition,
 )
+
+logger = logging.getLogger("epiphany.worker")
 
 
 class StaleLease(RuntimeError):
@@ -71,6 +74,15 @@ class Worker:
                     event_type="task.cancelled",
                     payload={"reason": "parent_run_cancelled"},
                 )
+                logger.info(
+                    "Skipped task because parent Run is cancelled",
+                    extra={
+                        "event": "worker.task.skipped",
+                        "run_id": run.id,
+                        "task_id": task.id,
+                        "task_kind": task.kind,
+                    },
+                )
                 return None
 
             if run.status == RunStatus.QUEUED:
@@ -106,6 +118,16 @@ class Worker:
                 input_json=task.input_json,
                 lease_token=task.lease_token,
             )
+        logger.info(
+            "Worker claimed task",
+            extra={
+                "event": "worker.task.claimed",
+                "run_id": invocation.run_id,
+                "task_id": invocation.task_id,
+                "task_kind": invocation.kind,
+                "attempt": invocation.attempt,
+            },
+        )
         return invocation
 
     async def complete(
@@ -179,6 +201,19 @@ class Worker:
                 completed_task=task,
                 artifact=artifact,
             )
+            artifact_id = artifact.id
+
+        logger.info(
+            "Worker completed task",
+            extra={
+                "event": "worker.task.completed",
+                "run_id": invocation.run_id,
+                "task_id": invocation.task_id,
+                "task_kind": invocation.kind,
+                "attempt": invocation.attempt,
+                "artifact_id": artifact_id,
+            },
+        )
 
     async def fail(self, invocation: TaskInvocation, error: Exception) -> None:
         async with self.database.sessions() as session, session.begin():
@@ -211,6 +246,17 @@ class Worker:
                         "error_code": task.error_code,
                     },
                 )
+                logger.warning(
+                    "Worker scheduled task retry",
+                    extra={
+                        "event": "worker.task.retry_scheduled",
+                        "run_id": run.id,
+                        "task_id": task.id,
+                        "task_kind": task.kind,
+                        "attempt": task.attempt,
+                        "error_code": task.error_code,
+                    },
+                )
                 return
 
             validate_task_transition(task.status, TaskStatus.FAILED)
@@ -234,6 +280,17 @@ class Worker:
                 run_id=run.id,
                 event_type="run.failed",
                 payload={"task_id": task.id, "error_code": task.error_code},
+            )
+            logger.error(
+                "Worker failed task",
+                extra={
+                    "event": "worker.task.failed",
+                    "run_id": run.id,
+                    "task_id": task.id,
+                    "task_kind": task.kind,
+                    "attempt": task.attempt,
+                    "error_code": task.error_code,
+                },
             )
 
     async def recover_expired(self) -> int:
@@ -289,6 +346,14 @@ class Worker:
                         payload={"task_id": task.id, "error_code": task.error_code},
                     )
                 recovered += 1
+        if recovered:
+            logger.warning(
+                "Worker recovered expired task leases",
+                extra={
+                    "event": "worker.tasks.recovered",
+                    "recovered_count": recovered,
+                },
+            )
         return recovered
 
     async def run_once(self) -> bool:
@@ -307,7 +372,16 @@ class Worker:
                 model=result.model,
             )
         except StaleLease:
-            pass
+            logger.warning(
+                "Worker rejected stale task result",
+                extra={
+                    "event": "worker.task.stale_result",
+                    "run_id": invocation.run_id,
+                    "task_id": invocation.task_id,
+                    "task_kind": invocation.kind,
+                    "attempt": invocation.attempt,
+                },
+            )
         except TimeoutError as error:
             await self.fail(
                 invocation,
@@ -324,14 +398,18 @@ class Worker:
         return processed
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
-        await self.recover_expired()
-        while not stop_event.is_set():
-            if await self.run_once():
-                continue
-            try:
-                await asyncio.wait_for(
-                    stop_event.wait(),
-                    timeout=self.poll_interval_seconds,
-                )
-            except TimeoutError:
-                continue
+        logger.info("Worker started", extra={"event": "worker.started"})
+        try:
+            await self.recover_expired()
+            while not stop_event.is_set():
+                if await self.run_once():
+                    continue
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(),
+                        timeout=self.poll_interval_seconds,
+                    )
+                except TimeoutError:
+                    continue
+        finally:
+            logger.info("Worker stopped", extra={"event": "worker.stopped"})

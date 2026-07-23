@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +16,7 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite+aiosqlite:///./data/epiphany.db"
     create_schema_on_start: bool = True
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     worker_enabled: bool = True
     worker_poll_interval_seconds: float = Field(default=0.25, gt=0)
     worker_lease_seconds: int = Field(default=30, gt=0)

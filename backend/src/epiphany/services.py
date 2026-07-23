@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -16,6 +17,8 @@ from epiphany.state_machine import (
     validate_run_transition,
     validate_task_transition,
 )
+
+logger = logging.getLogger("epiphany.run_service")
 
 
 class RunNotFound(LookupError):
@@ -59,6 +62,13 @@ class RunService:
             await self.orchestrator.enqueue_initial_task(session, run)
             run_id = run.id
 
+        logger.info(
+            "Run created",
+            extra={
+                "event": "run.created",
+                "run_id": run_id,
+            },
+        )
         return await self.get_run(run_id)
 
     async def get_run(self, run_id: str) -> RunView:
@@ -146,4 +156,11 @@ class RunService:
                 payload={},
             )
 
+        logger.info(
+            "Run cancelled",
+            extra={
+                "event": "run.cancelled",
+                "run_id": run_id,
+            },
+        )
         return await self.get_run(run_id)

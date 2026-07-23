@@ -27,6 +27,9 @@
   detour. The product UI remains M5.
 - Every verified slice updates its affected documentation in the same focused
   commit before the next slice starts.
+- Durable database Events are the product execution trace. Structured JSON
+  stdout logs are the operational trace, correlated by request, Run, Task, and
+  attempt IDs without logging personal source content.
 
 ### Next
 
@@ -54,3 +57,14 @@ contracts are stable; only then add the real OpenAI Provider in M2.3.
   Artifacts and twelve Events, and ended with `run.succeeded`.
 - A fresh application instance queried the same completed Run from SQLite,
   verifying the M1 restart requirement.
+
+### Observability baseline
+
+- Added JSON stdout logging without a new logging framework.
+- Added `X-Request-ID` generation, propagation, and response headers.
+- Added stable events for HTTP completion/failure, Run creation/cancellation,
+  database readiness, and Worker start/claim/complete/retry/fail/recover/stop.
+- Kept private inputs and generated content out of operational logs.
+- Added formatter/context and API correlation tests; all 12 tests pass.
+- Manually traced one request from `req_manual_demo` through Run creation and
+  all three Worker Tasks.

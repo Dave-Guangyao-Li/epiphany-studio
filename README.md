@@ -107,6 +107,10 @@ Workflow, durable Worker, retry/cancel/recovery paths, and Alembic migration are
 implemented. The full suite passes with 11 tests, and a restart demonstration
 confirms that completed Runs remain queryable from SQLite.
 
+The development observability baseline adds JSON stdout logs and an
+`X-Request-ID` correlation header. Durable Events remain the workflow trace;
+operational logs contain IDs and timing, never imported source text.
+
 ## License
 
 [MIT](LICENSE)
