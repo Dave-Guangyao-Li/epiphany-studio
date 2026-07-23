@@ -22,6 +22,8 @@ from epiphany.runtime.orchestrator import Orchestrator
 from epiphany.runtime.providers import FakeProvider, ModelProvider
 from epiphany.runtime.worker import Worker
 from epiphany.services import RunService
+from epiphany.source_api import router as source_router
+from epiphany.source_service import SourceService
 
 logger = logging.getLogger("epiphany.http")
 
@@ -35,6 +37,7 @@ def create_app(
     database = Database(resolved_settings.database_url)
     orchestrator = Orchestrator(task_max_attempts=resolved_settings.task_max_attempts)
     run_service = RunService(database, orchestrator)
+    source_service = SourceService(database)
     worker = Worker(
         database=database,
         orchestrator=orchestrator,
@@ -68,8 +71,10 @@ def create_app(
     app.state.database = database
     app.state.orchestrator = orchestrator
     app.state.run_service = run_service
+    app.state.source_service = source_service
     app.state.worker = worker
     app.include_router(router)
+    app.include_router(source_router)
 
     @app.middleware("http")
     async def log_request(request: Request, call_next: object) -> Response:

@@ -47,10 +47,10 @@
 
 ### M2.1：来源契约
 
-- [ ] `Source` / `SourceSegment` migration
-- [ ] 纯文字素材导入 API
-- [ ] 稳定分段与顺序
-- [ ] 来源引用数据结构与导入测试
+- [x] `Source` / `SourceSegment` migration
+- [x] 纯文字素材导入 API
+- [x] 稳定分段与顺序
+- [x] 来源引用数据结构与导入测试
 
 演示：导入一段播客素材，重启后仍能按顺序查询原文分段。
 

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "sqlite+aiosqlite:///./data/epiphany.db"
-    create_schema_on_start: bool = True
+    create_schema_on_start: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     worker_enabled: bool = True
     worker_poll_interval_seconds: float = Field(default=0.25, gt=0)

@@ -111,6 +111,11 @@ The development observability baseline adds JSON stdout logs and an
 `X-Request-ID` correlation header. Durable Events remain the workflow trace;
 operational logs contain IDs and timing, never imported source text.
 
+M2.1 adds the first product-domain behavior: plain text can be imported as a
+local `Source`, deterministically split into ordered `SourceSegment` records,
+deduplicated on retry, and queried again after restart. No source content is
+sent to a model in this slice.
+
 ## License
 
 [MIT](LICENSE)

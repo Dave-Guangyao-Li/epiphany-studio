@@ -77,7 +77,13 @@ class Task(TimestampMixin, Base):
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     input_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    output_artifact_id: Mapped[str | None] = mapped_column(ForeignKey("artifacts.id"))
+    output_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "artifacts.id",
+            use_alter=True,
+            name="fk_tasks_output_artifact_id",
+        )
+    )
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
     lease_token: Mapped[str | None] = mapped_column(String(64))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -126,3 +132,51 @@ class Artifact(Base):
     )
 
     run: Mapped[Run] = relationship(back_populates="artifacts", foreign_keys=[run_id])
+
+
+class Source(TimestampMixin, Base):
+    __tablename__ = "sources"
+    __table_args__ = (
+        UniqueConstraint("content_sha256", name="uq_sources_content_sha256"),
+        Index("ix_sources_created_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    content_text: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    char_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+    segments: Mapped[list[SourceSegment]] = relationship(
+        back_populates="source",
+        cascade="all, delete-orphan",
+        order_by="SourceSegment.position",
+    )
+
+
+class SourceSegment(Base):
+    __tablename__ = "source_segments"
+    __table_args__ = (
+        UniqueConstraint("source_id", "position", name="uq_source_segments_position"),
+        Index("ix_source_segments_source_id", "source_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    char_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    char_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+
+    source: Mapped[Source] = relationship(back_populates="segments")

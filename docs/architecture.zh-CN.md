@@ -144,11 +144,18 @@ Subagent 是一个受约束的 Child Task，而不是独立微服务：
 
 ### 领域对象
 
-- `projects`
+- `projects`（M3 前补充）
 - `sources`
+  - 规范化全文、SHA-256、类型、metadata、字符数
 - `source_segments`
+  - 稳定片段 ID、顺序、原文、字符区间、SHA-256
 - `artifacts`
 - `memory_candidates`
+
+M2.1 使用规范化正文 hash 生成稳定 Source ID，使用 Source hash、片段顺序
+和片段 hash 生成稳定 Segment ID。唯一约束保证重复或并发重试不会生成
+第二份 Source。列表 API 只返回摘要，详情 API 返回有序片段，不直接返回
+整篇 `content_text`。
 
 ## 7. 状态机
 
@@ -190,6 +197,10 @@ Worker 循环：
 
 进程启动时将已过期的 `running` Task 重新排队。后续如果需要多 Worker，
 再迁移 PostgreSQL，不在 SQLite 上模拟分布式队列。
+
+Alembic 是数据库 schema 的唯一变更入口。正常应用启动不得调用
+`metadata.create_all()` 自动补表，否则会出现“表已经存在但 migration
+版本未前进”的 schema drift。`create_all()` 只用于隔离的临时测试库。
 
 ## 9. 可靠性基线
 

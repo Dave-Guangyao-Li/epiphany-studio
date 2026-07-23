@@ -9,6 +9,8 @@ a useful end-to-end workflow before generality, scale, or framework adoption.
 
 1. Keep the workflow understandable in ordinary application code.
 2. Treat the database as the source of truth; SSE and in-memory state are views.
+   Alembic is the source of truth for schema changes; application startup must
+   not silently apply `metadata.create_all()` in normal development or runtime.
 3. Keep model planning separate from deterministic scheduling.
 4. Every derived fact, quote, or memory must retain source-segment references.
 5. Agents submit candidate artifacts. They do not silently overwrite approved

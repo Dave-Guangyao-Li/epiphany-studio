@@ -23,6 +23,10 @@ LOG_FIELDS = (
     "task_kind",
     "attempt",
     "artifact_id",
+    "source_id",
+    "source_type",
+    "char_count",
+    "segment_count",
     "error_code",
     "recovered_count",
 )
@@ -65,12 +69,17 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging(level: str) -> None:
-    root = logging.getLogger()
+    application_logger = logging.getLogger("epiphany")
     resolved_level = getattr(logging, level.upper(), logging.INFO)
-    root.setLevel(resolved_level)
+    application_logger.setLevel(resolved_level)
+    application_logger.propagate = False
 
     existing = next(
-        (handler for handler in root.handlers if getattr(handler, "_epiphany_json_handler", False)),
+        (
+            handler
+            for handler in application_logger.handlers
+            if getattr(handler, "_epiphany_json_handler", False)
+        ),
         None,
     )
     if existing is not None:
@@ -82,4 +91,4 @@ def configure_logging(level: str) -> None:
     handler.setFormatter(JsonFormatter())
     handler.addFilter(RequestContextFilter())
     handler._epiphany_json_handler = True
-    root.addHandler(handler)
+    application_logger.addHandler(handler)

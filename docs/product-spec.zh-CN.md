@@ -37,6 +37,17 @@ Epiphany Studio 是一个面向个人创作者的 AI 素材与表达工作台。
 事实、原话、事件和记忆候选必须包含 `source_segment_id`。用户可以从
 生成结果回到原文或录音时间戳。
 
+MVP 文字来源契约：
+
+- `Source` 保存本地规范化全文、内容 hash、类型和非敏感 metadata；
+- `SourceSegment` 保存稳定 ID、顺序、原文、字符起止位置和片段 hash；
+- `SourceReference` 只包含 `source_id` 和 `source_segment_id`，不允许
+  Agent 把无来源文本混入引用对象；
+- 换行统一为 `\n`，Unicode 统一为 NFC，去掉全文首尾空白；
+- 优先按段落切分，超长段落在标点或空格边界继续切分；
+- 完全相同的规范化正文视为同一 Source，重复或并发导入不得产生副本；
+- 原始全文和片段只存本地数据库，不写入运行日志。
+
 ### 3.2 Human-led
 
 系统生成候选素材、问题和草稿；用户负责确认、修正、补充和最终采用。

@@ -33,9 +33,9 @@
 
 ### Next
 
-Begin M2.1 with `Source` / `SourceSegment` persistence and plain-text import.
-Keep M2.1 and M2.2 on the Fake Provider until source, citation, and fan-out/fan-in
-contracts are stable; only then add the real OpenAI Provider in M2.3.
+Begin M2.2 with strict Timeline/Theme output schemas and Fake Provider fixtures,
+then add one-level parallel fan-out/fan-in. Do not add the real OpenAI Provider
+until the citation validator rejects invalid references deterministically.
 
 ### M1 implementation
 
@@ -68,3 +68,24 @@ contracts are stable; only then add the real OpenAI Provider in M2.3.
 - Added formatter/context and API correlation tests; all 12 tests pass.
 - Manually traced one request from `req_manual_demo` through Run creation and
   all three Worker Tasks.
+
+### M2.1 source contract
+
+- Added Alembic revision `0002_source_contract` for local `sources` and
+  `source_segments`.
+- Added deterministic Unicode/newline normalization, paragraph segmentation,
+  bounded long-segment splitting, exact character offsets, and content hashes.
+- Added stable Source/Segment IDs and unique constraints for idempotent retries.
+- Added concurrent-import conflict recovery.
+- Added `POST /sources`, `GET /sources`, and `GET /sources/{source_id}`.
+- Added strict `SourceReference` with only `source_id` and
+  `source_segment_id`.
+- Added `source.imported` and `source.import.deduplicated` logs containing
+  identifiers and counts but no source text.
+- Found and repaired a development schema drift: application `create_all()` had
+  created the new tables before Alembic advanced. Normal startup now leaves
+  schema changes exclusively to Alembic; `create_all()` is test-only.
+- Migration upgrade/downgrade, `alembic check`, Ruff, formatting, and all 21
+  tests pass.
+- Manual API verification imported two ordered segments, returned the same IDs
+  on a duplicate import, and queried them from a fresh application instance.
