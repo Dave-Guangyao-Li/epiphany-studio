@@ -30,7 +30,13 @@ a useful end-to-end workflow before generality, scale, or framework adoption.
 
 ## Development workflow
 
-- Update the relevant spec or ADR when behavior or architecture changes.
+- Work in small, demonstrable vertical slices that move the documented MVP
+  forward. Do not insert an unplanned platform or UI detour between milestones.
+- Update `README.md`, the roadmap, the development log, and any affected spec or
+  ADR in the same commit as the behavior they describe.
+- Mark a roadmap item complete only after its migration, tests, and manual
+  demonstration have passed.
 - Add tests for state transitions, retry behavior, cancellation, and recovery.
 - Prefer structured model outputs with strict validation.
-- Keep commits small and describe user-visible or architectural impact.
+- Keep each commit focused on one behavior and describe its user-visible or
+  architectural impact.

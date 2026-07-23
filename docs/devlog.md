@@ -23,12 +23,16 @@
 - ChatGPT subscription credits are not treated as application API credits.
 - Personal source material, local databases, recordings, and API keys stay out
   of Git.
+- Prioritize the documented MVP sequence over an intermediate UI or platform
+  detour. The product UI remains M5.
+- Every verified slice updates its affected documentation in the same focused
+  commit before the next slice starts.
 
 ### Next
 
-Begin M2 with source ingestion and source-segment references. Keep the first
-slice on the Fake Provider until the source and citation contracts are stable,
-then add the real OpenAI Provider.
+Begin M2.1 with `Source` / `SourceSegment` persistence and plain-text import.
+Keep M2.1 and M2.2 on the Fake Provider until source, citation, and fan-out/fan-in
+contracts are stable; only then add the real OpenAI Provider in M2.3.
 
 ### M1 implementation
 
