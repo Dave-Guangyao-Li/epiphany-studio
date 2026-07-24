@@ -94,6 +94,8 @@ Official references:
 
 ## Repository documents
 
+- [Learning and practice guide](docs/learning/README.zh-CN.md) — beginner-friendly
+  explanations, tests, local debugging, and a chapter for every completed slice
 - [Product specification](docs/product-spec.zh-CN.md)
 - [Architecture](docs/architecture.zh-CN.md)
 - [MVP roadmap](docs/roadmap.zh-CN.md)

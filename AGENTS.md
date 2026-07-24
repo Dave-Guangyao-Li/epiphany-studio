@@ -34,8 +34,13 @@ a useful end-to-end workflow before generality, scale, or framework adoption.
 
 - Work in small, demonstrable vertical slices that move the documented MVP
   forward. Do not insert an unplanned platform or UI detour between milestones.
-- Update `README.md`, the roadmap, the development log, and any affected spec or
-  ADR in the same commit as the behavior they describe.
+- Update `README.md`, the roadmap, the development log, the affected chapter in
+  `docs/learning/`, and any affected spec or ADR in the same commit as the
+  behavior they describe.
+- Every completed slice must leave a beginner-readable learning record covering
+  the problem, analogy, delivered behavior, module map, technical concepts,
+  automated tests, local manual verification, debugging path, limitations, and
+  commit. Use `docs/learning/entry-template.zh-CN.md` for a new chapter.
 - Mark a roadmap item complete only after its migration, tests, and manual
   demonstration have passed.
 - Every backend slice must emit structured operational logs with stable event

@@ -1,5 +1,22 @@
 # Development Log
 
+## 2026-07-24
+
+### Learning practice guide
+
+- Added a chapter-based `docs/learning/` guide so the project remains useful as
+  a learning record rather than only an AI-authored codebase.
+- Separated the guide into an index, beginner glossary, local
+  run/test/debugging guide, milestone chapters, and a reusable entry template
+  to avoid one oversized document.
+- Backfilled M0, M1, observability, M2.1, and M2.2 with plain-language
+  motivation, analogies, module maps, technical concepts, tests, manual
+  verification, debugging paths, limitations, and commit references.
+- Added fan-out/fan-in explanations that distinguish task branching from actual
+  concurrency and deterministic result merging from an additional model call.
+- Updated repository guidance so every future implementation slice must update
+  its learning chapter in the same commit.
+
 ## 2026-07-23
 
 ### Project direction
