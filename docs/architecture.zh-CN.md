@@ -144,11 +144,18 @@ Subagent 是一个受约束的 Child Task，而不是独立微服务：
 
 ### 领域对象
 
-- `projects`
+- `projects`（M3 前补充）
 - `sources`
+  - 规范化全文、SHA-256、类型、metadata、字符数
 - `source_segments`
+  - 稳定片段 ID、顺序、原文、字符区间、SHA-256
 - `artifacts`
 - `memory_candidates`
+
+M2.1 使用规范化正文 hash 生成稳定 Source ID，使用 Source hash、片段顺序
+和片段 hash 生成稳定 Segment ID。唯一约束保证重复或并发重试不会生成
+第二份 Source。列表 API 只返回摘要，详情 API 返回有序片段，不直接返回
+整篇 `content_text`。
 
 ## 7. 状态机
 
@@ -178,18 +185,25 @@ MVP 只有一个 Worker 进程，但任务存在 SQLite 中，不只存在内存
 
 Worker 循环：
 
-1. 在事务中领取一个 `queued` Task。
-2. 写入 `lease_token` 和过期时间。
-3. 运行模型调用或确定性 Handler。
-4. 持久化 Artifact。
-5. 使用当前 lease/fencing token 提交终态。
-6. 追加 Event。
-7. 触发 Orchestrator 判断下一个可运行步骤。
+1. 依次在短事务中领取最多两个 `queued` Task。
+2. 为每个 Task 写入独立的 `lease_token` 和过期时间。
+3. 使用 `asyncio.gather` 并行运行模型调用或确定性 Handler。
+4. 严格校验结构化输出和本次 Task 允许的 Source 引用。
+5. 持久化幂等 Artifact。
+6. 使用当前 lease/fencing token 提交终态并追加 Event。
+7. 触发 Orchestrator 判断是否仍需等待，或执行确定性 fan-in。
 
-同一进程内通过 `asyncio.Semaphore(2)` 控制并发。
+同一进程内并发上限固定为二。M2.2 的单 Worker 在一个短的 finalization
+临界区中串行提交 Child 终态，避免两个同时完成的 Child 都看见过期的
+兄弟状态；耗时的 Provider 调用仍然真实并发。未来多 Worker 需要借助
+PostgreSQL 行锁或等价的数据库协调后再解除这个单进程约束。
 
 进程启动时将已过期的 `running` Task 重新排队。后续如果需要多 Worker，
 再迁移 PostgreSQL，不在 SQLite 上模拟分布式队列。
+
+Alembic 是数据库 schema 的唯一变更入口。正常应用启动不得调用
+`metadata.create_all()` 自动补表，否则会出现“表已经存在但 migration
+版本未前进”的 schema drift。`create_all()` 只用于隔离的临时测试库。
 
 ## 9. 可靠性基线
 
@@ -249,7 +263,36 @@ GET  /runs/{id}/events/stream
 SSE 用于低成本实时显示。客户端断线后先从数据库按 `sequence` 补事件，
 再连接实时流。SSE 不是状态真相。
 
-## 12. 升级触发条件
+## 12. 可观测性与调试
+
+系统区分两种 Trace：
+
+- 数据库中的 append-only Event 是持久化产品执行轨迹，用于回答某个 Run
+  经过了哪些 Task、状态和 Artifact；
+- stdout JSON 日志是运行诊断轨迹，用于回答请求耗时、Worker 领取、重试、
+  失败和恢复发生在何时。
+
+HTTP 接受并返回 `X-Request-ID`。同一请求内的服务日志继承该 ID；异步
+Worker 日志使用 `run_id`、`task_id` 和 `attempt` 关联。日志只记录标识、
+状态、错误代码和耗时，不记录素材正文、prompt、模型输出、密钥或录音。
+
+未来 Web UI 必须保留后端返回的 request ID，在错误界面展示它，并通过
+Run/Event API 呈现可回放状态。浏览器控制台不能成为唯一调试来源。
+
+每个纵向切片的完成条件都包括：
+
+- 正常与失败路径测试；
+- 稳定的日志 event 名称；
+- 可从 API 或持久化 Event 复现问题；
+- 必要的手工演示和文档同步。
+
+M2.2 的稳定事件包括 `workflow.fan_out.started`、
+`workflow.fan_in.waiting` 和 `workflow.fan_in.completed`。Child 失败时
+Event 还会记录 Manager 失败及兄弟 Task 的 `sibling_failed` 取消原因；
+stdout 对应 `worker.task.failed` 和迟到结果的
+`worker.task.stale_result`，均不包含素材正文或模型输出。
+
+## 13. 升级触发条件
 
 只有出现以下证据时才升级：
 

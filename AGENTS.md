@@ -9,6 +9,8 @@ a useful end-to-end workflow before generality, scale, or framework adoption.
 
 1. Keep the workflow understandable in ordinary application code.
 2. Treat the database as the source of truth; SSE and in-memory state are views.
+   Alembic is the source of truth for schema changes; application startup must
+   not silently apply `metadata.create_all()` in normal development or runtime.
 3. Keep model planning separate from deterministic scheduling.
 4. Every derived fact, quote, or memory must retain source-segment references.
 5. Agents submit candidate artifacts. They do not silently overwrite approved
@@ -30,7 +32,25 @@ a useful end-to-end workflow before generality, scale, or framework adoption.
 
 ## Development workflow
 
-- Update the relevant spec or ADR when behavior or architecture changes.
+- Work in small, demonstrable vertical slices that move the documented MVP
+  forward. Do not insert an unplanned platform or UI detour between milestones.
+- Update `README.md`, the roadmap, the development log, the affected chapter in
+  `docs/learning/`, and any affected spec or ADR in the same commit as the
+  behavior they describe.
+- Every completed slice must leave a beginner-readable learning record covering
+  the problem, analogy, delivered behavior, module map, technical concepts,
+  automated tests, local manual verification, debugging path, limitations, and
+  commit. Use `docs/learning/entry-template.zh-CN.md` for a new chapter.
+- Mark a roadmap item complete only after its migration, tests, and manual
+  demonstration have passed.
+- Every backend slice must emit structured operational logs with stable event
+  names and correlation IDs. Never log source text, prompts, model responses,
+  API keys, or other personal content.
+- Durable workflow Events explain product execution; stdout logs explain
+  operational behavior. Do not use one as a substitute for the other.
+- Every frontend slice must expose recoverable errors, preserve the backend
+  request ID, and provide enough state to reproduce a failed request.
 - Add tests for state transitions, retry behavior, cancellation, and recovery.
 - Prefer structured model outputs with strict validation.
-- Keep commits small and describe user-visible or architectural impact.
+- Keep each commit focused on one behavior and describe its user-visible or
+  architectural impact.
