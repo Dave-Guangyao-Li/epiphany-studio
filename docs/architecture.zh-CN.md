@@ -31,7 +31,7 @@ FastAPI
   +--> Local Artifact Store
   +--> Durable Worker Loop
           |
-          +--> OpenAI Provider
+          +--> Hosted Model Provider
           +--> Fake Provider
 ```
 
@@ -142,6 +142,24 @@ Subagent 是一个受约束的 Child Task，而不是独立微服务：
 - `payload`
 - `created_at`
 
+### `model_calls`
+
+- `id`
+- `run_id`
+- `task_id`
+- `attempt`
+- `provider`
+- `model`
+- `status`
+- `input_tokens`
+- `output_tokens`
+- `duration_ms`
+- `estimated_cost_micros`
+- `cost_currency`
+- `error_code`
+- `started_at`
+- `completed_at`
+
 ### 领域对象
 
 - `projects`（M3 前补充）
@@ -228,22 +246,26 @@ MVP 必须实现：
 
 ```python
 class ModelProvider(Protocol):
-    async def generate_structured(
-        self,
-        *,
-        task: AgentTask,
-        schema: type[BaseModel],
-    ) -> BaseModel: ...
+    name: str
+    model: str
+
+    async def generate(self, invocation: TaskInvocation) -> ProviderResult: ...
 ```
 
 首批实现：
 
-- `OpenAIProvider`：官方 SDK 和 Responses API；
-- `FakeProvider`：测试状态机和恢复，不产生 API 费用。
+- `FakeProvider`：测试状态机、恢复和调用记账，不联网、不产生 API 费用；
+- `DeepSeekProvider`（M2.3b）：首个真实托管模型适配器；
+- 其他厂商以后保持在同一契约后面，不让 Workflow 绑定某个 SDK。
 
-模型名、reasoning effort 和 `store` 均通过配置传入。默认
-`store=false`。这不是 Zero Data Retention 的替代，但能避免把响应作为
-应用状态保存到 API；本地数据库仍是产品状态来源。
+M2.3a 在调用 Provider 以前先写入一条 `ModelCall(status=started)`，并原子地
+增加 Run 调用数。完成后更新 tokens、耗时、估算费用、币种和错误码。唯一
+约束 `(task_id, attempt)` 防止同一次尝试重复记账；retry 是新 attempt，
+因此单独记账。单进程 Worker 使用短锁保护“检查预算 + 预留调用”，避免两个
+并发 Child 同时越过上限。
+
+真实模型的 Key、模型名、API 地址和数据保留选项通过配置传入。本地数据库
+仍是产品状态来源；不得在日志或 Event 中保存 prompt、响应正文或密钥。
 
 ## 11. API 和事件
 

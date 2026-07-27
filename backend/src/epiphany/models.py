@@ -58,6 +58,11 @@ class Run(TimestampMixin, Base):
         cascade="all, delete-orphan",
         foreign_keys="Artifact.run_id",
     )
+    model_calls: Mapped[list[ModelCall]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        foreign_keys="ModelCall.run_id",
+    )
 
 
 class Task(TimestampMixin, Base):
@@ -92,6 +97,41 @@ class Task(TimestampMixin, Base):
 
     run: Mapped[Run] = relationship(back_populates="tasks", foreign_keys=[run_id])
     parent_task: Mapped[Task | None] = relationship(remote_side=[id])
+    model_calls: Mapped[list[ModelCall]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+        foreign_keys="ModelCall.task_id",
+    )
+
+
+class ModelCall(Base):
+    __tablename__ = "model_calls"
+    __table_args__ = (
+        UniqueConstraint("task_id", "attempt", name="uq_model_calls_task_attempt"),
+        Index("ix_model_calls_run_id", "run_id"),
+        Index("ix_model_calls_task_id", "task_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: new_id("mcall"))
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(160), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    estimated_cost_micros: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    run: Mapped[Run] = relationship(back_populates="model_calls", foreign_keys=[run_id])
+    task: Mapped[Task] = relationship(back_populates="model_calls", foreign_keys=[task_id])
 
 
 class Event(Base):

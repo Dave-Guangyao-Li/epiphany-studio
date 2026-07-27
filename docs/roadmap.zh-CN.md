@@ -73,11 +73,26 @@ Source 导入走到三份 Artifact；非法引用故障注入会失败父任务�
 
 ### M2.3：真实模型 Provider
 
-- [ ] OpenAI Provider
+#### M2.3a：零费用调用基础设施
+
+- [x] 每次 Provider attempt 的持久化 `ModelCall`
+- [x] provider、model、tokens、延迟、估算费用与币种记录
+- [x] 真正调用 Provider 前执行单 Run 调用上限
+- [x] retry 与 timeout 分别记账
+- [x] Fake/Mock 正常、失败、超时与超限测试
+
+演示：继续使用 Fake Provider 完成双 Researcher，在 Run JSON 和 Events 中
+查看两条零 Token、零费用的调用记录；将上限设为 1 后，第二次调用会在进入
+Provider 以前失败。
+
+#### M2.3b：首个真实托管模型
+
+- [ ] DeepSeek OpenAI-compatible Provider
 - [ ] Timeline Researcher prompt
 - [ ] Theme Researcher prompt
-- [ ] 模型调用、tokens、延迟记录
-- [ ] 调用上限与结构化输出校验
+- [ ] HTTP/auth/rate-limit/overload 错误映射
+- [ ] 使用合成素材完成小额 live smoke test
+- [ ] 对真实返回继续执行结构化输出与引用校验
 
 演示：使用少量真实素材完成两个 Researcher，Trace 中可见调用与成本数据。
 

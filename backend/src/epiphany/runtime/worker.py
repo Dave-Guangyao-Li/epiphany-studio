@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 
 from sqlalchemy import select
 
@@ -11,9 +12,11 @@ from epiphany.events import append_event
 from epiphany.ids import new_id
 from epiphany.models import Artifact, Run, Task
 from epiphany.research_schemas import validate_research_output
+from epiphany.runtime.model_call_ledger import ModelCallLeaseLost, ModelCallLedger
 from epiphany.runtime.orchestrator import Orchestrator
 from epiphany.runtime.providers import (
     ModelProvider,
+    ProviderTimeoutError,
     RetryableProviderError,
     TaskInvocation,
 )
@@ -42,6 +45,7 @@ class Worker:
         timeout_seconds: float,
         poll_interval_seconds: float,
         max_concurrency: int = 2,
+        max_model_calls_per_run: int = 6,
     ) -> None:
         self.database = database
         self.orchestrator = orchestrator
@@ -51,6 +55,18 @@ class Worker:
         self.poll_interval_seconds = poll_interval_seconds
         self.max_concurrency = max_concurrency
         self._finalization_lock = asyncio.Lock()
+        self.model_call_ledger = ModelCallLedger(
+            database,
+            max_calls_per_run=max_model_calls_per_run,
+        )
+
+    @property
+    def max_model_calls_per_run(self) -> int:
+        return self.model_call_ledger.max_calls_per_run
+
+    @max_model_calls_per_run.setter
+    def max_model_calls_per_run(self, value: int) -> None:
+        self.model_call_ledger.max_calls_per_run = value
 
     async def claim_next(self) -> TaskInvocation | None:
         async with self.database.sessions() as session, session.begin():
@@ -201,7 +217,6 @@ class Worker:
             task.output_artifact_id = artifact.id
             task.lease_token = None
             task.lease_expires_at = None
-            run.model_call_count += 1
             await append_event(
                 session,
                 run_id=run.id,
@@ -334,6 +349,12 @@ class Worker:
 
                 task.lease_token = None
                 task.lease_expires_at = None
+                await self.model_call_ledger.abandon_expired(
+                    session,
+                    task=task,
+                    run=run,
+                    now=now,
+                )
                 if run.status == RunStatus.CANCELLED:
                     validate_task_transition(task.status, TaskStatus.CANCELLED)
                     task.status = TaskStatus.CANCELLED
@@ -382,10 +403,66 @@ class Worker:
 
     async def _execute_invocation(self, invocation: TaskInvocation) -> None:
         try:
+            model_call_id = await self.model_call_ledger.reserve(
+                invocation,
+                provider=self.provider.name,
+                model=self.provider.model,
+            )
+        except ModelCallLeaseLost:
+            logger.warning(
+                "Worker rejected stale task before provider call",
+                extra={
+                    "event": "worker.task.stale_result",
+                    "run_id": invocation.run_id,
+                    "task_id": invocation.task_id,
+                    "task_kind": invocation.kind,
+                    "attempt": invocation.attempt,
+                },
+            )
+            return
+        except Exception as error:
+            await self.fail(invocation, error)
+            return
+
+        started_at = perf_counter()
+        try:
             result = await asyncio.wait_for(
                 self.provider.generate(invocation),
                 timeout=self.timeout_seconds,
             )
+        except TimeoutError:
+            duration_ms = max(0, round((perf_counter() - started_at) * 1000))
+            error = ProviderTimeoutError(f"provider call exceeded {self.timeout_seconds} seconds")
+            await self.model_call_ledger.finish(
+                model_call_id,
+                invocation,
+                status="timed_out",
+                duration_ms=duration_ms,
+                error_code=error.code,
+            )
+            await self.fail(invocation, error)
+            return
+        except Exception as error:
+            duration_ms = max(0, round((perf_counter() - started_at) * 1000))
+            await self.model_call_ledger.finish(
+                model_call_id,
+                invocation,
+                status="failed",
+                duration_ms=duration_ms,
+                error_code=getattr(error, "code", "provider_error"),
+            )
+            await self.fail(invocation, error)
+            return
+
+        duration_ms = max(0, round((perf_counter() - started_at) * 1000))
+        await self.model_call_ledger.finish(
+            model_call_id,
+            invocation,
+            status="succeeded",
+            duration_ms=duration_ms,
+            result=result,
+        )
+        try:
             validated_content = validate_research_output(
                 task_kind=invocation.kind,
                 task_input=invocation.input_json,
@@ -407,11 +484,6 @@ class Worker:
                     "task_kind": invocation.kind,
                     "attempt": invocation.attempt,
                 },
-            )
-        except TimeoutError as error:
-            await self.fail(
-                invocation,
-                RetryableProviderError(f"task timed out: {error}"),
             )
         except Exception as error:  # Worker boundary persists the error before continuing.
             await self.fail(invocation, error)

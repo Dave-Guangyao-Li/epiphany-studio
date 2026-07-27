@@ -100,7 +100,7 @@ Subagent 对话。
 - 等待用户与恢复；
 - 运行事件和错误展示；
 - Markdown 导出；
-- OpenAI Provider 与测试用 Fake Provider。
+- 可替换的托管模型 Provider（首个计划接入 DeepSeek）与测试用 Fake Provider。
 
 ### 暂不包含
 

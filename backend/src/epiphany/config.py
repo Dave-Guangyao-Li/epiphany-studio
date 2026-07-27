@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     worker_lease_seconds: int = Field(default=30, gt=0)
     task_timeout_seconds: float = Field(default=30, gt=0)
     task_max_attempts: int = Field(default=2, ge=1, le=5)
+    model_max_calls_per_run: int = Field(default=6, ge=1, le=100)
 
 
 def ensure_sqlite_parent(database_url: str) -> None:
