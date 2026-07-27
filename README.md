@@ -61,7 +61,7 @@ The initial implementation will use:
 - Python 3.12;
 - FastAPI and Pydantic;
 - SQLite in WAL mode;
-- the official OpenAI Python SDK and Responses API;
+- a vendor-neutral model Provider, with DeepSeek planned as the first live adapter;
 - one in-process durable worker loop;
 - `asyncio` for bounded fan-out/fan-in;
 - Server-Sent Events for live progress;
@@ -75,22 +75,24 @@ orchestration and reliability concepts during validation.
 
 ## Model access and cost
 
-ChatGPT subscription usage and OpenAI API usage are separate. This project uses
-an OpenAI Platform API key, which is billed through the API account at standard
-API rates.
+Consumer chat subscriptions and application API usage are separate products.
+When a live Provider is enabled, the backend uses that provider's API key and
+the provider bills the API account according to its own token prices.
 
-The model will be configurable when the real provider is added in M2. M1 uses a
-deterministic Fake Provider and needs no API key. Per-run call limits,
-parallelism, token usage, and estimated cost will be recorded once real model
-calls are introduced.
+The current default is a deterministic Fake Provider and needs no API key.
+M2.3a persists one `ModelCall` record per attempted Provider call, including
+status, attempt, provider, model, latency, input/output tokens, estimated cost,
+and currency. It enforces the per-Run call limit before entering the Provider.
+The Fake Provider reports zero tokens and zero cost, so this accounting and
+failure behavior can be tested without a network request.
 
 No key or personal source material belongs in Git.
 
 Official references:
 
-- [OpenAI authentication and API billing](https://learn.chatgpt.com/docs/auth#sign-in-with-an-api-key)
-- [OpenAI current model guidance](https://developers.openai.com/api/docs/guides/latest-model)
-- [Responses API](https://developers.openai.com/api/docs/guides/migrate-to-responses)
+- [OpenAI: ChatGPT and API billing are separate](https://help.openai.com/en/articles/9039756-managing-billing-settings-on-chatgpt-web-and-platform)
+- [DeepSeek API quick start](https://api-docs.deepseek.com/quick_start/pricing-details-usd/)
+- [DeepSeek model pricing](https://api-docs.deepseek.com/quick_start/pricing/)
 
 ## Repository documents
 
@@ -126,6 +128,13 @@ candidates must exist verbatim in the cited segment. The Manager waits for both
 results and creates one deterministic research bundle. Invalid citations fail
 the parent, cancel the sibling, and fence late writes. The full suite passes
 with 28 tests.
+
+M2.3a adds the zero-network model-call boundary before any paid integration.
+Every Fake Provider attempt now reserves a durable call record, is subject to a
+six-call default Run budget, and records terminal status, timing, tokens, and
+estimated cost. Retry attempts are counted independently; timeouts and
+budget-limit failures remain visible after restart. A new Alembic migration
+adds the trace table, and the full suite passes with 32 tests.
 
 ## License
 

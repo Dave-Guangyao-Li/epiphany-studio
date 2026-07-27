@@ -38,6 +38,25 @@ class ArtifactView(BaseModel):
     created_at: datetime
 
 
+class ModelCallView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    task_id: str
+    attempt: int
+    provider: str
+    model: str
+    status: str
+    input_tokens: int
+    output_tokens: int
+    duration_ms: int | None
+    estimated_cost_micros: int
+    cost_currency: str
+    error_code: str | None
+    started_at: datetime
+    completed_at: datetime | None
+
+
 class RunView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -54,6 +73,7 @@ class RunView(BaseModel):
     updated_at: datetime
     tasks: list[TaskView]
     artifacts: list[ArtifactView]
+    model_calls: list[ModelCallView]
 
 
 class EventView(BaseModel):

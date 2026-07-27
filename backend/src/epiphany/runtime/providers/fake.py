@@ -12,6 +12,9 @@ from epiphany.runtime.providers.base import (
 class FakeProvider:
     """Deterministic provider used to exercise runtime behavior without an API key."""
 
+    name = "fake"
+    model = "fake-v1"
+
     async def generate(self, invocation: TaskInvocation) -> ProviderResult:
         configured_failures = self._configured_failures(invocation.input_json)
         if invocation.attempt <= configured_failures:
@@ -31,7 +34,7 @@ class FakeProvider:
         except KeyError as error:
             raise ValueError(f"unsupported fake task kind: {invocation.kind}") from error
 
-        return ProviderResult(content=content, provider="fake", model="fake-v1")
+        return ProviderResult(content=content, provider=self.name, model=self.model)
 
     @staticmethod
     def _configured_failures(input_json: dict[str, Any]) -> int:

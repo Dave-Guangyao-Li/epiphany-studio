@@ -1,5 +1,28 @@
 # Development Log
 
+## 2026-07-27
+
+### M2.3a zero-network model call trace
+
+- Added durable `model_calls` with one record per Task attempt.
+- Moved `model_call_count` to call reservation so failed and timed-out attempts
+  are counted instead of only successful Tasks.
+- Added provider/model, input/output tokens, latency, estimated cost, currency,
+  status, and error code to the Run trace.
+- Added an atomic single-process budget boundary before Provider execution,
+  controlled by `EPIPHANY_MODEL_MAX_CALLS_PER_RUN`.
+- Added retry and timeout accounting plus abandoned-call handling during lease
+  recovery.
+- Kept source text, prompts, model responses, and API keys out of Events and
+  operational logs.
+- Added Alembic revision `0003_model_call_trace`.
+- Added Fake Provider tests for successful usage, retries, timeouts, and call
+  limit rejection before an extra invocation.
+- Ruff checks, formatting, all 32 tests, Alembic upgrade/check, and migration
+  downgrade/upgrade pass without any network or paid model call.
+- Split M2.3 into M2.3a accounting infrastructure and M2.3b live DeepSeek
+  integration so the first paid smoke test has an existing budget and trace.
+
 ## 2026-07-24
 
 ### Learning practice guide

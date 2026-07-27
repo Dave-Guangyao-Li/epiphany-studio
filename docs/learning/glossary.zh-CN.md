@@ -198,8 +198,9 @@ Theme 开始 ────┘
 
 把“需要生成一个结构化结果”转换成具体模型调用的适配层。
 
-当前 `FakeProvider` 只返回确定性测试数据，不联网、不收费。M2.3 才会增加
-真实 OpenAI Provider。
+当前 `FakeProvider` 只返回确定性测试数据，不联网、不收费。M2.3a 已经让
+Fake 调用经过和真实模型相同的预算、耗时与用量记录边界；M2.3b 再增加
+真实 DeepSeek Provider 和网络请求。
 
 ### Lease
 

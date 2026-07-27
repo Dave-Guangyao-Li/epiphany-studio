@@ -266,7 +266,17 @@ uvicorn epiphany.main:app --reload --port 8001
 确认使用了 `--reload`，并确认当前终端启用的是
 `backend/.venv`。
 
-### 为什么没有调用 OpenAI
+### 为什么还没有调用真实模型
 
 这是当前阶段的设计。M2.2 先用 Fake Provider 证明编排、并发、引用和失败
-传播正确；M2.3 才在同一契约后面接真实模型。
+传播正确；M2.3a 再用 Fake Provider 证明预算、retry、timeout、tokens、
+延迟和费用记录正确。M2.3b 才会在同一契约后面接 DeepSeek。
+
+检查零费用模型调用 Trace：
+
+```bash
+pytest tests/test_model_call_trace.py -vv
+```
+
+成功路径的 Run JSON 会出现 `model_calls`。Fake 调用的 Token 和费用是 0，
+但 status、attempt 和 duration 会真实记录。

@@ -337,5 +337,5 @@ alembic check
 - 没有 Interview Scaffold；
 - 没有前端 Trace UI。
 
-下一步 M2.3 是在保持这些已验证运行语义不变的前提下，接入真实 OpenAI
+下一步 M2.3 是在保持这些已验证运行语义不变的前提下，接入真实托管模型
 Provider，并增加调用预算、tokens、延迟和成本记录。

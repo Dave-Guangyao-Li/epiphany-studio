@@ -12,7 +12,7 @@ from epiphany.events import append_event
 from epiphany.models import Event, Run, Source, Task
 from epiphany.research_schemas import EpisodeResearchPayload
 from epiphany.runtime.orchestrator import Orchestrator
-from epiphany.schemas import ArtifactView, EventView, RunView, TaskView
+from epiphany.schemas import ArtifactView, EventView, ModelCallView, RunView, TaskView
 from epiphany.state_machine import (
     RunStatus,
     TaskStatus,
@@ -132,7 +132,11 @@ class RunService:
             statement = (
                 select(Run)
                 .where(Run.id == run_id)
-                .options(selectinload(Run.tasks), selectinload(Run.artifacts))
+                .options(
+                    selectinload(Run.tasks),
+                    selectinload(Run.artifacts),
+                    selectinload(Run.model_calls),
+                )
             )
             run = (await session.execute(statement)).scalar_one_or_none()
             if run is None:
@@ -140,6 +144,10 @@ class RunService:
 
             tasks = sorted(run.tasks, key=lambda item: (item.created_at, item.id))
             artifacts = sorted(run.artifacts, key=lambda item: (item.created_at, item.id))
+            model_calls = sorted(
+                run.model_calls,
+                key=lambda item: (item.started_at, item.id),
+            )
             return RunView(
                 id=run.id,
                 workflow_type=run.workflow_type,
@@ -154,6 +162,9 @@ class RunService:
                 updated_at=run.updated_at,
                 tasks=[TaskView.model_validate(task) for task in tasks],
                 artifacts=[ArtifactView.model_validate(artifact) for artifact in artifacts],
+                model_calls=[
+                    ModelCallView.model_validate(model_call) for model_call in model_calls
+                ],
             )
 
     async def list_events(self, run_id: str, *, after: int = 0) -> list[EventView]:

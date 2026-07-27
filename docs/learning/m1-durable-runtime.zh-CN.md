@@ -138,7 +138,7 @@ Worker 不把整个 Workflow 藏在内存里，因此进程重启后可以从数
 
 负责“给定 Task 输入，产生结构化输出”。
 
-M1 只有 Fake Provider，但定义了统一接口。以后 OpenAI Provider 可以替换
+M1 只有 Fake Provider，但定义了统一接口。以后托管模型 Provider 可以替换
 生成方式，而不用重写 Run/Task/Worker。
 
 这是常见的依赖反转：业务运行时依赖抽象契约，不直接绑定外部模型厂商。

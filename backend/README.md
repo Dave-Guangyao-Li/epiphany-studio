@@ -1,8 +1,9 @@
 # Epiphany Studio Backend
 
 The backend currently implements a single-user, single-machine durable task
-runner plus the M2.2 parallel research workflow. It intentionally uses a
-deterministic `FakeProvider`; no OpenAI key or paid model call is needed.
+runner plus the M2.2 parallel research workflow and the M2.3a model-call trace.
+It intentionally uses a deterministic `FakeProvider`; no API key, network
+request, or paid model call is needed.
 
 The first workflow is deliberately small:
 
@@ -24,8 +25,9 @@ research_manager
 
 Each step is a persisted Task. The worker claims it with a lease, writes an
 append-only Event, commits an idempotent Artifact, and asks the deterministic
-Orchestrator what may run next. `model_call_count` counts provider invocations in
-M1, even though the provider is fake and makes no network or paid model call.
+Orchestrator what may run next. Before entering the Provider, the Worker reserves
+a durable `ModelCall`. The Fake Provider exercises the exact same accounting
+boundary as a future hosted model but reports zero tokens and zero cost.
 
 ## Local setup
 
@@ -155,6 +157,34 @@ The failure-injection test returns an out-of-scope Source reference from one
 child while delaying the other. It verifies that the child and Manager fail,
 the sibling is cancelled, the late result is rejected, and no Artifact is
 written.
+
+## M2.3a zero-network model-call trace
+
+Every attempted Provider invocation is now visible in the Run response under
+`model_calls`. Each record includes:
+
+- Task ID and attempt number;
+- Provider and model;
+- `started`, `succeeded`, `failed`, or `timed_out` status;
+- input/output tokens;
+- duration in milliseconds;
+- estimated cost in millionths of the named currency;
+- a stable error code without prompt or response content.
+
+`EPIPHANY_MODEL_MAX_CALLS_PER_RUN` defaults to six. The Worker reserves a call
+before invoking the Provider, so a limit failure does not accidentally send an
+extra paid request. Retries consume another call because a real provider may
+charge for every attempt.
+
+Focused zero-cost verification:
+
+```bash
+pytest tests/test_model_call_trace.py -vv
+```
+
+This test module uses only Fake Providers. It verifies successful usage
+accounting, retry accounting, timeout traces, and rejection before an
+over-budget invocation.
 
 ## Debugging and logs
 
