@@ -2,7 +2,7 @@
 
 状态：Draft
 
-日期：2026-07-23
+日期：2026-07-28
 
 ## 1. 产品命题
 
@@ -82,7 +82,8 @@ Subagent 对话。
 5. 两个只读 Subagent 并行工作：
    - Timeline Researcher：事件、阶段、时间线；
    - Theme Researcher：主题、认知变化、原话和细节。
-6. Manager 合并结果，生成素材缺口和采访脚手架。
+6. Manager 确定性合并研究结果，随后由一个串行根 Interviewer 生成素材缺口
+   和采访脚手架。
 7. Workflow 进入 `waiting_for_user`。
 8. 用户输入新的口述转录或手动补充。
 9. Editor 生成口播稿和 Show Notes。
@@ -158,8 +159,37 @@ live smoke 开始验证。
 
 ### Interviewer
 
-MVP 中先作为确定性 Workflow 的一次模型调用，而不是独立并发 Agent。
-它根据已合并的证据和素材缺口生成脚手架。
+MVP 中作为确定性 Workflow 排队的一次模型调用，而不是独立并发 Agent。
+它根据已合并的证据和素材缺口生成脚手架。两个 Researcher fan-in 完成后，
+系统才创建 `parent_task_id=None` 的 Interviewer 根 Task；它不会成为第三个
+Child，也不会与研究调用并发。
+
+### M2.4 采访脚手架契约与导出
+
+- 新建 `episode-research` Run 使用 workflow v2；一次成功运行固定包含四个
+  Task、四个 Artifact 和三次 ModelCall；
+- v1 在途 Run 保持 M2.2 语义，在确定性 fan-in 后以研究 Bundle 成功结束，
+  无需 `topic` 或 Interviewer；
+- Interviewer 输入只包含已校验的 Timeline/Theme 研究结果、主题、研究
+  Bundle ID，以及由这些结果收集的允许引用；
+- Prompt 把研究文字当作不可信数据，并要求模型只能复制
+  `allowed_source_refs` 中的引用；
+- 输出采用禁止额外字段的 strict schema；标题必须逐字匹配主题，episode
+  intent、开场、收束、章节、已知背景、过渡、问题和素材缺口都必须
+  source-grounded；
+- 任一引用超出研究 Bundle、结构不完整或没有对应 validator 时，Worker
+  在持久化采访脚手架前拒绝输出；
+- 若 Interviewer 失败，已经成功的两个研究 Artifact 和确定性研究 Bundle
+  继续保留，失败的 Run 不会伪装成可导出的成功结果；
+- 单 Run 调用预算设为二时，第三次 Interviewer 调用在进入 Provider 前以
+  `model_call_limit_exceeded` 被拒绝，不产生第三条 ModelCall；
+- `GET /runs/{run_id}/exports/interview-scaffold.md` 只导出已成功 Run 的采访
+  脚手架。Markdown 由结构化 Artifact 确定性生成，保留来源标签，并转义模型
+  文本中的 Markdown 控制字符和原始 HTML；运行 metadata 不进入正文。
+
+M2.4 复用现有 Run、Task、Artifact、Event 和 ModelCall 表，不需要数据库
+migration。结构化运行日志只记录关联 ID、状态和 section、question、引用、
+字符等计数，不记录素材、Prompt、模型响应或导出正文。
 
 ### Editor
 

@@ -1,10 +1,12 @@
 # Epiphany Studio Backend
 
 The backend currently implements a single-user, single-machine durable task
-runner plus the M2.2 parallel research workflow and the M2.3a model-call trace.
-M2.3b-1 also includes an opt-in DeepSeek V4 adapter. The default remains the
-deterministic `FakeProvider`, so setup, Swagger, and the default test suite need
-no API key, network request, or paid model call.
+runner through the M2.4 Interview Scaffold workflow, including parallel
+research, model-call traces, a serial Interviewer, and deterministic Markdown
+export. M2.3b-1 also includes an opt-in DeepSeek V4 adapter. The default remains
+the deterministic `FakeProvider`, which reports zero tokens and zero cost, so
+setup, Swagger, and the default test suite need no API key, network request, or
+paid model call.
 
 The first workflow is deliberately small:
 
@@ -12,7 +14,7 @@ The first workflow is deliberately small:
 prepare_sources -> fake_research -> assemble_artifact
 ```
 
-The first parent/child workflow is:
+The current `episode-research` workflow is:
 
 ```text
 research_manager
@@ -22,6 +24,9 @@ research_manager
   -> validate strict schemas and Source references
   -> fan-in
   -> episode_research_bundle
+  -> serial interviewer
+  -> validate strict Interview Scaffold schema and bundle citations
+  -> build_interview_scaffold_result
 ```
 
 Each step is a persisted Task. The worker claims it with a lease, writes an
@@ -52,6 +57,8 @@ Run tests:
 ```bash
 pytest
 ```
+
+The current full suite passes with 99 tests.
 
 The default SQLite database is written to `./data/epiphany.db`, which is ignored
 by Git.
@@ -112,7 +119,7 @@ and the existing stable IDs. A new Source returns HTTP 201. The whole normalized
 text stays in local SQLite and is not returned by the API; callers receive the
 ordered segments needed for future citations.
 
-## M2.2 parallel research API
+## M2 episode-research API (workflow v2)
 
 Import a Source as shown above, copy its `source.id`, and start a Run:
 
@@ -122,13 +129,18 @@ curl -i -X POST http://127.0.0.1:8000/runs \
   -H 'x-request-id: req_research_demo' \
   -d '{
     "workflow_type": "episode-research",
-    "payload": {"source_ids": ["src_REPLACE_ME"]}
+    "payload": {
+      "topic": "五年后重新开始录播客",
+      "source_ids": ["src_REPLACE_ME"]
+    }
   }'
 ```
 
-The response initially contains a running `research_manager` and two queued
-children with the Manager's ID in `parent_task_id`. With the default Worker
-enabled, poll the returned Run ID:
+New `episode-research` requests require both a non-blank `topic` and at least
+one `source_id`; missing or blank topics return HTTP 422. New Runs are stamped
+with `workflow_version: "v2"`. The response initially contains a running
+`research_manager` and two queued children with the Manager's ID in
+`parent_task_id`. With the default Worker enabled, poll the returned Run ID:
 
 ```bash
 curl http://127.0.0.1:8000/runs/run_REPLACE_ME
@@ -137,21 +149,29 @@ curl http://127.0.0.1:8000/runs/run_REPLACE_ME/events
 
 The completed Run has:
 
-- three succeeded Tasks: one Manager and two sibling Researchers;
-- two validated child result Artifacts plus one `episode_research_bundle`;
-- `model_call_count: 2`, representing two Fake Provider executions;
+- four succeeded Tasks: one Manager, two sibling Researchers, and one serial
+  Interviewer;
+- two validated Researcher Artifacts, one `episode_research_bundle`, and one
+  `build_interview_scaffold_result`;
+- `model_call_count: 3`, representing three Fake Provider executions;
 - durable `workflow.fan_out.started`, `workflow.fan_in.waiting`, and
-  `workflow.fan_in.completed` Events.
+  `workflow.fan_in.completed` Events followed by
+  `workflow.interview_scaffold.queued` and
+  `workflow.interview_scaffold.completed`.
 
-The Fake Provider is not pretending to provide useful AI research. It validates
-the orchestration contract before a real provider is introduced: true bounded
-parallel execution, strict structured output, citation scope, exact quote
-matching, failure propagation, idempotent fan-in, and late-result fencing.
+The Fake Provider is not pretending to provide useful AI research or
+interviewing. It validates the orchestration contract without a paid call:
+true bounded parallel research, a sequential Interviewer after bundle
+creation, strict structured output, citation scope, exact quote matching,
+failure propagation, idempotent transitions, and late-result fencing.
 
 Focused verification:
 
 ```bash
-pytest tests/test_research_schemas.py tests/test_research_workflow.py -q
+pytest tests/test_research_schemas.py \
+       tests/test_research_workflow.py \
+       tests/test_interview_scaffold.py \
+       tests/test_interview_export_api.py -q
 ```
 
 The failure-injection test returns an out-of-scope Source reference from one
@@ -230,9 +250,10 @@ pytest tests/test_deepseek_provider.py \
 ```
 
 The Provider HTTP tests use `httpx.MockTransport`; they do not read the local
-API key or contact DeepSeek. They cover successful dual research, 429 retry
-accounting, terminal authentication failure, timeout status, invalid
-citations, response usage/cost, and secret/content log redaction.
+API key or contact DeepSeek. They cover the successful v2
+research-and-interview workflow, 429 retry accounting, terminal authentication
+failure, timeout status, invalid citations, response usage/cost, and
+secret/content log redaction.
 
 When DeepSeek is selected, use `workflow_type: "episode-research"`. The old
 `fake-podcast` workflow is intentionally rejected before HTTP rather than sent
@@ -254,9 +275,10 @@ also shows the fixed safety boundary:
 
 - synthetic text only;
 - `deepseek-v4-flash`;
-- two model calls maximum;
-- one attempt per child Task;
-- one in-flight request, so an early failure can cancel the second call;
+- three model calls maximum;
+- one attempt per model-backed Task;
+- one in-flight request, so the two Researchers and final Interviewer are
+  serialized;
 - 800 output tokens maximum per call;
 - a small estimated cost in the explicitly configured billing currency, rather
   than a billing guarantee.
@@ -280,11 +302,11 @@ python -m epiphany.live_deepseek_smoke --execute
 
 The command applies Alembic to the dedicated ignored
 `data/deepseek-live-smoke.db`, imports a short synthetic Source, runs the two
-Researcher Tasks, and exits successfully only if both ModelCalls and the final
-fan-in succeed. It prints IDs, task/call status, tokens, duration, estimated
-cost totals grouped by currency, and artifact kinds. It does not print the key,
-Prompt, source text, generated content, or error response body. No FastAPI
-server or Swagger page is needed.
+Researcher Tasks and then the Interviewer, and exits successfully only if all
+three ModelCalls and all four Artifacts succeed. It prints IDs, task/call
+status, tokens, duration, estimated cost totals grouped by currency, and
+artifact kinds. It does not print the key, Prompt, source text, generated
+content, or error response body. No FastAPI server or Swagger page is needed.
 
 Focused zero-network safety verification:
 
@@ -312,6 +334,40 @@ These values are a historical smoke result, not a future latency or billing
 guarantee. The ignored SQLite trace retains the corresponding Tasks, Events,
 ModelCalls, and Artifact metadata. Enabling CNY for future calls does not alter
 these two USD rows.
+
+M2.4 changed the current harness ceiling from two calls to three so it can
+represent workflow v2, but this stage ran only the zero-network dry-run. No new
+paid live smoke was performed; the two-call, 2,301-token, USD 0.000491 result
+above remains the only historical paid trace documented here.
+
+## M2.4 Interview Scaffold and Markdown export
+
+After both Researchers succeed, the Manager deterministically writes
+`episode_research_bundle`. Workflow v2 then queues
+`build_interview_scaffold`; this Interviewer runs only after the bundle exists
+and receives the requested topic plus the bounded Timeline and Theme content.
+Its prompt and output schema are strict. Validation rejects unexpected fields,
+blank text, a title that differs from the topic, malformed sections, and any
+Source reference that is absent from the research bundle.
+
+When the Run succeeds, `output_artifact_id` points to
+`build_interview_scaffold_result`. Export the validated artifact as Markdown:
+
+```bash
+curl -OJ \
+  http://127.0.0.1:8000/runs/run_REPLACE_ME/exports/interview-scaffold.md
+```
+
+`GET /runs/{run_id}/exports/interview-scaffold.md` returns deterministic
+`text/markdown`, preserves source citations, and escapes raw HTML and Markdown
+control syntax from model-produced text. It returns HTTP 404 for an unknown Run
+and HTTP 409 until a valid completed scaffold is available.
+
+Existing in-flight `episode-research` Runs stamped `workflow_version: "v1"`
+retain their original completion semantics: they stop after fan-in with
+`episode_research_bundle` as the output, without requiring a new topic or
+queuing an Interviewer. M2.4 reuses the existing runtime tables and requires no
+database migration.
 
 ## Debugging and logs
 

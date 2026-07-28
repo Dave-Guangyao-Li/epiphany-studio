@@ -2,7 +2,7 @@
 
 状态：Draft
 
-日期：2026-07-23
+日期：2026-07-28
 
 ## 1. 目标
 
@@ -65,8 +65,8 @@ create_run
   -> fan_out
        |- timeline_research
        `- theme_research
-  -> fan_in
-  -> build_interview_scaffold
+  -> fan_in (deterministic)
+  -> build_interview_scaffold (serial root Interviewer)
   -> wait_for_user
   -> incorporate_user_material
   -> draft_episode
@@ -77,6 +77,18 @@ create_run
 其中 `prepare_sources`、`fan_in` 和状态更新是普通代码；
 `timeline_research`、`theme_research`、`build_interview_scaffold` 和
 `draft_episode` 才调用模型。
+
+M2.4 将当前可执行边界推进到 `build_interview_scaffold`：两个 Researcher
+仍以同级 Child Task 并行调用模型，确定性 fan-in 持久化研究 Bundle 后，才
+排队一个 `parent_task_id=None` 的串行根 Interviewer Task。它不是第三个
+并行 Child，也不会与研究调用重叠。一次成功的 v2 Run 因而固定产生四个
+Task（Manager、两个 Researcher、Interviewer）、四个 Artifact（两个研究
+结果、一个研究 Bundle、一个采访脚手架）和三次 ModelCall。
+
+新的 `episode-research` Run 使用 workflow v2。为使升级时已经在途的 Run
+仍可恢复，v1 保留原有语义：fan-in 后以 `episode_research_bundle` 成功结束，
+不要求新增 `topic`，也不排队 Interviewer。这个版本分支复用现有表和字段，
+M2.4 不需要数据库 migration。
 
 ## 5. Subagent 定义
 
@@ -98,6 +110,9 @@ Subagent 是一个受约束的 Child Task，而不是独立微服务：
 ```
 
 子任务只返回结构化候选 Artifact。它不能直接更改已确认的记忆。
+
+M2.4 的 Interviewer 同样受 Task/Provider/ModelCall 契约约束，但它是 fan-in
+之后的根 Task，只读取已经校验并合并的研究结果，不扩大一层父子拓扑。
 
 ## 6. 持久化模型
 
@@ -278,6 +293,19 @@ M2.3b 的 DeepSeek 适配器直接使用 `httpx`，自身不执行 retry。一�
 Worker，以新的 Task attempt 和 `ModelCall` 重试。JSON Output 仍需通过
 Pydantic、引用范围和逐字 Quote 校验。
 
+M2.4 为 Interviewer 增加独立的 strict 输入、Prompt 与输出契约。Prompt
+只序列化已校验 Timeline/Theme 结果和从中收集的 `allowed_source_refs`，
+将研究文字明确视为不可信数据，并继续执行素材字符上限。输出禁止额外字段，
+标题必须逐字等于 Run 的 `topic`；episode intent、开场、收束、section、
+known context、transition、question 和 material gap 都必须带引用，且引用
+只能来自研究 Bundle。Worker 在 Artifact 提交前统一调度这套验证，未知 Agent
+若没有注册 validator 会直接失败。
+
+调用预算仍在进入 Provider 前原子预留。将单 Run 预算设为二时，两个并行
+Researcher 可以完成，第三个 Interviewer 调用会以
+`model_call_limit_exceeded` 在 Provider 入口前被拒绝；Run 失败，但两个研究
+结果与确定性 fan-in Bundle 继续保留，便于诊断或后续恢复。
+
 首版只允许官方 `https://api.deepseek.com`，默认模型为
 `deepseek-v4-flash`，thinking 关闭。单 Task 还有素材字符数和输出 Token
 上限。即使 HTTP 200 的内容被截断或 JSON 不可用，只要响应带有可信 usage，
@@ -292,6 +320,7 @@ POST /projects
 POST /projects/{id}/sources
 POST /projects/{id}/episode-runs
 GET  /runs/{id}
+GET  /runs/{id}/exports/interview-scaffold.md
 POST /runs/{id}/resume
 POST /runs/{id}/cancel
 GET  /runs/{id}/events
@@ -300,6 +329,13 @@ GET  /runs/{id}/events/stream
 
 SSE 用于低成本实时显示。客户端断线后先从数据库按 `sequence` 补事件，
 再连接实时流。SSE 不是状态真相。
+
+M2.4 的导出 endpoint 只接受已经成功且最终 Artifact 类型为
+`build_interview_scaffold_result` 的 Run；未就绪、类型不符或内容无效时
+返回冲突错误。Markdown 由已验证 JSON 确定性渲染，保留每处 Source ID 与
+Segment ID，并对所有模型文本转义 Markdown 控制字符和原始 HTML，避免模型
+文本改变文档结构或注入链接、标签。运行追踪用的 `_execution` metadata
+不会进入导出内容。
 
 ## 12. 可观测性与调试
 
@@ -333,6 +369,10 @@ stdout 对应 `worker.task.failed` 和迟到结果的
 M2.3b 增加 `provider.deepseek.request.started/completed/failed`。它们只记录
 Run、Task、attempt、provider、model、Token、费用和错误码，不记录 HTTP
 请求体、响应正文、素材或密钥。
+
+M2.4 增加采访脚手架排队、完成与 Markdown 导出的稳定事件/日志。字段只包含
+Run、Task、Artifact、ModelCall 等 ID，以及 section、question、引用片段和
+Markdown 字符数等计数；不记录研究内容、Prompt、模型输出或导出的正文。
 
 ## 13. 升级触发条件
 

@@ -2,6 +2,37 @@
 
 ## 2026-07-28
 
+### M2.4 source-grounded interview scaffold and Markdown export
+
+- Extended `episode-research` after its parallel Timeline/Theme fan-out and
+  deterministic fan-in with one serial root `build_interview_scaffold` Task;
+  the Interviewer has no parent and is not a third parallel research child.
+- Added strict scaffold input/output models, an injection-resistant prompt
+  limited to the validated research bundle and its allowed source references,
+  and Worker-boundary schema, topic, and citation validation.
+- Added deterministic Markdown rendering that retains source labels, strips
+  runtime-only execution metadata, and escapes model-produced Markdown control
+  syntax and raw HTML.
+- Added `GET /runs/{run_id}/exports/interview-scaffold.md`, including readiness,
+  output-kind, and final schema checks before returning a UTF-8 attachment.
+- A successful v2 run now has four Tasks, four Artifacts, and three ModelCalls:
+  Manager, two Researcher children, and the serial Interviewer.
+- Proved that a two-call Run budget rejects the third call before Provider
+  entry and before a third ModelCall is reserved. Scaffold failures retain the
+  two successful research Artifacts and deterministic fan-in Bundle.
+- Versioned new `episode-research` runs as v2 while preserving in-flight v1
+  behavior, which still completes at the research Bundle without a topic or
+  Interviewer.
+- Reused the existing Run/Task/Artifact/Event/ModelCall schema, so no database
+  migration is needed.
+- Added structured scaffold/export observability containing only correlation
+  IDs, statuses, and counts; no source text, prompt, model response, or exported
+  Markdown is logged.
+- Ruff lint and format checks, all 99 tests, Alembic current/check, and the
+  guarded DeepSeek dry-run pass. No new paid M2.4 live call was made; the
+  earlier M2.3b two-call, 2,301-token verification below remains the historical
+  live record.
+
 ### M2.3b explicit DeepSeek billing currency
 
 - Added `EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY|USD`, with `USD` as the

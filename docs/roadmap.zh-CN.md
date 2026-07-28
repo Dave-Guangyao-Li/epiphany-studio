@@ -100,11 +100,11 @@ Provider 以前失败。
 离线验收：默认仍为 Fake；DeepSeek Provider 通过 MockTransport 验证请求、
 JSON、usage、费用、错误分类和日志脱敏。完整双 Researcher Run 能成功
 fan-in；429 只由 Worker 重试，401 不重试，timeout 记为 `timed_out`；
-付费但截断的响应仍保存 Token 和费用。独立 smoke 命令默认 dry-run，只有
-显式 `--execute` 才允许两次短合成素材请求。DeepSeek 响应不提供账户结算
-币种，因此通过 `EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY|USD` 明确选择，不
-根据地区、Key 或余额猜测。默认 `USD` 保持旧行为；当前 CNY 账户在本地
-`.env` 设为 `CNY`。
+付费但截断的响应仍保存 Token 和费用。独立 smoke 命令默认 dry-run；
+M2.3b 首次联网验收的旧 v1 边界只有显式 `--execute` 才允许两次短合成素材
+请求。DeepSeek 响应不提供账户结算币种，因此通过
+`EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY|USD` 明确选择，不根据地区、Key 或
+余额猜测。默认 `USD` 保持旧行为；当前 CNY 账户在本地 `.env` 设为 `CNY`。
 
 真实联网验收：`deepseek-v4-flash` 的 Timeline 与 Theme 调用均在 attempt 1
 成功，严格 Schema、来源引用、逐字 quote 与 fan-in 全部通过。合计 1,092
@@ -119,12 +119,30 @@ migration。
 
 ### M2.4：采访脚手架
 
-- [ ] Interview Scaffold schema/prompt
-- [ ] 合并 Timeline 与 Theme Artifact
-- [ ] 引用完整性校验
-- [ ] Markdown 导出
+- [x] Interview Scaffold schema/prompt
+- [x] 合并 Timeline 与 Theme Artifact
+- [x] 引用完整性校验
+- [x] Markdown 导出
 
-演示：从真实文字素材生成带来源引用的采访脚手架。
+验收：新的 `episode-research` payload 必须同时包含非空 `topic` 与
+`source_ids`，并记录为 workflow v2。Timeline 与 Theme 仍并行执行；Manager
+先确定性写入 research bundle，随后才串行运行 Interviewer。Interview
+Scaffold 使用严格 schema/prompt，拒绝多余字段、空文本、标题偏离 topic，
+以及 research bundle 之外的引用。完整成功 Run 包含 4 个 Tasks、4 个
+Artifacts 和 3 个 ModelCalls。
+
+导出：`GET /runs/{run_id}/exports/interview-scaffold.md` 从最终 Artifact
+确定性生成安全 Markdown，保留来源引用，并转义模型文本中的 Markdown
+控制语法和原始 HTML。旧 workflow v1 的 in-flight Run 保持原有语义，在
+research bundle 完成，不会被追加 Interviewer。M2.4 复用现有表结构，不新增
+migration；默认 Fake Provider 仍为零 Token、零费用。
+
+成本边界：当前 live smoke harness 最多 3 次模型调用，可覆盖两个
+Researchers 与串行 Interviewer；本阶段只完成 dry-run，没有新增付费实测。
+历史 live smoke 仍是 2 次调用、2,301 tokens、0.000491 USD，未被改写。
+
+演示：使用已导入文字素材和默认 Fake Provider 生成带来源引用的采访脚手架，
+再通过导出 API 获取 Markdown。完整测试套件共 99 个测试，全部通过。
 
 M2 完成标准：以上四个小步全部通过测试和演示后，才进入 M3。
 
