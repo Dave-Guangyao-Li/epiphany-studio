@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,8 +47,22 @@ class Settings(BaseSettings):
             "DEEPSEEK_MODEL",
         ),
     )
+    deepseek_billing_currency: Literal["CNY", "USD"] = Field(
+        default="USD",
+        validation_alias=AliasChoices(
+            "EPIPHANY_DEEPSEEK_BILLING_CURRENCY",
+            "DEEPSEEK_BILLING_CURRENCY",
+        ),
+    )
     deepseek_max_tokens: int = Field(default=2_000, ge=1, le=20_000)
     deepseek_max_source_chars: int = Field(default=24_000, ge=1, le=1_000_000)
+
+    @field_validator("deepseek_billing_currency", mode="before")
+    @classmethod
+    def normalize_deepseek_billing_currency(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
 
 
 def ensure_sqlite_parent(database_url: str) -> None:

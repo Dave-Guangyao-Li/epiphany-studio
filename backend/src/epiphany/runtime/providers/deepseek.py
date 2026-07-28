@@ -4,7 +4,7 @@ import json
 import logging
 from decimal import ROUND_HALF_UP, Decimal
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -31,18 +31,34 @@ logger = logging.getLogger("epiphany.provider.deepseek")
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 SUPPORTED_MODELS = frozenset({"deepseek-v4-flash", "deepseek-v4-pro"})
+SUPPORTED_BILLING_CURRENCIES = frozenset({"CNY", "USD"})
+BillingCurrency = Literal["CNY", "USD"]
 
-# Official USD prices per one million tokens, checked on 2026-07-27.
+# Official prices per one million tokens, checked on 2026-07-28.
 _PRICE_PER_MILLION_TOKENS = {
-    "deepseek-v4-flash": {
-        "input_cache_hit": Decimal("0.0028"),
-        "input_cache_miss": Decimal("0.14"),
-        "output": Decimal("0.28"),
+    "CNY": {
+        "deepseek-v4-flash": {
+            "input_cache_hit": Decimal("0.02"),
+            "input_cache_miss": Decimal("1"),
+            "output": Decimal("2"),
+        },
+        "deepseek-v4-pro": {
+            "input_cache_hit": Decimal("0.025"),
+            "input_cache_miss": Decimal("3"),
+            "output": Decimal("6"),
+        },
     },
-    "deepseek-v4-pro": {
-        "input_cache_hit": Decimal("0.003625"),
-        "input_cache_miss": Decimal("0.435"),
-        "output": Decimal("0.87"),
+    "USD": {
+        "deepseek-v4-flash": {
+            "input_cache_hit": Decimal("0.0028"),
+            "input_cache_miss": Decimal("0.14"),
+            "output": Decimal("0.28"),
+        },
+        "deepseek-v4-pro": {
+            "input_cache_hit": Decimal("0.003625"),
+            "input_cache_miss": Decimal("0.435"),
+            "output": Decimal("0.87"),
+        },
     },
 }
 
@@ -57,6 +73,7 @@ class DeepSeekProvider:
         *,
         api_key: str,
         model: str = "deepseek-v4-flash",
+        billing_currency: BillingCurrency | str = "USD",
         base_url: str = DEFAULT_BASE_URL,
         max_tokens: int = 2_000,
         max_source_chars: int = 24_000,
@@ -67,6 +84,12 @@ class DeepSeekProvider:
             raise ValueError("DeepSeek API key must not be blank")
         if model not in SUPPORTED_MODELS:
             raise ValueError(f"unsupported DeepSeek model: {model}")
+        normalized_billing_currency = billing_currency.strip().upper()
+        if normalized_billing_currency not in SUPPORTED_BILLING_CURRENCIES:
+            raise ValueError(
+                "DeepSeek billing currency must be one of: "
+                f"{', '.join(sorted(SUPPORTED_BILLING_CURRENCIES))}"
+            )
         if max_tokens < 1:
             raise ValueError("DeepSeek max_tokens must be positive")
         if max_source_chars < 1:
@@ -76,6 +99,7 @@ class DeepSeekProvider:
 
         self.api_key = api_key
         self.model = model
+        self.billing_currency = normalized_billing_currency
         self.base_url = _validated_base_url(base_url)
         self.max_tokens = max_tokens
         self.max_source_chars = max_source_chars
@@ -118,7 +142,11 @@ class DeepSeekProvider:
             response = await self._post(payload)
             if response.status_code >= 400:
                 raise _error_for_status(response.status_code)
-            result = _parse_response(response, requested_model=self.model)
+            result = _parse_response(
+                response,
+                requested_model=self.model,
+                billing_currency=self.billing_currency,
+            )
         except httpx.TimeoutException as error:
             mapped_error: ProviderError = ProviderTimeoutError(
                 "DeepSeek request exceeded its HTTP timeout"
@@ -211,7 +239,12 @@ def _error_for_status(status_code: int) -> ProviderError:
     return ProviderInvalidRequestError(f"DeepSeek API returned HTTP {status_code}")
 
 
-def _parse_response(response: httpx.Response, *, requested_model: str) -> ProviderResult:
+def _parse_response(
+    response: httpx.Response,
+    *,
+    requested_model: str,
+    billing_currency: str,
+) -> ProviderResult:
     try:
         payload = response.json()
         if not isinstance(payload, dict):
@@ -244,6 +277,7 @@ def _parse_response(response: httpx.Response, *, requested_model: str) -> Provid
         output_tokens=output_tokens,
         cache_hit_tokens=cache_hit_tokens,
         cache_miss_tokens=cache_miss_tokens,
+        billing_currency=billing_currency,
     )
     if response_model != requested_model:
         raise ProviderResponseError(
@@ -336,9 +370,10 @@ def _estimate_cost_micros(
     cache_hit_tokens: int,
     cache_miss_tokens: int,
     output_tokens: int,
+    billing_currency: str,
 ) -> int:
-    prices = _PRICE_PER_MILLION_TOKENS[model]
-    # tokens * USD-per-million-token equals millionths of one USD.
+    prices = _PRICE_PER_MILLION_TOKENS[billing_currency][model]
+    # tokens * currency-units-per-million-token equals millionths of that currency.
     micros = (
         Decimal(cache_hit_tokens) * prices["input_cache_hit"]
         + Decimal(cache_miss_tokens) * prices["input_cache_miss"]
@@ -354,6 +389,7 @@ def _accounting_result(
     output_tokens: int,
     cache_hit_tokens: int,
     cache_miss_tokens: int,
+    billing_currency: str,
 ) -> ProviderResult:
     return ProviderResult(
         content={},
@@ -366,8 +402,9 @@ def _accounting_result(
             cache_hit_tokens=cache_hit_tokens,
             cache_miss_tokens=cache_miss_tokens,
             output_tokens=output_tokens,
+            billing_currency=billing_currency,
         ),
-        cost_currency="USD",
+        cost_currency=billing_currency,
     )
 
 

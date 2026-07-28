@@ -51,6 +51,7 @@ def build_preflight(
     execute: bool,
     api_key_present: bool,
     database_path: str,
+    billing_currency: str = "USD",
 ) -> dict[str, Any]:
     """Return a safe-to-print plan without ever accepting the API key value."""
 
@@ -70,7 +71,12 @@ def build_preflight(
         "worker_timeout_seconds": WORKER_TIMEOUT_SECONDS,
         "api_key_status": "present" if api_key_present else "absent",
         "database_path": database_path,
-        "expected_cost_usd": "<0.01 (estimate, not a billing guarantee)",
+        "billing_currency": billing_currency,
+        "expected_cost": {
+            "currency": billing_currency,
+            "upper_bound": "0.01",
+            "is_estimate": True,
+        },
     }
 
 
@@ -152,8 +158,19 @@ def build_sanitized_summary(
         }
         for call in run.model_calls
     ]
-    total_cost_micros = sum(call.estimated_cost_micros for call in run.model_calls)
-    total_cost_usd = Decimal(total_cost_micros) / Decimal(1_000_000)
+    cost_micros_by_currency: dict[str, int] = {}
+    for call in run.model_calls:
+        currency = call.cost_currency.upper()
+        cost_micros_by_currency[currency] = (
+            cost_micros_by_currency.get(currency, 0) + call.estimated_cost_micros
+        )
+    estimated_costs = {
+        currency: {
+            "micros": micros,
+            "amount": f"{Decimal(micros) / Decimal(1_000_000):.6f}",
+        }
+        for currency, micros in sorted(cost_micros_by_currency.items())
+    }
     passed = (
         run.status == "succeeded"
         and processed_tasks == MAX_MODEL_CALLS
@@ -190,8 +207,7 @@ def build_sanitized_summary(
         "totals": {
             "input_tokens": sum(call.input_tokens for call in run.model_calls),
             "output_tokens": sum(call.output_tokens for call in run.model_calls),
-            "estimated_cost_micros": total_cost_micros,
-            "estimated_cost_usd": f"{total_cost_usd:.6f}",
+            "estimated_costs": estimated_costs,
         },
         "artifact_kinds": artifact_kinds,
     }
@@ -273,6 +289,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             execute=args.execute,
             api_key_present=api_key_present,
             database_path=database_display_path,
+            billing_currency=settings.deepseek_billing_currency,
         )
     )
     if not args.execute:
@@ -296,6 +313,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     provider = DeepSeekProvider(
         api_key=api_key,
         model=LIVE_MODEL,
+        billing_currency=settings.deepseek_billing_currency,
         base_url="https://api.deepseek.com",
         max_tokens=MAX_OUTPUT_TOKENS_PER_CALL,
         max_source_chars=MAX_SOURCE_CHARS,

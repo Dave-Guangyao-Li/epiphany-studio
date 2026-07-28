@@ -105,5 +105,6 @@ class ProviderResult:
 class ModelProvider(Protocol):
     name: str
     model: str
+    billing_currency: str
 
     async def generate(self, invocation: TaskInvocation) -> ProviderResult: ...

@@ -102,6 +102,14 @@ error codes. M2.3b-2b used this boundary to complete the first two-call live
 smoke successfully: both Research Tasks passed strict validation and fan-in,
 with an estimated total cost of USD 0.000491.
 
+M2.3b-3 makes DeepSeek cost estimates follow an explicit billing currency.
+`EPIPHANY_DEEPSEEK_BILLING_CURRENCY` accepts `USD` or `CNY` and defaults to
+`USD` for compatibility. DeepSeek does not return the account billing currency
+in a model response, so the backend does not guess from locale, API key, or
+balance. Live summaries keep totals grouped by currency instead of adding
+unlike amounts. No database migration is required, and existing USD traces
+remain historical USD estimates.
+
 No key or personal source material belongs in Git.
 
 Official references:
@@ -165,6 +173,8 @@ material: two `deepseek-v4-flash` calls succeed without retry, strict source
 validation accepts both results, and deterministic fan-in produces the final
 research bundle. The persistent trace records 1,092 input tokens, 1,209 output
 tokens, 15,435 ms of combined Provider latency, and USD 0.000491 estimated cost.
+M2.3b-3 adds explicit USD/CNY pricing selection and currency-grouped summaries
+without rewriting this historical USD trace or changing the database schema.
 
 ## License
 

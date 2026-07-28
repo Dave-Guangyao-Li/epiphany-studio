@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from epiphany.config import Settings
 from epiphany.main import build_provider
@@ -107,7 +108,15 @@ def _theme_content() -> dict[str, object]:
     }
 
 
-def _success_response(content: dict[str, object], *, model: str = "deepseek-v4-flash") -> dict:
+def _success_response(
+    content: dict[str, object],
+    *,
+    model: str = "deepseek-v4-flash",
+    prompt_cache_hit_tokens: int = 40,
+    prompt_cache_miss_tokens: int = 60,
+    completion_tokens: int = 20,
+) -> dict:
+    prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens
     return {
         "id": "chatcmpl_test",
         "model": model,
@@ -121,11 +130,11 @@ def _success_response(content: dict[str, object], *, model: str = "deepseek-v4-f
             }
         ],
         "usage": {
-            "prompt_tokens": 100,
-            "completion_tokens": 20,
-            "total_tokens": 120,
-            "prompt_cache_hit_tokens": 40,
-            "prompt_cache_miss_tokens": 60,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "prompt_cache_hit_tokens": prompt_cache_hit_tokens,
+            "prompt_cache_miss_tokens": prompt_cache_miss_tokens,
         },
     }
 
@@ -180,6 +189,86 @@ async def test_timeline_request_and_success_response_are_mapped() -> None:
     assert result.output_tokens == 20
     assert result.estimated_cost_micros == 14
     assert result.cost_currency == "USD"
+
+
+@pytest.mark.parametrize(
+    (
+        "model",
+        "billing_currency",
+        "cache_hit_tokens",
+        "cache_miss_tokens",
+        "output_tokens",
+        "expected_cost_micros",
+    ),
+    [
+        ("deepseek-v4-flash", "USD", 400, 100, 10, 18),
+        ("deepseek-v4-flash", "CNY", 400, 100, 10, 128),
+        ("deepseek-v4-pro", "USD", 400, 100, 10, 54),
+        ("deepseek-v4-pro", "CNY", 400, 100, 10, 370),
+    ],
+)
+async def test_official_price_catalogs_cover_cache_hit_miss_and_output(
+    model: str,
+    billing_currency: str,
+    cache_hit_tokens: int,
+    cache_miss_tokens: int,
+    output_tokens: int,
+    expected_cost_micros: int,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_success_response(
+                _timeline_content(),
+                model=model,
+                prompt_cache_hit_tokens=cache_hit_tokens,
+                prompt_cache_miss_tokens=cache_miss_tokens,
+                completion_tokens=output_tokens,
+            ),
+        )
+
+    provider, client = await _provider_with_handler(
+        handler,
+        model=model,
+        billing_currency=billing_currency,
+    )
+    try:
+        result = await provider.generate(_invocation())
+    finally:
+        await client.aclose()
+
+    assert result.input_tokens == cache_hit_tokens + cache_miss_tokens
+    assert result.output_tokens == output_tokens
+    assert result.estimated_cost_micros == expected_cost_micros
+    assert result.cost_currency == billing_currency
+
+
+async def test_price_catalog_rounds_half_a_micro_away_from_zero() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_success_response(
+                _timeline_content(),
+                model="deepseek-v4-pro",
+                prompt_cache_hit_tokens=20,
+                prompt_cache_miss_tokens=0,
+                completion_tokens=0,
+            ),
+        )
+
+    provider, client = await _provider_with_handler(
+        handler,
+        model="deepseek-v4-pro",
+        billing_currency="CNY",
+    )
+    try:
+        result = await provider.generate(_invocation())
+    finally:
+        await client.aclose()
+
+    # 20 cache-hit tokens * CNY 0.025 / 1M tokens = 0.5 micro-CNY.
+    assert result.estimated_cost_micros == 1
+    assert result.cost_currency == "CNY"
 
 
 async def test_theme_prompt_requires_exact_quotes() -> None:
@@ -477,9 +566,38 @@ def test_provider_selection_defaults_to_fake_and_requires_a_deepseek_key() -> No
             model_provider="deepseek",
             deepseek_api_key=API_KEY,
             deepseek_model="deepseek-v4-flash",
+            deepseek_billing_currency="CNY",
         )
     )
     assert isinstance(provider, DeepSeekProvider)
+    assert provider.billing_currency == "CNY"
+
+
+@pytest.mark.parametrize(
+    ("configured_currency", "expected_currency"),
+    [
+        ("CNY", "CNY"),
+        (" usd ", "USD"),
+    ],
+)
+def test_settings_accept_supported_deepseek_billing_currencies(
+    configured_currency: str,
+    expected_currency: str,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        deepseek_billing_currency=configured_currency,
+    )
+
+    assert settings.deepseek_billing_currency == expected_currency
+
+
+def test_settings_reject_unsupported_deepseek_billing_currency() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            deepseek_billing_currency="EUR",
+        )
 
 
 def test_settings_accept_legacy_key_name_and_redacts_it(

@@ -108,9 +108,15 @@ def _response_for(
 async def _install_provider(
     worker: Worker,
     handler: httpx.MockTransport,
+    *,
+    billing_currency: str = "USD",
 ) -> httpx.AsyncClient:
     client = httpx.AsyncClient(transport=handler)
-    worker.provider = DeepSeekProvider(api_key="runtime-test-secret", client=client)
+    worker.provider = DeepSeekProvider(
+        api_key="runtime-test-secret",
+        billing_currency=billing_currency,
+        client=client,
+    )
     return client
 
 
@@ -150,6 +156,33 @@ async def test_mocked_deepseek_research_succeeds_end_to_end(
     }
 
 
+async def test_cny_estimate_is_persisted_in_model_call_ledger(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    run_id, reference = await _create_run(database, service)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_response_for(request, reference))
+
+    client = await _install_provider(
+        worker,
+        httpx.MockTransport(handler),
+        billing_currency="CNY",
+    )
+    try:
+        assert await worker.run_until_idle() == 2
+        completed = await service.get_run(run_id)
+    finally:
+        await client.aclose()
+
+    assert completed.status == "succeeded"
+    assert len(completed.model_calls) == 2
+    assert all(call.cost_currency == "CNY" for call in completed.model_calls)
+    # Per call: 80 cache-miss input * CNY 1/M + 20 output * CNY 2/M.
+    assert [call.estimated_cost_micros for call in completed.model_calls] == [120, 120]
+
+
 async def test_rate_limit_retries_in_worker_and_accounts_each_request(
     runtime: tuple[Database, RunService, Worker],
 ) -> None:
@@ -165,7 +198,11 @@ async def test_rate_limit_retries_in_worker_and_accounts_each_request(
             return httpx.Response(429, json={"error": {"message": "synthetic rate limit"}})
         return httpx.Response(200, json=_response_for(request, reference))
 
-    client = await _install_provider(worker, httpx.MockTransport(handler))
+    client = await _install_provider(
+        worker,
+        httpx.MockTransport(handler),
+        billing_currency="CNY",
+    )
     try:
         assert await worker.run_until_idle() == 3
         completed = await service.get_run(run_id)
@@ -178,6 +215,7 @@ async def test_rate_limit_retries_in_worker_and_accounts_each_request(
     assert [call.status for call in completed.model_calls].count("failed") == 1
     assert [call.status for call in completed.model_calls].count("succeeded") == 2
     assert any(call.error_code == "provider_rate_limited" for call in completed.model_calls)
+    assert all(call.cost_currency == "CNY" for call in completed.model_calls)
 
 
 async def test_auth_failure_is_terminal_and_cancels_sibling(
@@ -193,7 +231,11 @@ async def test_auth_failure_is_terminal_and_cancels_sibling(
         request_count += 1
         return httpx.Response(401, json={"error": {"message": "synthetic auth failure"}})
 
-    client = await _install_provider(worker, httpx.MockTransport(handler))
+    client = await _install_provider(
+        worker,
+        httpx.MockTransport(handler),
+        billing_currency="CNY",
+    )
     try:
         assert await worker.run_until_idle() == 1
         failed = await service.get_run(run_id)
@@ -204,6 +246,7 @@ async def test_auth_failure_is_terminal_and_cancels_sibling(
     assert request_count == 1
     assert failed.model_call_count == 1
     assert failed.model_calls[0].error_code == "provider_authentication_failed"
+    assert failed.model_calls[0].cost_currency == "CNY"
     children = [task for task in failed.tasks if task.kind != "research_manager"]
     assert sorted(task.status for task in children) == ["cancelled", "failed"]
     failed_child = next(task for task in children if task.status == "failed")
@@ -224,7 +267,11 @@ async def test_http_timeout_is_timed_out_and_bounded(
         request_count += 1
         raise httpx.ReadTimeout("synthetic timeout", request=request)
 
-    client = await _install_provider(worker, httpx.MockTransport(handler))
+    client = await _install_provider(
+        worker,
+        httpx.MockTransport(handler),
+        billing_currency="CNY",
+    )
     try:
         assert await worker.run_until_idle() == 2
         failed = await service.get_run(run_id)
@@ -236,6 +283,7 @@ async def test_http_timeout_is_timed_out_and_bounded(
     assert failed.model_call_count == 2
     assert all(call.status == "timed_out" for call in failed.model_calls)
     assert all(call.error_code == "provider_timeout" for call in failed.model_calls)
+    assert all(call.cost_currency == "CNY" for call in failed.model_calls)
 
 
 async def test_http_success_with_invalid_citation_fails_business_validation(

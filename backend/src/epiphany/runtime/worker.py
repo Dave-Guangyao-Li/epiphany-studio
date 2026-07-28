@@ -407,6 +407,7 @@ class Worker:
                 invocation,
                 provider=self.provider.name,
                 model=self.provider.model,
+                cost_currency=self.provider.billing_currency,
             )
         except ModelCallLeaseLost:
             logger.warning(

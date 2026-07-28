@@ -192,7 +192,8 @@ over-budget invocation.
 The DeepSeek adapter supports `deepseek-v4-flash` and `deepseek-v4-pro` through
 `https://api.deepseek.com/chat/completions`. It sends one HTTP request per Task
 attempt, uses JSON Output with thinking disabled, and returns usage and
-estimated USD micros to the existing ledger.
+estimated cost micros in the explicitly configured billing currency to the
+existing ledger.
 
 It is disabled by default. The committed example remains:
 
@@ -200,9 +201,26 @@ It is disabled by default. The committed example remains:
 EPIPHANY_MODEL_PROVIDER=fake
 EPIPHANY_DEEPSEEK_API_KEY=
 EPIPHANY_DEEPSEEK_MODEL=deepseek-v4-flash
+EPIPHANY_DEEPSEEK_BILLING_CURRENCY=USD
 EPIPHANY_DEEPSEEK_MAX_TOKENS=2000
 EPIPHANY_DEEPSEEK_MAX_SOURCE_CHARS=24000
 ```
+
+`EPIPHANY_DEEPSEEK_BILLING_CURRENCY` accepts `USD` or `CNY`. It defaults to
+`USD` so existing installations retain their previous behavior. The DeepSeek
+completion response contains Token usage but not the account's billing
+currency, so the backend cannot safely auto-detect it. Set it explicitly in
+the ignored `backend/.env`; for an account whose Dashboard and balance are in
+CNY, use:
+
+```env
+EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY
+```
+
+Each new `ModelCall` stores the estimate and its configured currency together.
+Existing USD rows are not converted or rewritten, and no database migration is
+needed. When a summary contains more than one currency, it reports one total
+per currency rather than producing an invalid mixed-currency sum.
 
 Focused zero-network verification:
 
@@ -240,15 +258,19 @@ also shows the fixed safety boundary:
 - one attempt per child Task;
 - one in-flight request, so an early failure can cancel the second call;
 - 800 output tokens maximum per call;
-- expected total cost below USD 0.01, as an estimate rather than a billing
-  guarantee.
+- a small estimated cost in the explicitly configured billing currency, rather
+  than a billing guarantee.
 
 To perform the intentional live check, put the key only in ignored
 `backend/.env`:
 
 ```env
 EPIPHANY_DEEPSEEK_API_KEY=your-local-key
+EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY
 ```
+
+The example uses `CNY` because the current local DeepSeek account is billed in
+CNY. Use `USD` for a USD-billed account.
 
 Then run:
 
@@ -260,9 +282,9 @@ The command applies Alembic to the dedicated ignored
 `data/deepseek-live-smoke.db`, imports a short synthetic Source, runs the two
 Researcher Tasks, and exits successfully only if both ModelCalls and the final
 fan-in succeed. It prints IDs, task/call status, tokens, duration, estimated
-cost, and artifact kinds. It does not print the key, Prompt, source text,
-generated content, or error response body. No FastAPI server or Swagger page is
-needed.
+cost totals grouped by currency, and artifact kinds. It does not print the key,
+Prompt, source text, generated content, or error response body. No FastAPI
+server or Swagger page is needed.
 
 Focused zero-network safety verification:
 
@@ -288,7 +310,8 @@ The first live verification completed on 2026-07-28 with Run
 
 These values are a historical smoke result, not a future latency or billing
 guarantee. The ignored SQLite trace retains the corresponding Tasks, Events,
-ModelCalls, and Artifact metadata.
+ModelCalls, and Artifact metadata. Enabling CNY for future calls does not alter
+these two USD rows.
 
 ## Debugging and logs
 

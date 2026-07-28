@@ -2,6 +2,25 @@
 
 ## 2026-07-28
 
+### M2.3b explicit DeepSeek billing currency
+
+- Added `EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY|USD`, with `USD` as the
+  backward-compatible default.
+- Kept billing currency explicit because DeepSeek model responses report usage
+  but do not identify the account's settlement currency; no locale, API-key, or
+  balance-based guessing is performed.
+- Allowed the current local CNY-billed account to opt into the official CNY
+  price schedule while USD-billed accounts retain the existing USD schedule.
+- Changed live-smoke cost totals to remain grouped by currency rather than
+  adding unlike amounts.
+- Persisted the configured currency when a ModelCall is reserved, so failures
+  without usage data do not silently fall back to USD.
+- Reused the existing `estimated_cost_micros` and `cost_currency` columns, so no
+  database migration is needed and historical USD ModelCalls remain unchanged.
+- Added zero-network coverage for the compatibility default, explicit CNY
+  accounting, invalid configuration, grouped summaries, and CNY failure and
+  timeout traces.
+
 ### M2.3b persistent data guide and provider reconciliation
 
 - Added a dedicated beginner-readable SQLite guide instead of continuing to

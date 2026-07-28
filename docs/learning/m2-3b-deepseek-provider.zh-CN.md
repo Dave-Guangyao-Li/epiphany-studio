@@ -2,10 +2,11 @@
 
 ## 基本信息
 
-- 阶段：M2.3b-1 Provider 离线适配 + M2.3b-2a/2b 受限 live smoke
+- 阶段：M2.3b-1 Provider 离线适配 + M2.3b-2a/2b 受限 live smoke +
+  M2.3b-3 结算币种正确性
 - 日期：2026-07-28
 - Commit：本章节与实现处于同一个 focused commit
-- 状态：Mock、dry-run、安全边界与真实 live smoke 均已验证
+- 状态：Mock、dry-run、安全边界、真实 live smoke 与双币种记账均已验证
 
 ## 1. 为什么做这一步
 
@@ -53,7 +54,7 @@ Workflow 不需要知道 Bearer Token、`/chat/completions` 或 HTTP 429。
 
 ## 3. 完成了什么
 
-当前离线切片已经具备：
+当前 M2.3b 已经具备：
 
 1. `DeepSeekProvider` 直接调用 OpenAI-compatible
    `POST /chat/completions`；
@@ -62,7 +63,7 @@ Workflow 不需要知道 Bearer Token、`/chat/completions` 或 HTTP 429。
 4. 素材被明确标记为不可信数据，不能把素材内文字当系统指令；
 5. 使用 JSON Output，关闭 thinking，限制输出 Token；
 6. 解析实际 model、input/output tokens 和缓存命中数据；
-7. 使用 2026-07-27 官方价格快照估算微美元费用；
+7. 使用 2026-07-28 官方 USD/CNY 价格快照，按显式配置估算费用；
 8. 400/401/402/422 为终止错误，429/500/503/网络错误为可重试错误；
 9. Provider 自己不重试，每个真实 HTTP 请求都必须回到 Worker 产生新 attempt；
 10. HTTP 客户端超时在账本中记为 `timed_out`；
@@ -80,9 +81,15 @@ Workflow 不需要知道 Bearer Token、`/chat/completions` 或 HTTP 429。
 18. smoke 串行发送请求，因此第一个任务失败时，可以在第二个请求发出前取消
     兄弟任务；
 19. smoke 使用独立 SQLite 并自动执行 Alembic，便于失败后检查 Trace；
-20. 最终摘要只显示 ID、状态、Token、耗时、费用与错误码，不显示内容或 Key。
+20. 最终摘要只显示 ID、状态、Token、耗时、分币种费用与错误码，不显示内容
+    或 Key；
 21. Alembic 在同一进程运行时不会禁用应用 logger，后续日志与排错能力保持
-    可用。
+    可用；
+22. `EPIPHANY_DEEPSEEK_BILLING_CURRENCY` 显式支持 `USD | CNY`，默认 USD
+    保持旧行为；
+23. 不自动猜测账户币种，历史 USD 与新 CNY 记录可以并存且分别汇总；
+24. Provider 在 HTTP 请求前把币种交给调用账本，因此 401、429、网络失败和
+    无 usage timeout 也不会错误回落为 USD。
 
 本步骤没有修改数据库表，因此没有新增 migration。M2.3a 的 `model_calls`
 已经足够保存当前字段。
@@ -94,7 +101,7 @@ Workflow 不需要知道 Bearer Token、`/chat/completions` 或 HTTP 429。
 | `runtime/providers/deepseek.py` | HTTP、认证、错误、usage 和费用 | 隔离厂商协议 |
 | `runtime/research_prompts.py` | Timeline/Theme Prompt | Prompt 是领域行为，不藏在 HTTP 代码里 |
 | `runtime/providers/base.py` | 统一结果与稳定错误类型 | Worker 不依赖 DeepSeek 错误文本 |
-| `config.py` | Provider、Key、模型和输入输出上限 | 运行参数不写死在 Workflow |
+| `config.py` | Provider、Key、模型、结算币种和输入输出上限 | 运行参数不写死在 Workflow |
 | `main.py` | 根据配置构造 Fake 或 DeepSeek | 默认安全，显式开启才联网 |
 | `runtime/worker.py` | timeout、retry 和失败用量记账 | 每次副作用都由 durable attempt 管理 |
 | `observability.py` | 输出 Provider/ModelCall 元数据 | 能按 ID 排错，但不打印内容 |
@@ -166,12 +173,13 @@ Task = failed(invalid_source_reference)
 已经发生。Provider 会把 usage 放进错误对象，Worker 再写回失败的
 `ModelCall`，避免显示成“零 Token、零费用”。
 
-### 5.5 怎样估算 DeepSeek 费用
+### 5.5 怎样按结算币种估算 DeepSeek 费用
 
-官方价格按每一百万 Token 计价。数据库使用微美元：
+官方价格按每一百万 Token 计价。数据库使用“所选币种的一百万分之一”：
 
 ```text
-1 USD = 1,000,000 micros
+1 USD = 1,000,000 USD micros
+1 CNY = 1,000,000 CNY micros
 ```
 
 因此计算时恰好可以使用：
@@ -184,6 +192,34 @@ cache_hit_tokens  * cache_hit_price_per_million
 
 并用 `Decimal` 舍入到整数 micros。若响应没有缓存拆分，系统保守地把全部
 输入当 cache miss。价格会变化，所以这里永远是 estimate，不是正式账单。
+
+DeepSeek 的 completion 响应返回 usage，但不返回账户最终以 USD 还是 CNY
+结算。系统不能从语言、地区、API Key 格式或余额安全推断，所以要求显式配置：
+
+```env
+# 默认值，保持历史行为
+EPIPHANY_DEEPSEEK_BILLING_CURRENCY=USD
+
+# 当前 Dashboard 与充值余额使用人民币的账户
+EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY
+```
+
+配置只允许 `USD | CNY`。新的 `ModelCall` 使用对应官方价格表，并把币种写入
+既有 `cost_currency` 字段。这里不需要 migration：表结构本来就能保存三位
+币种代码。历史 USD 行保持原样，不能为了界面统一而追溯改写成 CNY。
+
+币种在调用预留阶段就写入，而不是等成功响应以后再补。认证失败、限流、网络
+中断或 Worker timeout 可能没有 usage 和费用数值，但对应失败行仍会保留正确
+的 CNY 或 USD 标签，避免 Trace 与 preflight 配置互相矛盾。
+
+一个摘要如果看到多种币种，必须按币种分别合计，例如：
+
+```text
+USD -> 491 micros
+CNY -> 3510 micros
+```
+
+不能把它们相加成 `4001 micros`，因为这个数字没有货币意义。
 
 ### 5.6 错误怎样决定是否重试
 
@@ -258,6 +294,7 @@ pytest tests/test_deepseek_provider.py \
 - URL、Bearer Auth、model、JSON mode、thinking 和 Prompt；
 - Timeline/Theme 两种结构；
 - usage、缓存 Token 和费用；
+- 默认 USD、显式 CNY、非法币种拒绝和分币种 summary；
 - 401/402/429/500/503/timeout/network；
 - Provider 内没有隐藏 retry；
 - Key、素材和错误响应正文不进入日志；
@@ -276,11 +313,14 @@ pytest tests/test_deepseek_provider.py \
 - smoke harness 固定两次调用、一次 attempt；
 - 第一个调用失败时，排队中的第二个任务会在调用 Provider 前取消；
 - 最终摘要不包含 Source、Artifact 内容或错误正文。
+- USD 兼容默认值、显式 CNY 价格和非法币种配置；
+- mixed-currency summary 分开输出 USD/CNY，不生成无意义的混合总额。
+- CNY 请求在 401、429 和无 usage timeout 时仍以 CNY 预留并持久化。
 
 当前结果：
 
-- 新增 smoke 安全测试：5 项通过；
-- 完整测试：73 项通过；
+- smoke 安全测试：6 项通过；
+- 完整测试：83 项通过；
 - Ruff lint 与 format check：通过；
 - Alembic 当前为 `0003_model_call_trace (head)`，`alembic check` 无差异；
 - Provider HTTP 测试使用 MockTransport，smoke 安全测试使用 Fake Provider；
@@ -325,6 +365,8 @@ max_model_calls_per_run = 2
 max_attempts_per_task = 1
 max_concurrency = 1
 api_key_status = present 或 absent
+billing_currency = CNY 或 USD
+expected_cost.currency = 与 billing_currency 相同
 ```
 
 dry-run 不创建数据库，也不发送请求。真正执行前，把 Key 只放在不会提交的
@@ -332,7 +374,11 @@ dry-run 不创建数据库，也不发送请求。真正执行前，把 Key 只�
 
 ```env
 EPIPHANY_DEEPSEEK_API_KEY=your-local-key
+EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY
 ```
+
+上面的 CNY 适用于当前 Dashboard 与充值余额都以人民币显示的本地账户。如果
+账户以 USD 结算则使用 `USD`。脚本和模型响应不会自动识别这一点。
 
 然后运行：
 
@@ -433,10 +479,10 @@ Run succeeded
 `ModelCall` 是根据 API usage 与价格快照计算的可审计估算。官方页面可能延迟
 约五分钟，并使用 UTC+0 日期；对账时需要选中相同 API Key 与时间窗口。
 
-当前 DeepSeek Provider 使用官方 USD 价格快照，因此这两条历史记录保留为
-USD，不应事后覆盖。数据库已经将金额和 `cost_currency` 成对保存，但模型响应
-不返回账户最终扣费币种。下一次正确性补丁会显式支持 `CNY | USD` 配置，并让
-不同币种的汇总保持分组，不能直接相加。
+这两条历史记录是在默认 USD 配置下产生的，因此继续保留为 USD，不应事后
+覆盖。现在可以通过 `EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY|USD` 让后续
+调用使用与账户一致的官方价格表；系统不会自动识别。不同币种的摘要保持
+分组，不能直接相加。
 
 数据库文件、表用途和只读查询命令统一参见
 [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)。
@@ -479,6 +525,9 @@ model.call.failed
 ## 9. 这一步学到了什么
 
 - Provider 是厂商协议适配层，不是 Agent 编排框架；
+- Token usage 可以由响应读取，但账户结算币种需要显式配置；
+- 兼容性默认值不能成为改写历史数据的理由；
+- 多币种统计必须分组，不能先相加再补一个币种标签；
 - retry 必须归 durable Worker 管，才能让每次付费副作用都可见；
 - 调用成功、业务校验成功和 Workflow 成功是三个不同层次；
 - 失败请求也可能收费，所以错误对象有时必须携带 usage；
@@ -493,7 +542,8 @@ model.call.failed
 
 - 评价 Timeline/Theme 内容质量；
 - retry backoff 或 `Retry-After` 调度；
-- 精确的输入 Token 预估和美元总预算；
+- 精确的输入 Token 预估和按币种总预算；
+- 自动读取 DeepSeek Dashboard 的实际扣费或余额；
 - 保存 DeepSeek response ID；
 - 支持代理或任意 OpenAI-compatible Base URL；
 - 为 DeepSeek 模式运行旧 `fake-podcast`。
@@ -507,6 +557,7 @@ model.call.failed
 - 拉长 Worker 总 timeout；
 - 串行发送最多两个请求，第一次失败时不继续浪费第二次调用；
 - 执行前显示配置，执行后只输出 ID、tokens、耗时和预估费用；
+- 费用按币种分组，避免 USD 与 CNY 被错误相加；
 - 不打印 Prompt、响应正文或 Key。
 
 M2.3b 已完成。下一小步进入 M2.4 Interview Scaffold：把 Timeline 与 Theme
@@ -528,6 +579,7 @@ Bundle 转换成带来源引用、可供本人继续口述补充的半开放采�
 - [x] 日志中无隐私内容
 - [x] smoke harness / dry-run 安全验证通过
 - [x] 小额 live smoke 通过
+- [x] USD/CNY 显式配置、兼容默认值与分币种汇总通过
 - [x] README / Roadmap / Devlog 已同步
 - [x] 学习手册已同步
 - [x] 已创建 focused commit

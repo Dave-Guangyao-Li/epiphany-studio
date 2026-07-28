@@ -262,11 +262,13 @@ class ModelProvider(Protocol):
 - `DeepSeekProvider`（M2.3b）：首个真实托管模型适配器；
 - 其他厂商以后保持在同一契约后面，不让 Workflow 绑定某个 SDK。
 
-M2.3a 在调用 Provider 以前先写入一条 `ModelCall(status=started)`，并原子地
-增加 Run 调用数。完成后更新 tokens、耗时、估算费用、币种和错误码。唯一
-约束 `(task_id, attempt)` 防止同一次尝试重复记账；retry 是新 attempt，
-因此单独记账。单进程 Worker 使用短锁保护“检查预算 + 预留调用”，避免两个
-并发 Child 同时越过上限。
+M2.3a 在调用 Provider 以前先写入一条 `ModelCall(status=started)`，同时写入
+Provider、model 与配置的费用币种，并原子地增加 Run 调用数。这样即使请求在
+返回 usage 前遇到认证、限流、网络错误或 timeout，失败记录仍有正确币种。
+完成后更新 tokens、耗时、估算费用和错误码。唯一约束
+`(task_id, attempt)` 防止同一次尝试重复记账；retry 是新 attempt，因此单独
+记账。单进程 Worker 使用短锁保护“检查预算 + 预留调用”，避免两个并发 Child
+同时越过上限。
 
 真实模型的 Key、模型名、API 地址和数据保留选项通过配置传入。本地数据库
 仍是产品状态来源；不得在日志或 Event 中保存 prompt、响应正文或密钥。

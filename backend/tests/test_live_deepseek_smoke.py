@@ -32,6 +32,30 @@ class FirstCallFailureProvider(FakeProvider):
         raise ProviderInvalidRequestError(f"synthetic preflight failure for {invocation.kind}")
 
 
+class MixedCurrencyProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.invocations = 0
+
+    async def generate(self, invocation: TaskInvocation) -> ProviderResult:
+        result = await super().generate(invocation)
+        self.invocations += 1
+        if self.invocations == 1:
+            currency = "USD"
+            estimated_cost_micros = 7
+        else:
+            currency = "CNY"
+            estimated_cost_micros = 11
+        return ProviderResult(
+            content=result.content,
+            provider=result.provider,
+            model=result.model,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            estimated_cost_micros=estimated_cost_micros,
+            cost_currency=currency,
+        )
+
+
 def test_dry_run_does_not_create_database_or_enable_network(
     tmp_path: Path,
     capsys: object,
@@ -107,6 +131,40 @@ async def test_smoke_harness_is_bounded_and_summary_hides_content(
     assert SYNTHETIC_SOURCE not in serialized
     assert "content_json" not in serialized
     assert "error_message" not in serialized
+
+
+async def test_smoke_summary_groups_costs_by_currency(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "mixed-currency-smoke.db"
+    database_url = database_url_for_path(database_path)
+    database = Database(database_url)
+    await database.create_schema()
+    await database.close()
+
+    completed, processed_tasks = await run_smoke_workflow(
+        database_url=database_url,
+        provider=MixedCurrencyProvider(),
+    )
+    summary = build_sanitized_summary(
+        completed,
+        processed_tasks=processed_tasks,
+        database_path=str(database_path),
+    )
+
+    assert summary["passed"] is True
+    assert summary["totals"]["estimated_costs"] == {
+        "CNY": {
+            "micros": 11,
+            "amount": "0.000011",
+        },
+        "USD": {
+            "micros": 7,
+            "amount": "0.000007",
+        },
+    }
+    assert "estimated_cost_micros" not in summary["totals"]
+    assert "estimated_cost_usd" not in summary["totals"]
 
 
 async def test_first_failure_cancels_second_call_before_provider_invocation(

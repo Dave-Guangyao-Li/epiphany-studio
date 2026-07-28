@@ -37,6 +37,7 @@ def build_provider(settings: Settings) -> ModelProvider:
         api_key=settings.deepseek_api_key.get_secret_value(),
         base_url=settings.deepseek_base_url,
         model=settings.deepseek_model,
+        billing_currency=settings.deepseek_billing_currency,
         max_tokens=settings.deepseek_max_tokens,
         max_source_chars=settings.deepseek_max_source_chars,
         # The Worker owns the total deadline. Give httpx a slightly larger

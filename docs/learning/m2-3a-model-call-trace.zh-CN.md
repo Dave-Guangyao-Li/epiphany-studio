@@ -101,10 +101,17 @@ run.model_call_count += 1
 新实现先写：
 
 ```text
-ModelCall(status="started")
+ModelCall(
+  status="started",
+  provider=...,
+  model=...,
+  cost_currency=...
+)
 ```
 
-并同时增加 Run 计数。无论后面成功还是失败，这次尝试都不会消失。
+并同时增加 Run 计数。无论后面成功还是失败，这次尝试都不会消失；即使失败
+发生在 Provider 返回 Token usage 以前，Trace 也保留请求开始前已经确定的
+费用币种。
 
 ### 5.2 为什么 retry 要单独记账
 

@@ -59,6 +59,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M2.3b-1 | DeepSeek 接口、Prompt、错误和费用可离线验证 | Mock 已验证 | `046358c` |
 | M2.3b-2a | 受限真实调用命令、dry-run 与脱敏输出 | 离线已验证 | `fd232e0` |
 | M2.3b-2b | 使用短合成素材执行两次真实调用 | 完成 | 本次 focused commit |
+| M2.3b-3 | DeepSeek 费用可显式按 USD/CNY 估算与分组 | 完成 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -80,7 +81,9 @@ M2.3a 让每次 Provider attempt 产生持久化调用记录，并在调用前�
 M2.3b-2a 提供默认不联网、必须显式 `--execute` 的两次调用命令。默认仍是
 Fake；M2.3b-2b 已用短合成素材完成两次真实调用，并通过严格引用校验与
 fan-in。真实 Trace 保存在独立 SQLite 中，查看方法见
-[SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)。
+[SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)。M2.3b-3 支持显式选择
+USD 或 CNY 价格表；默认 USD 保持兼容，不自动猜测账户币种，也不改写历史
+记录。
 
 ## 当前还不能做什么
 
