@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from epiphany.events import append_event
+from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
 from epiphany.models import Artifact, Run, Task
 from epiphany.research_schemas import THEME_RESEARCH, TIMELINE_RESEARCH
 from epiphany.state_machine import (
@@ -21,6 +22,8 @@ logger = logging.getLogger("epiphany.orchestrator")
 FAKE_WORKFLOW_STEPS = ("prepare_sources", "fake_research", "assemble_artifact")
 RESEARCH_MANAGER = "research_manager"
 RESEARCH_CHILDREN = (TIMELINE_RESEARCH, THEME_RESEARCH)
+LEGACY_RESEARCH_WORKFLOW_VERSION = "v1"
+INTERVIEW_RESEARCH_WORKFLOW_VERSION = "v2"
 
 
 class Orchestrator:
@@ -260,6 +263,13 @@ class Orchestrator:
         run: Run,
         completed_task: Task,
     ) -> None:
+        if completed_task.kind == BUILD_INTERVIEW_SCAFFOLD:
+            await self._complete_interview_scaffold(
+                session,
+                run=run,
+                completed_task=completed_task,
+            )
+            return
         if completed_task.kind not in RESEARCH_CHILDREN or completed_task.parent_task_id is None:
             raise ValueError(f"unexpected episode-research task: {completed_task.kind}")
 
@@ -267,7 +277,10 @@ class Orchestrator:
             (
                 await session.execute(
                     select(Task)
-                    .where(Task.parent_task_id == completed_task.parent_task_id)
+                    .where(
+                        Task.parent_task_id == completed_task.parent_task_id,
+                        Task.kind.in_(RESEARCH_CHILDREN),
+                    )
                     .order_by(Task.kind)
                 )
             )
@@ -357,15 +370,60 @@ class Orchestrator:
                 "artifact_id": bundle.id,
             },
         )
-        validate_run_transition(run.status, RunStatus.SUCCEEDED)
-        run.status = RunStatus.SUCCEEDED
-        run.current_step = "complete"
-        run.output_artifact_id = bundle.id
+        if run.workflow_version == LEGACY_RESEARCH_WORKFLOW_VERSION:
+            validate_run_transition(run.status, RunStatus.SUCCEEDED)
+            run.status = RunStatus.SUCCEEDED
+            run.current_step = "complete"
+            run.output_artifact_id = bundle.id
+            await append_event(
+                session,
+                run_id=run.id,
+                event_type="run.succeeded",
+                payload={"output_artifact_id": bundle.id},
+            )
+            logger.info(
+                "Legacy research workflow completed at fan-in",
+                extra={
+                    "event": "workflow.fan_in.completed",
+                    "run_id": run.id,
+                    "task_id": manager.id,
+                    "artifact_id": bundle.id,
+                    "child_count": len(RESEARCH_CHILDREN),
+                },
+            )
+            return
+        if run.workflow_version != INTERVIEW_RESEARCH_WORKFLOW_VERSION:
+            raise ValueError(
+                f"unsupported episode-research workflow version: {run.workflow_version}"
+            )
+
+        scaffold_task = await self._enqueue_task(
+            session,
+            run=run,
+            kind=BUILD_INTERVIEW_SCAFFOLD,
+            agent_type="interviewer",
+            parent_task_id=None,
+            input_json={
+                "task_kind": BUILD_INTERVIEW_SCAFFOLD,
+                "topic": run.input_json["topic"],
+                "research_bundle_artifact_id": bundle.id,
+                "timeline": _without_execution(
+                    artifacts_by_task_id[by_kind[TIMELINE_RESEARCH].id].content_json
+                ),
+                "themes": _without_execution(
+                    artifacts_by_task_id[by_kind[THEME_RESEARCH].id].content_json
+                ),
+            },
+        )
         await append_event(
             session,
             run_id=run.id,
-            event_type="run.succeeded",
-            payload={"output_artifact_id": bundle.id},
+            task_id=scaffold_task.id,
+            event_type="workflow.interview_scaffold.queued",
+            payload={
+                "research_bundle_artifact_id": bundle.id,
+                "scaffold_task_id": scaffold_task.id,
+            },
         )
         logger.info(
             "Research workflow fanned in",
@@ -375,6 +433,66 @@ class Orchestrator:
                 "task_id": manager.id,
                 "artifact_id": bundle.id,
                 "child_count": len(RESEARCH_CHILDREN),
+            },
+        )
+        logger.info(
+            "Interview scaffold task queued",
+            extra={
+                "event": "workflow.interview_scaffold.queued",
+                "run_id": run.id,
+                "task_id": scaffold_task.id,
+                "artifact_id": bundle.id,
+            },
+        )
+
+    async def _complete_interview_scaffold(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        completed_task: Task,
+    ) -> None:
+        if completed_task.parent_task_id is not None:
+            raise ValueError("interview scaffold task must be a sequential root task")
+        if completed_task.output_artifact_id is None:
+            raise ValueError("interview scaffold task has no output artifact")
+
+        artifact = await session.get(Artifact, completed_task.output_artifact_id)
+        if artifact is None:
+            raise ValueError("interview scaffold artifact is missing")
+        sections = artifact.content_json.get("sections", [])
+        question_count = sum(len(section.get("questions", [])) for section in sections)
+
+        await append_event(
+            session,
+            run_id=run.id,
+            task_id=completed_task.id,
+            event_type="workflow.interview_scaffold.completed",
+            payload={
+                "artifact_id": artifact.id,
+                "section_count": len(sections),
+                "question_count": question_count,
+            },
+        )
+        validate_run_transition(run.status, RunStatus.SUCCEEDED)
+        run.status = RunStatus.SUCCEEDED
+        run.current_step = "complete"
+        run.output_artifact_id = artifact.id
+        await append_event(
+            session,
+            run_id=run.id,
+            event_type="run.succeeded",
+            payload={"output_artifact_id": artifact.id},
+        )
+        logger.info(
+            "Interview scaffold completed",
+            extra={
+                "event": "workflow.interview_scaffold.completed",
+                "run_id": run.id,
+                "task_id": completed_task.id,
+                "artifact_id": artifact.id,
+                "section_count": len(sections),
+                "question_count": question_count,
             },
         )
 
@@ -416,3 +534,7 @@ class Orchestrator:
             payload={"kind": kind, "attempt": task.attempt},
         )
         return task
+
+
+def _without_execution(content: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in content.items() if key != "_execution"}

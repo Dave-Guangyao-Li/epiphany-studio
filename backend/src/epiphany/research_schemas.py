@@ -29,7 +29,16 @@ class QuoteSourceMismatch(ResearchOutputError):
 class EpisodeResearchPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    topic: str = Field(min_length=1, max_length=200)
     source_ids: list[str] = Field(min_length=1, max_length=20)
+
+    @field_validator("topic")
+    @classmethod
+    def topic_must_not_be_blank(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("topic must contain non-whitespace characters")
+        return normalized
 
     @field_validator("source_ids")
     @classmethod

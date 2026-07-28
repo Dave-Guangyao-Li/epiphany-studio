@@ -22,6 +22,17 @@ class InvalidScaffoldSourceReference(InterviewScaffoldOutputError):
     code = "invalid_scaffold_source_reference"
 
 
+class ScaffoldTitleTopicMismatch(InterviewScaffoldOutputError):
+    code = "interview_scaffold_title_topic_mismatch"
+
+
+def _normalize_required_text(value: str) -> str:
+    normalized = " ".join(value.split())
+    if not normalized:
+        raise ValueError("text must contain non-whitespace characters")
+    return normalized
+
+
 def _unique_references(
     value: list[SourceReference],
 ) -> list[SourceReference]:
@@ -42,6 +53,14 @@ class InterviewScaffoldTaskInput(BaseModel):
     timeline: TimelineResearchOutput
     themes: ThemeResearchOutput
 
+    @field_validator("topic")
+    @classmethod
+    def topic_must_not_be_blank(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("topic must contain non-whitespace characters")
+        return normalized
+
 
 class GroundedStatement(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -49,6 +68,7 @@ class GroundedStatement(BaseModel):
     text: str = Field(min_length=1, max_length=2_000)
     source_refs: list[SourceReference] = Field(min_length=1, max_length=10)
 
+    _text_is_not_blank = field_validator("text")(_normalize_required_text)
     _source_refs_are_unique = field_validator("source_refs")(_unique_references)
 
 
@@ -60,6 +80,7 @@ class InterviewQuestion(BaseModel):
     keywords: list[str] = Field(min_length=1, max_length=8)
     source_refs: list[SourceReference] = Field(min_length=1, max_length=10)
 
+    _text_fields_are_not_blank = field_validator("prompt", "purpose")(_normalize_required_text)
     _source_refs_are_unique = field_validator("source_refs")(_unique_references)
 
     @field_validator("keywords")
@@ -77,9 +98,13 @@ class InterviewSection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(min_length=1, max_length=200)
+    source_refs: list[SourceReference] = Field(min_length=1, max_length=10)
     known_context: list[GroundedStatement] = Field(min_length=1, max_length=5)
     transition: GroundedStatement
     questions: list[InterviewQuestion] = Field(min_length=1, max_length=6)
+
+    _title_is_not_blank = field_validator("title")(_normalize_required_text)
+    _source_refs_are_unique = field_validator("source_refs")(_unique_references)
 
 
 class MaterialGap(BaseModel):
@@ -89,6 +114,7 @@ class MaterialGap(BaseModel):
     why_it_matters: str = Field(min_length=1, max_length=1_000)
     source_refs: list[SourceReference] = Field(min_length=1, max_length=10)
 
+    _text_fields_are_not_blank = field_validator("gap", "why_it_matters")(_normalize_required_text)
     _source_refs_are_unique = field_validator("source_refs")(_unique_references)
 
 
@@ -96,11 +122,13 @@ class InterviewScaffoldOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(min_length=1, max_length=200)
-    episode_intent: str = Field(min_length=1, max_length=1_000)
-    opening: str = Field(min_length=1, max_length=2_000)
-    sections: list[InterviewSection] = Field(min_length=2, max_length=8)
+    episode_intent: GroundedStatement
+    opening: GroundedStatement
+    sections: list[InterviewSection] = Field(min_length=2, max_length=6)
     material_gaps: list[MaterialGap] = Field(default_factory=list, max_length=10)
-    closing: str = Field(min_length=1, max_length=2_000)
+    closing: GroundedStatement
+
+    _title_is_not_blank = field_validator("title")(_normalize_required_text)
 
 
 def collect_research_reference_keys(
@@ -135,12 +163,24 @@ def validate_interview_scaffold_output(
         ) from error
 
     allowed_references = collect_research_reference_keys(parsed_input)
+    if parsed_output.title != parsed_input.topic:
+        raise ScaffoldTitleTopicMismatch(
+            "interview scaffold title must exactly match the requested topic"
+        )
     output_references = [
+        *parsed_output.episode_intent.source_refs,
+        *parsed_output.opening.source_refs,
+        *parsed_output.closing.source_refs,
+    ]
+    output_references.extend(
+        reference for section in parsed_output.sections for reference in section.source_refs
+    )
+    output_references.extend(
         reference
         for section in parsed_output.sections
         for statement in [*section.known_context, section.transition]
         for reference in statement.source_refs
-    ]
+    )
     output_references.extend(
         reference
         for section in parsed_output.sections

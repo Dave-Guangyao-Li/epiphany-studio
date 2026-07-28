@@ -9,8 +9,10 @@ import pytest
 from pydantic import ValidationError
 
 from epiphany.config import Settings
+from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
 from epiphany.main import build_provider
 from epiphany.observability import JsonFormatter
+from epiphany.runtime.output_validation import validate_task_output
 from epiphany.runtime.providers import (
     DeepSeekProvider,
     FakeProvider,
@@ -105,6 +107,96 @@ def _theme_content() -> dict[str, object]:
                 },
             }
         ],
+    }
+
+
+def _interview_task_input() -> dict[str, object]:
+    return {
+        "task_kind": BUILD_INTERVIEW_SCAFFOLD,
+        "topic": "五年后，我重新打开了这个播客",
+        "research_bundle_artifact_id": "art_research_bundle",
+        "timeline": _timeline_content(),
+        "themes": _theme_content(),
+    }
+
+
+def _interview_invocation() -> TaskInvocation:
+    return TaskInvocation(
+        task_id="task_interview_test",
+        run_id="run_deepseek_test",
+        kind=BUILD_INTERVIEW_SCAFFOLD,
+        attempt=1,
+        input_json=_interview_task_input(),
+        lease_token="lease_interview_test",
+    )
+
+
+def _interview_section(title: str) -> dict[str, object]:
+    source_refs = [
+        {
+            "source_id": "src_allowed",
+            "source_segment_id": "seg_allowed",
+        }
+    ]
+    return {
+        "title": title,
+        "source_refs": source_refs,
+        "known_context": [
+            {
+                "text": "素材记录了重新整理旧记录的时刻。",
+                "source_refs": source_refs,
+            }
+        ],
+        "transition": {
+            "text": "先回到重新打开旧记录的那个瞬间。",
+            "source_refs": source_refs,
+        },
+        "questions": [
+            {
+                "prompt": "重新听见过去的自己时，你最先注意到什么？",
+                "purpose": "补充当时的具体感受与现在的第一反应。",
+                "keywords": ["声音", "第一反应"],
+                "source_refs": source_refs,
+            }
+        ],
+    }
+
+
+def _interview_content() -> dict[str, object]:
+    return {
+        "title": "五年后，我重新打开了这个播客",
+        "episode_intent": {
+            "text": "理解声音如何让不同时间的自己重新相遇。",
+            "source_refs": [
+                {
+                    "source_id": "src_allowed",
+                    "source_segment_id": "seg_allowed",
+                }
+            ],
+        },
+        "opening": {
+            "text": "前几天，我重新打开了以前录下的声音。",
+            "source_refs": [
+                {
+                    "source_id": "src_allowed",
+                    "source_segment_id": "seg_allowed",
+                }
+            ],
+        },
+        "sections": [
+            _interview_section("重新按下播放键"),
+            _interview_section("声音留下的变化"),
+        ],
+        "material_gaps": [],
+        "closing": {
+            "text": "新的记忆出现时，我们再顺着它继续讲下去。",
+            "source_refs": [
+                {
+                    "source_id": "src_allowed",
+                    "source_segment_id": "seg_allowed",
+                }
+            ],
+        },
     }
 
 
@@ -289,6 +381,46 @@ async def test_theme_prompt_requires_exact_quotes() -> None:
     assert "必须逐字复制" in captured_prompt
     assert "不得改写、拼接或补字" in captured_prompt.replace("\n", "")
     assert result.content == _theme_content()
+
+
+async def test_fake_provider_builds_a_valid_grounded_interview_scaffold() -> None:
+    invocation = _interview_invocation()
+    result = await FakeProvider().generate(invocation)
+    validated = validate_task_output(
+        task_kind=invocation.kind,
+        task_input=invocation.input_json,
+        content=result.content,
+    )
+
+    assert result.provider == "fake"
+    assert len(validated["sections"]) == 2
+    assert validated["sections"][0]["questions"][0]["source_refs"] == [
+        {
+            "source_id": "src_allowed",
+            "source_segment_id": "seg_allowed",
+        }
+    ]
+
+
+async def test_interview_scaffold_uses_the_interview_prompt() -> None:
+    captured_prompt = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_prompt
+        body = json.loads(request.content)
+        captured_prompt = "\n".join(message["content"] for message in body["messages"])
+        return httpx.Response(200, json=_success_response(_interview_content()))
+
+    provider, client = await _provider_with_handler(handler)
+    try:
+        result = await provider.generate(_interview_invocation())
+    finally:
+        await client.aclose()
+
+    assert "半开放采访脚手架" in captured_prompt
+    assert "allowed_source_refs" in captured_prompt
+    assert "五年后，我重新打开了这个播客" in captured_prompt
+    assert result.content == _interview_content()
 
 
 async def test_unsupported_task_and_large_input_stop_before_http() -> None:

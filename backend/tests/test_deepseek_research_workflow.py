@@ -25,7 +25,10 @@ async def _create_run(
     )
     created = await service.create_run(
         workflow_type="episode-research",
-        payload={"source_ids": [imported.source.id]},
+        payload={
+            "topic": "五年后重新开始录播客",
+            "source_ids": [imported.source.id],
+        },
     )
     return created.id, {
         "source_id": imported.source.id,
@@ -51,7 +54,8 @@ def _response_for(
             "source_segment_id": "seg_outside_scope",
         }
 
-    if _task_kind(request) == "timeline_research":
+    task_kind = _task_kind(request)
+    if task_kind == "timeline_research":
         content = {
             "timeline_events": [
                 {
@@ -64,7 +68,7 @@ def _response_for(
             ],
             "open_questions": [],
         }
-    else:
+    elif task_kind == "theme_research":
         content = {
             "themes": [
                 {
@@ -81,6 +85,49 @@ def _response_for(
                     "source_ref": reference,
                 }
             ],
+        }
+    else:
+        grounded_statement = {
+            "text": "素材把不同年份的记录联系了起来。",
+            "source_refs": [reference],
+        }
+        grounded_question = {
+            "prompt": "重新整理这些记录时，你最先注意到了什么变化？",
+            "purpose": "补充已有研究结果没有呈现的具体感受。",
+            "keywords": ["记录", "变化"],
+            "source_refs": [reference],
+        }
+        content = {
+            "title": "五年后重新开始录播客",
+            "episode_intent": {
+                "text": "从已有证据出发，继续补充经历和认知变化。",
+                "source_refs": [reference],
+            },
+            "opening": {
+                "text": "这一次，我们从重新整理旧记录的时刻开始。",
+                "source_refs": [reference],
+            },
+            "sections": [
+                {
+                    "title": "回到记录现场",
+                    "source_refs": [reference],
+                    "known_context": [grounded_statement],
+                    "transition": grounded_statement,
+                    "questions": [grounded_question],
+                },
+                {
+                    "title": "理解后来的变化",
+                    "source_refs": [reference],
+                    "known_context": [grounded_statement],
+                    "transition": grounded_statement,
+                    "questions": [grounded_question],
+                },
+            ],
+            "material_gaps": [],
+            "closing": {
+                "text": "新的细节出现时，再顺着它继续追问。",
+                "source_refs": [reference],
+            },
         }
 
     return {
@@ -134,25 +181,26 @@ async def test_mocked_deepseek_research_succeeds_end_to_end(
 
     client = await _install_provider(worker, httpx.MockTransport(handler))
     try:
-        assert await worker.run_until_idle() == 2
+        assert await worker.run_until_idle() == 3
         completed = await service.get_run(run_id)
     finally:
         await client.aclose()
 
     assert completed.status == "succeeded"
-    assert request_count == 2
-    assert completed.model_call_count == 2
-    assert len(completed.model_calls) == 2
+    assert request_count == 3
+    assert completed.model_call_count == 3
+    assert len(completed.model_calls) == 3
     assert all(call.provider == "deepseek" for call in completed.model_calls)
     assert all(call.model == "deepseek-v4-flash" for call in completed.model_calls)
     assert all(call.status == "succeeded" for call in completed.model_calls)
-    assert sum(call.input_tokens for call in completed.model_calls) == 160
-    assert sum(call.output_tokens for call in completed.model_calls) == 40
-    assert sum(call.estimated_cost_micros for call in completed.model_calls) == 34
+    assert sum(call.input_tokens for call in completed.model_calls) == 240
+    assert sum(call.output_tokens for call in completed.model_calls) == 60
+    assert sum(call.estimated_cost_micros for call in completed.model_calls) == 51
     assert {artifact.kind for artifact in completed.artifacts} == {
         "timeline_research_result",
         "theme_research_result",
         "episode_research_bundle",
+        "build_interview_scaffold_result",
     }
 
 
@@ -171,16 +219,16 @@ async def test_cny_estimate_is_persisted_in_model_call_ledger(
         billing_currency="CNY",
     )
     try:
-        assert await worker.run_until_idle() == 2
+        assert await worker.run_until_idle() == 3
         completed = await service.get_run(run_id)
     finally:
         await client.aclose()
 
     assert completed.status == "succeeded"
-    assert len(completed.model_calls) == 2
+    assert len(completed.model_calls) == 3
     assert all(call.cost_currency == "CNY" for call in completed.model_calls)
     # Per call: 80 cache-miss input * CNY 1/M + 20 output * CNY 2/M.
-    assert [call.estimated_cost_micros for call in completed.model_calls] == [120, 120]
+    assert [call.estimated_cost_micros for call in completed.model_calls] == [120, 120, 120]
 
 
 async def test_rate_limit_retries_in_worker_and_accounts_each_request(
@@ -189,7 +237,11 @@ async def test_rate_limit_retries_in_worker_and_accounts_each_request(
     database, service, worker = runtime
     worker.max_concurrency = 1
     run_id, reference = await _create_run(database, service)
-    request_counts = {"timeline_research": 0, "theme_research": 0}
+    request_counts = {
+        "timeline_research": 0,
+        "theme_research": 0,
+        "build_interview_scaffold": 0,
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         kind = _task_kind(request)
@@ -204,16 +256,20 @@ async def test_rate_limit_retries_in_worker_and_accounts_each_request(
         billing_currency="CNY",
     )
     try:
-        assert await worker.run_until_idle() == 3
+        assert await worker.run_until_idle() == 4
         completed = await service.get_run(run_id)
     finally:
         await client.aclose()
 
     assert completed.status == "succeeded"
-    assert request_counts == {"timeline_research": 2, "theme_research": 1}
-    assert completed.model_call_count == 3
+    assert request_counts == {
+        "timeline_research": 2,
+        "theme_research": 1,
+        "build_interview_scaffold": 1,
+    }
+    assert completed.model_call_count == 4
     assert [call.status for call in completed.model_calls].count("failed") == 1
-    assert [call.status for call in completed.model_calls].count("succeeded") == 2
+    assert [call.status for call in completed.model_calls].count("succeeded") == 3
     assert any(call.error_code == "provider_rate_limited" for call in completed.model_calls)
     assert all(call.cost_currency == "CNY" for call in completed.model_calls)
 

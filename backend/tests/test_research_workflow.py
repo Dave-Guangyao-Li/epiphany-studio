@@ -10,6 +10,7 @@ import pytest
 from epiphany.config import Settings
 from epiphany.db import Database
 from epiphany.main import create_app
+from epiphany.models import Run
 from epiphany.runtime.providers import FakeProvider, ProviderResult, TaskInvocation
 from epiphany.runtime.worker import Worker
 from epiphany.services import RunService
@@ -36,7 +37,10 @@ async def test_episode_research_fans_out_and_fans_in(
 
     created = await service.create_run(
         workflow_type="episode-research",
-        payload={"source_ids": [source_id]},
+        payload={
+            "topic": "五年后重新开始录播客",
+            "source_ids": [source_id],
+        },
     )
 
     assert created.status == "running"
@@ -50,26 +54,33 @@ async def test_episode_research_fans_out_and_fans_in(
     }
     assert all(task.status == "queued" for task in children)
 
-    assert await worker.run_until_idle() == 2
+    assert await worker.run_until_idle() == 3
 
     completed = await service.get_run(created.id)
     assert completed.status == "succeeded"
     assert completed.current_step == "complete"
-    assert completed.model_call_count == 2
-    assert len(completed.artifacts) == 3
+    assert completed.model_call_count == 3
+    assert len(completed.tasks) == 4
+    assert len(completed.artifacts) == 4
     assert {artifact.kind for artifact in completed.artifacts} == {
         "timeline_research_result",
         "theme_research_result",
         "episode_research_bundle",
+        "build_interview_scaffold_result",
     }
     assert (
         next(task for task in completed.tasks if task.kind == "research_manager").status
         == "succeeded"
     )
+    scaffold_task = next(
+        task for task in completed.tasks if task.kind == "build_interview_scaffold"
+    )
+    assert scaffold_task.parent_task_id is None
+    assert scaffold_task.status == "succeeded"
     assert completed.output_artifact_id == next(
         artifact.id
         for artifact in completed.artifacts
-        if artifact.kind == "episode_research_bundle"
+        if artifact.kind == "build_interview_scaffold_result"
     )
 
     events = await service.list_events(created.id)
@@ -77,21 +88,69 @@ async def test_episode_research_fans_out_and_fans_in(
     assert "workflow.fan_out.started" in event_types
     assert "workflow.fan_in.waiting" in event_types
     assert "workflow.fan_in.completed" in event_types
+    assert "workflow.interview_scaffold.queued" in event_types
+    assert "workflow.interview_scaffold.completed" in event_types
+    assert event_types.index("workflow.fan_in.completed") < event_types.index(
+        "workflow.interview_scaffold.queued"
+    )
+    assert event_types.index("workflow.interview_scaffold.queued") < event_types.index(
+        "workflow.interview_scaffold.completed"
+    )
     assert event_types[-1] == "run.succeeded"
+
+
+async def test_in_flight_v1_research_run_finishes_without_new_topic_or_scaffold(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    source_id = await _import_source(database)
+    created = await service.create_run(
+        workflow_type="episode-research",
+        payload={
+            "topic": "temporary v2 topic",
+            "source_ids": [source_id],
+        },
+    )
+    async with database.sessions() as session, session.begin():
+        run = await session.get(Run, created.id)
+        assert run is not None
+        run.workflow_version = "v1"
+        run.input_json = {"source_ids": [source_id]}
+
+    assert await worker.run_until_idle() == 2
+    completed = await service.get_run(created.id)
+
+    assert completed.status == "succeeded"
+    assert completed.workflow_version == "v1"
+    assert completed.model_call_count == 2
+    assert {artifact.kind for artifact in completed.artifacts} == {
+        "timeline_research_result",
+        "theme_research_result",
+        "episode_research_bundle",
+    }
+    assert completed.output_artifact_id == next(
+        artifact.id
+        for artifact in completed.artifacts
+        if artifact.kind == "episode_research_bundle"
+    )
+    assert all(task.kind != "build_interview_scaffold" for task in completed.tasks)
 
 
 class ConcurrencyProbeProvider(FakeProvider):
     def __init__(self) -> None:
         self.active = 0
         self.max_active = 0
+        self.execution_order: list[tuple[str, str]] = []
 
     async def generate(self, invocation: TaskInvocation) -> ProviderResult:
         self.active += 1
         self.max_active = max(self.max_active, self.active)
+        self.execution_order.append(("start", invocation.kind))
         try:
             await asyncio.sleep(0.02)
             return await super().generate(invocation)
         finally:
+            self.execution_order.append(("finish", invocation.kind))
             self.active -= 1
 
 
@@ -105,11 +164,17 @@ async def test_research_children_execute_concurrently(
 
     created = await service.create_run(
         workflow_type="episode-research",
-        payload={"source_ids": [source_id]},
+        payload={
+            "topic": "五年后重新开始录播客",
+            "source_ids": [source_id],
+        },
     )
-    assert await worker.run_until_idle() == 2
+    assert await worker.run_until_idle() == 3
     assert (await service.get_run(created.id)).status == "succeeded"
     assert probe.max_active == 2
+    scaffold_start = probe.execution_order.index(("start", "build_interview_scaffold"))
+    assert probe.execution_order.index(("finish", "timeline_research")) < scaffold_start
+    assert probe.execution_order.index(("finish", "theme_research")) < scaffold_start
 
 
 class InvalidCitationProvider(FakeProvider):
@@ -153,7 +218,10 @@ async def test_invalid_citation_fails_parent_and_fences_late_sibling(
 
     created = await service.create_run(
         workflow_type="episode-research",
-        payload={"source_ids": [source_id]},
+        payload={
+            "topic": "五年后重新开始录播客",
+            "source_ids": [source_id],
+        },
     )
     assert await worker.run_until_idle() == 2
 
@@ -179,6 +247,113 @@ async def test_invalid_citation_fails_parent_and_fences_late_sibling(
     assert "worker.task.stale_result" in operational_events
 
 
+class InvalidScaffoldCitationProvider(FakeProvider):
+    async def generate(self, invocation: TaskInvocation) -> ProviderResult:
+        result = await super().generate(invocation)
+        if invocation.kind == "build_interview_scaffold":
+            result.content["sections"][0]["questions"][0]["source_refs"] = [
+                {
+                    "source_id": "src_not_in_research_bundle",
+                    "source_segment_id": "seg_not_in_research_bundle",
+                }
+            ]
+        return result
+
+
+async def test_invalid_scaffold_citation_fails_after_research_fan_in(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    source_id = await _import_source(database)
+    worker.provider = InvalidScaffoldCitationProvider()
+
+    created = await service.create_run(
+        workflow_type="episode-research",
+        payload={
+            "topic": "五年后重新开始录播客",
+            "source_ids": [source_id],
+        },
+    )
+    assert await worker.run_until_idle() == 3
+
+    failed = await service.get_run(created.id)
+    assert failed.status == "failed"
+    assert failed.current_step == "failed"
+    assert failed.output_artifact_id is None
+    assert failed.model_call_count == 3
+    assert {artifact.kind for artifact in failed.artifacts} == {
+        "timeline_research_result",
+        "theme_research_result",
+        "episode_research_bundle",
+    }
+    tasks_by_kind = {task.kind: task for task in failed.tasks}
+    assert tasks_by_kind["timeline_research"].status == "succeeded"
+    assert tasks_by_kind["theme_research"].status == "succeeded"
+    assert tasks_by_kind["research_manager"].status == "succeeded"
+    assert tasks_by_kind["build_interview_scaffold"].status == "failed"
+    assert (
+        tasks_by_kind["build_interview_scaffold"].error_code == "invalid_scaffold_source_reference"
+    )
+
+    events = await service.list_events(created.id)
+    event_types = [event.type for event in events]
+    assert event_types.index("workflow.fan_in.completed") < event_types.index(
+        "workflow.interview_scaffold.queued"
+    )
+    assert "workflow.interview_scaffold.completed" not in event_types
+    assert event_types[-1] == "run.failed"
+
+
+class InvocationCountingProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.invoked_kinds: list[str] = []
+
+    async def generate(self, invocation: TaskInvocation) -> ProviderResult:
+        self.invoked_kinds.append(invocation.kind)
+        return await super().generate(invocation)
+
+
+async def test_model_call_limit_two_rejects_scaffold_before_provider_call(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    source_id = await _import_source(database)
+    provider = InvocationCountingProvider()
+    worker.provider = provider
+    worker.max_model_calls_per_run = 2
+
+    created = await service.create_run(
+        workflow_type="episode-research",
+        payload={
+            "topic": "五年后重新开始录播客",
+            "source_ids": [source_id],
+        },
+    )
+    assert await worker.run_until_idle() == 3
+
+    failed = await service.get_run(created.id)
+    assert failed.status == "failed"
+    assert failed.model_call_count == 2
+    assert len(failed.model_calls) == 2
+    assert set(provider.invoked_kinds) == {
+        "timeline_research",
+        "theme_research",
+    }
+    tasks_by_kind = {task.kind: task for task in failed.tasks}
+    assert tasks_by_kind["build_interview_scaffold"].status == "failed"
+    assert tasks_by_kind["build_interview_scaffold"].error_code == "model_call_limit_exceeded"
+    assert {artifact.kind for artifact in failed.artifacts} == {
+        "timeline_research_result",
+        "theme_research_result",
+        "episode_research_bundle",
+    }
+
+    events = await service.list_events(created.id)
+    assert sum(event.type == "model.call.started" for event in events) == 2
+    assert sum(event.type == "model.call.limit_exceeded" for event in events) == 1
+    assert events[-1].type == "run.failed"
+
+
 async def test_episode_research_api_demo_and_missing_source(tmp_path: Path) -> None:
     app = create_app(
         settings=Settings(
@@ -190,11 +365,23 @@ async def test_episode_research_api_demo_and_missing_source(tmp_path: Path) -> N
     await app.state.database.create_schema()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        missing = await client.post(
+        invalid_payload = await client.post(
             "/runs",
             json={
                 "workflow_type": "episode-research",
                 "payload": {"source_ids": ["src_missing"]},
+            },
+        )
+        assert invalid_payload.status_code == 422
+
+        missing = await client.post(
+            "/runs",
+            json={
+                "workflow_type": "episode-research",
+                "payload": {
+                    "topic": "五年后重新开始录播客",
+                    "source_ids": ["src_missing"],
+                },
             },
         )
         assert missing.status_code == 404
@@ -213,15 +400,29 @@ async def test_episode_research_api_demo_and_missing_source(tmp_path: Path) -> N
             headers={"x-request-id": "req_research_demo"},
             json={
                 "workflow_type": "episode-research",
-                "payload": {"source_ids": [source_id]},
+                "payload": {
+                    "topic": "五年后重新开始录播客",
+                    "source_ids": [source_id],
+                },
             },
         )
         assert created.status_code == 201
         assert created.headers["x-request-id"] == "req_research_demo"
         run_id = created.json()["id"]
 
-        assert await app.state.worker.run_until_idle() == 2
+        assert await app.state.worker.run_until_idle() == 3
         completed = await client.get(f"/runs/{run_id}")
         assert completed.json()["status"] == "succeeded"
-        assert len(completed.json()["artifacts"]) == 3
+        assert len(completed.json()["tasks"]) == 4
+        assert len(completed.json()["artifacts"]) == 4
+        assert completed.json()["model_call_count"] == 3
+        output_artifact_id = completed.json()["output_artifact_id"]
+        assert (
+            next(
+                artifact["kind"]
+                for artifact in completed.json()["artifacts"]
+                if artifact["id"] == output_artifact_id
+            )
+            == "build_interview_scaffold_result"
+        )
     await app.state.database.close()

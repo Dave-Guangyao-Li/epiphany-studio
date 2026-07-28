@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
 from epiphany.runtime.providers.base import (
     ProviderResult,
     RetryableProviderError,
@@ -29,6 +30,7 @@ class FakeProvider:
             "assemble_artifact": self._assemble_artifact,
             "timeline_research": self._timeline_research,
             "theme_research": self._theme_research,
+            BUILD_INTERVIEW_SCAFFOLD: self._build_interview_scaffold,
         }
         try:
             content = handlers[invocation.kind](invocation.input_json)
@@ -126,4 +128,74 @@ class FakeProvider:
                     "source_ref": source_ref,
                 }
             ],
+        }
+
+    @staticmethod
+    def _build_interview_scaffold(input_json: dict[str, Any]) -> dict[str, Any]:
+        timeline_event = input_json["timeline"]["timeline_events"][0]
+        theme = input_json["themes"]["themes"][0]
+        timeline_refs = timeline_event["source_refs"]
+        theme_refs = theme["source_refs"]
+        topic = input_json["topic"]
+        return {
+            "title": topic,
+            "episode_intent": {
+                "text": "从已有时间线与主题证据出发，补充具体经历与认知变化。",
+                "source_refs": timeline_refs,
+            },
+            "opening": {
+                "text": f"这一次，我们先围绕“{topic}”把已经出现的线索慢慢展开。",
+                "source_refs": timeline_refs,
+            },
+            "sections": [
+                {
+                    "title": "回到事情发生的时刻",
+                    "source_refs": timeline_refs,
+                    "known_context": [
+                        {
+                            "text": timeline_event["description"],
+                            "source_refs": timeline_refs,
+                        }
+                    ],
+                    "transition": {
+                        "text": "先不急着总结，我们回到这件事发生时的具体场景。",
+                        "source_refs": timeline_refs,
+                    },
+                    "questions": [
+                        {
+                            "prompt": "如果把时间拉回那个时刻，你最先看见或感受到什么？",
+                            "purpose": "补充已有时间线没有记录的场景与感官细节。",
+                            "keywords": ["场景", "感受", "细节"],
+                            "source_refs": timeline_refs,
+                        }
+                    ],
+                },
+                {
+                    "title": "理解这段经历留下的变化",
+                    "source_refs": theme_refs,
+                    "known_context": [
+                        {
+                            "text": theme["insight"],
+                            "source_refs": theme_refs,
+                        }
+                    ],
+                    "transition": {
+                        "text": "有了当时的画面，再看看这段经历后来如何改变了你。",
+                        "source_refs": theme_refs,
+                    },
+                    "questions": [
+                        {
+                            "prompt": "现在回头看，你对这件事的理解和当时有什么不同？",
+                            "purpose": "把已有主题继续追问到具体的认知变化。",
+                            "keywords": ["回望", "变化", "理解"],
+                            "source_refs": theme_refs,
+                        }
+                    ],
+                },
+            ],
+            "material_gaps": [],
+            "closing": {
+                "text": "先从最有画面的部分开始讲，新的记忆出现时再顺着它继续追问。",
+                "source_refs": theme_refs,
+            },
         }

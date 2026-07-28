@@ -6,7 +6,19 @@ from epiphany.interview_schemas import (
     BUILD_INTERVIEW_SCAFFOLD,
     validate_interview_scaffold_output,
 )
-from epiphany.research_schemas import validate_research_output
+from epiphany.research_schemas import THEME_RESEARCH, TIMELINE_RESEARCH, validate_research_output
+
+UNVALIDATED_FAKE_TASKS = frozenset(
+    {
+        "prepare_sources",
+        "fake_research",
+        "assemble_artifact",
+    }
+)
+
+
+class TaskOutputValidationMissing(ValueError):
+    code = "task_output_validation_missing"
 
 
 def validate_task_output(
@@ -22,8 +34,12 @@ def validate_task_output(
             task_input=task_input,
             content=content,
         )
-    return validate_research_output(
-        task_kind=task_kind,
-        task_input=task_input,
-        content=content,
-    )
+    if task_kind in {TIMELINE_RESEARCH, THEME_RESEARCH}:
+        return validate_research_output(
+            task_kind=task_kind,
+            task_input=task_input,
+            content=content,
+        )
+    if task_kind in UNVALIDATED_FAKE_TASKS:
+        return content
+    raise TaskOutputValidationMissing(f"no output validator is registered for task: {task_kind}")

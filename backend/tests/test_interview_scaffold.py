@@ -10,7 +10,7 @@ from epiphany.interview_schemas import (
     validate_interview_scaffold_output,
 )
 from epiphany.runtime.interview_prompts import build_interview_prompt
-from epiphany.runtime.output_validation import validate_task_output
+from epiphany.runtime.output_validation import TaskOutputValidationMissing, validate_task_output
 from epiphany.runtime.providers import ProviderInputTooLargeError
 
 SOURCE_REF = {
@@ -19,7 +19,7 @@ SOURCE_REF = {
 }
 TASK_INPUT = {
     "task_kind": "build_interview_scaffold",
-    "topic": "五年后重新开始录播客",
+    "topic": "五年后，我重新打开了这个播客",
     "research_bundle_artifact_id": "art_research_bundle",
     "timeline": {
         "timeline_events": [
@@ -56,6 +56,7 @@ TASK_INPUT = {
 def _section(title: str) -> dict[str, object]:
     return {
         "title": title,
+        "source_refs": [SOURCE_REF],
         "known_context": [
             {
                 "text": "五年后，用户重新打开了以前的播客。",
@@ -80,8 +81,14 @@ def _section(title: str) -> dict[str, object]:
 def _valid_content() -> dict[str, object]:
     return {
         "title": "五年后，我重新打开了这个播客",
-        "episode_intent": "理解声音为什么能够成为跨越时间的记录。",
-        "opening": "前几天，我重新打开了一个很久没有更新的播客。",
+        "episode_intent": {
+            "text": "理解声音为什么能够成为跨越时间的记录。",
+            "source_refs": [SOURCE_REF],
+        },
+        "opening": {
+            "text": "前几天，我重新打开了一个很久没有更新的播客。",
+            "source_refs": [SOURCE_REF],
+        },
         "sections": [
             _section("重新按下播放键"),
             _section("声音留下了什么"),
@@ -93,7 +100,10 @@ def _valid_content() -> dict[str, object]:
                 "source_refs": [SOURCE_REF],
             }
         ],
-        "closing": "这一次，先把问题留在这里，等新的回忆慢慢出现。",
+        "closing": {
+            "text": "这一次，先把问题留在这里，等新的回忆慢慢出现。",
+            "source_refs": [SOURCE_REF],
+        },
     }
 
 
@@ -131,6 +141,24 @@ def test_scaffold_rejects_reference_outside_research_bundle() -> None:
         )
 
 
+def test_scaffold_title_must_match_topic_and_text_cannot_be_blank() -> None:
+    wrong_title = _valid_content()
+    wrong_title["title"] = "模型擅自改写的标题"
+    with pytest.raises(ValueError):
+        validate_interview_scaffold_output(
+            task_input=TASK_INPUT,
+            content=wrong_title,
+        )
+
+    blank_opening = _valid_content()
+    blank_opening["opening"]["text"] = " \n "
+    with pytest.raises(InterviewScaffoldSchemaError):
+        validate_interview_scaffold_output(
+            task_input=TASK_INPUT,
+            content=blank_opening,
+        )
+
+
 def test_scaffold_requires_two_sections_and_nonempty_unique_keywords() -> None:
     one_section = _valid_content()
     one_section["sections"] = one_section["sections"][:1]
@@ -161,7 +189,7 @@ def test_interview_prompt_contains_only_bounded_grounded_bundle() -> None:
 
     assert prompt.source_segment_count == 1
     assert prompt.source_char_count > 0
-    assert "五年后重新开始录播客" in rendered
+    assert "五年后，我重新打开了这个播客" in rendered
     assert "timeline" in rendered
     assert "themes" in rendered
     assert "allowed_source_refs" in rendered
@@ -183,6 +211,13 @@ def test_output_validation_dispatches_scaffold_contract() -> None:
     )
     assert validated["title"] == "五年后，我重新打开了这个播客"
 
+    with pytest.raises(TaskOutputValidationMissing):
+        validate_task_output(
+            task_kind="future_agent_without_validator",
+            task_input={},
+            content={"looks": "valid"},
+        )
+
 
 def test_markdown_export_is_deterministic_and_keeps_sources() -> None:
     first = render_interview_scaffold_markdown(_valid_content())
@@ -200,3 +235,17 @@ def test_markdown_export_is_deterministic_and_keeps_sources() -> None:
     invalid["unexpected"] = True
     with pytest.raises(ValidationError):
         render_interview_scaffold_markdown(invalid)
+
+
+def test_markdown_export_escapes_model_control_syntax_and_raw_html() -> None:
+    content = _valid_content()
+    content["sections"][0]["known_context"][0]["text"] = (
+        "<img src='https://tracker.example/pixel'>\n# injected [link](https://example.com)"
+    )
+
+    rendered = render_interview_scaffold_markdown(content)
+
+    assert "<img" not in rendered
+    assert "&lt;img" in rendered
+    assert "\n# injected" not in rendered
+    assert r"\# injected \[link\]\(https://example\.com\)" in rendered

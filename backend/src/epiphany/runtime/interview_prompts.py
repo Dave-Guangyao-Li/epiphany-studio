@@ -41,20 +41,34 @@ _INTERVIEW_INSTRUCTIONS = """
 
 要求：
 1. 生成 2 到 6 个有叙事顺序的 section。
-2. known_context 只复述已有证据；transition 要像口播时可以自然说出的过渡。
+2. title 必须逐字等于输入 topic。episode_intent、opening、closing、section title、
+   known_context 和 transition 都要带 allowed_source_refs；transition 要像口播时可以
+   自然说出的过渡。
 3. question 要具体、能唤起细节或认知变化；每题提供 purpose、1 到 8 个 keywords。
 4. material_gaps 只指出现有证据尚未回答的缺口，不得把猜测写成事实。
-5. title、episode_intent、opening、closing 可以组织表达，但不得加入新的个人事实。
-6. 所有 source_refs 只能原样复制 allowed_source_refs 中的对象。
+5. 所有 source_refs 只能原样复制 allowed_source_refs 中的对象。
 
 JSON 格式：
 {
-  "title": "采访脚手架标题",
-  "episode_intent": "这一期希望通过采访理解什么",
-  "opening": "不虚构事实的自然开场",
+  "title": "逐字复制输入 topic",
+  "episode_intent": {
+    "text": "这一期希望通过采访理解什么",
+    "source_refs": [
+      {"source_id": "原样复制", "source_segment_id": "原样复制"}
+    ]
+  },
+  "opening": {
+    "text": "不虚构事实的自然开场",
+    "source_refs": [
+      {"source_id": "原样复制", "source_segment_id": "原样复制"}
+    ]
+  },
   "sections": [
     {
       "title": "章节标题",
+      "source_refs": [
+        {"source_id": "原样复制", "source_segment_id": "原样复制"}
+      ],
       "known_context": [
         {
           "text": "已有素材明确支持的背景",
@@ -90,7 +104,12 @@ JSON 格式：
       ]
     }
   ],
-  "closing": "邀请用户继续表达的自然收束"
+  "closing": {
+    "text": "邀请用户继续表达的自然收束",
+    "source_refs": [
+      {"source_id": "原样复制", "source_segment_id": "原样复制"}
+    ]
+  }
 }
 """.strip()
 

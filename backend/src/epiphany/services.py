@@ -9,9 +9,10 @@ from sqlalchemy.orm import selectinload
 
 from epiphany.db import Database
 from epiphany.events import append_event
-from epiphany.models import Event, Run, Source, Task
+from epiphany.interview_markdown import render_interview_scaffold_markdown
+from epiphany.models import Artifact, Event, Run, Source, Task
 from epiphany.research_schemas import EpisodeResearchPayload
-from epiphany.runtime.orchestrator import Orchestrator
+from epiphany.runtime.orchestrator import INTERVIEW_RESEARCH_WORKFLOW_VERSION, Orchestrator
 from epiphany.schemas import ArtifactView, EventView, ModelCallView, RunView, TaskView
 from epiphany.state_machine import (
     RunStatus,
@@ -36,6 +37,10 @@ class InvalidRunPayload(ValueError):
 
 
 class RunSourceNotFound(LookupError):
+    pass
+
+
+class InterviewScaffoldExportNotReady(ValueError):
     pass
 
 
@@ -93,9 +98,12 @@ class RunService:
             initial_step = (
                 "research_fan_out" if workflow_type == "episode-research" else "prepare_sources"
             )
+            workflow_version = (
+                INTERVIEW_RESEARCH_WORKFLOW_VERSION if workflow_type == "episode-research" else "v1"
+            )
             run = Run(
                 workflow_type=workflow_type,
-                workflow_version="v1",
+                workflow_version=workflow_version,
                 status=RunStatus.QUEUED,
                 current_step=initial_step,
                 input_json=payload,
@@ -178,6 +186,45 @@ class RunService:
             )
             events = (await session.execute(statement)).scalars().all()
             return [EventView.model_validate(event) for event in events]
+
+    async def export_interview_scaffold_markdown(self, run_id: str) -> str:
+        async with self.database.sessions() as session:
+            run = await session.get(Run, run_id)
+            if run is None:
+                raise RunNotFound(run_id)
+            if run.status != RunStatus.SUCCEEDED or run.output_artifact_id is None:
+                raise InterviewScaffoldExportNotReady("interview scaffold is not ready for export")
+
+            artifact = await session.get(Artifact, run.output_artifact_id)
+            if (
+                artifact is None
+                or artifact.run_id != run.id
+                or artifact.kind != "build_interview_scaffold_result"
+            ):
+                raise InterviewScaffoldExportNotReady("run output is not an interview scaffold")
+
+            # Worker metadata belongs to runtime tracing, not the strict product
+            # artifact rendered for the user.
+            content = {
+                key: value for key, value in artifact.content_json.items() if key != "_execution"
+            }
+            try:
+                markdown = render_interview_scaffold_markdown(content)
+            except (ValueError, TypeError) as error:
+                raise InterviewScaffoldExportNotReady(
+                    "interview scaffold output is invalid"
+                ) from error
+
+        logger.info(
+            "Interview scaffold Markdown exported",
+            extra={
+                "event": "run.interview_scaffold_markdown.exported",
+                "run_id": run_id,
+                "artifact_id": artifact.id,
+                "markdown_char_count": len(markdown),
+            },
+        )
+        return markdown
 
     async def cancel_run(self, run_id: str) -> RunView:
         async with self.database.sessions() as session, session.begin():

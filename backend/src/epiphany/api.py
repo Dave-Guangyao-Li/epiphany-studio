@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from epiphany.schemas import CreateRunRequest, EventView, RunView
 from epiphany.services import (
+    InterviewScaffoldExportNotReady,
     InvalidRunPayload,
     RunAlreadyTerminal,
     RunNotFound,
@@ -54,6 +55,28 @@ async def get_run(
         return await service.get_run(run_id)
     except RunNotFound as error:
         raise HTTPException(status_code=404, detail="run not found") from error
+
+
+@router.get(
+    "/runs/{run_id}/exports/interview-scaffold.md",
+    response_class=Response,
+)
+async def export_interview_scaffold_markdown(
+    run_id: str,
+    service: RunServiceDependency,
+) -> Response:
+    try:
+        markdown = await service.export_interview_scaffold_markdown(run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except InterviewScaffoldExportNotReady as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": (f'attachment; filename="interview-scaffold-{run_id}.md"')},
+    )
 
 
 @router.get("/runs/{run_id}/events", response_model=list[EventView])
