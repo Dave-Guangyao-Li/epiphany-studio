@@ -409,6 +409,38 @@ Run succeeded
 这里记录的是一次历史 smoke 结果，不代表以后的固定延迟或账单价格。正文没有
 写进日志或文档，Key 也只以 `api_key_status=present` 出现。
 
+### 7.2 怎样与 DeepSeek Dashboard 对账
+
+本地 Trace 与官方 Dashboard 的同一 API Key、同一时间窗口对比结果：
+
+| 指标 | 本地 Trace | 官方 Dashboard |
+| --- | --- | --- |
+| 请求数 | 2 个成功 ModelCall | 2 次 API 请求 |
+| Input Token | 1,092 | 计入总量 |
+| Output Token | 1,209 | 计入总量 |
+| 总 Token | 2,301 | 2,301 |
+| 费用 | 0.000491 USD 本地估算 | `<0.01 CNY`，图表约 0.0035 CNY |
+
+按 2026-07-28 官方 CNY Flash 价格计算，本次使用量为：
+
+```text
+1,092 × 1 CNY / 1,000,000
+  + 1,209 × 2 CNY / 1,000,000
+= 0.003510 CNY
+```
+
+因此请求次数、Token 和费用量级都一致。Dashboard 是账户实际计费记录，本地
+`ModelCall` 是根据 API usage 与价格快照计算的可审计估算。官方页面可能延迟
+约五分钟，并使用 UTC+0 日期；对账时需要选中相同 API Key 与时间窗口。
+
+当前 DeepSeek Provider 使用官方 USD 价格快照，因此这两条历史记录保留为
+USD，不应事后覆盖。数据库已经将金额和 `cost_currency` 成对保存，但模型响应
+不返回账户最终扣费币种。下一次正确性补丁会显式支持 `CNY | USD` 配置，并让
+不同币种的汇总保持分组，不能直接相加。
+
+数据库文件、表用途和只读查询命令统一参见
+[SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)。
+
 ## 8. 日志与排错
 
 新增稳定日志事件：

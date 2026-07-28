@@ -200,33 +200,22 @@ No new upgrade operations detected.
 
 ## 7. 数据库怎样查看
 
-默认数据库文件：
+普通本地开发与 Swagger 默认使用：
 
 ```text
 backend/data/epiphany.db
 ```
 
-它被 `.gitignore` 排除，不能提交到 GitHub。
+真实 DeepSeek smoke 使用独立的：
 
-如果本机安装了 `sqlite3`：
-
-```bash
-sqlite3 data/epiphany.db
+```text
+backend/data/deepseek-live-smoke.db
 ```
 
-进入后可以执行：
-
-```sql
-.headers on
-.mode column
-SELECT id, workflow_type, status, current_step FROM runs;
-SELECT id, run_id, parent_task_id, kind, status FROM tasks;
-SELECT run_id, sequence, type, task_id FROM events ORDER BY run_id, sequence;
-```
-
-输入 `.quit` 退出。
-
-不要直接手动修改这些表。结构变化通过 Alembic，业务状态通过应用代码。
+这些文件都被 `.gitignore` 排除，不能提交到 GitHub。`.db`、`-wal`、`-shm`
+各自是什么、每张表存什么、怎样用 `sqlite3 -readonly` 安全查看，以及哪些
+正文与输出字段不应打印，统一参见
+[SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)。
 
 ## 8. 标准排错顺序
 

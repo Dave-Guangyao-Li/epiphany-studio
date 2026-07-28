@@ -43,6 +43,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 7. [M2.2：双 Agent 并行编排](m2-2-parallel-agents.zh-CN.md)
 8. [M2.3a：零费用模型调用 Trace](m2-3a-model-call-trace.zh-CN.md)
 9. [M2.3b：DeepSeek Provider](m2-3b-deepseek-provider.zh-CN.md)
+10. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -61,7 +62,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 
 ## 当前系统已经能做什么
 
-目前可以完成一条不调用大模型的后端验证链路：
+默认 Swagger 和本地开发路径继续使用零费用 Fake Provider，可以完成：
 
 ```text
 导入一段测试文字
@@ -78,7 +79,8 @@ M2.3a 让每次 Provider attempt 产生持久化调用记录，并在调用前�
 预算。M2.3b-1 又把 DeepSeek 的 HTTP、Prompt、JSON、错误和费用接到这条链路，
 M2.3b-2a 提供默认不联网、必须显式 `--execute` 的两次调用命令。默认仍是
 Fake；M2.3b-2b 已用短合成素材完成两次真实调用，并通过严格引用校验与
-fan-in。
+fan-in。真实 Trace 保存在独立 SQLite 中，查看方法见
+[SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)。
 
 ## 当前还不能做什么
 

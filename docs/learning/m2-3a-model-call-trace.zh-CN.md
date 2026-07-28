@@ -157,6 +157,10 @@ cost_currency = "CNY"
 表示预估 `0.4 CNY`。币种单独保存，因为 DeepSeek、Qwen、Kimi 或其他
 Provider 可能使用不同结算币种，不能把它们直接相加。
 
+一条 `ModelCall` 当前保存一组不可拆开的“估算金额 + 币种”，不是厂商发票。
+历史 USD 与 CNY 记录可以并存，但统计时必须按币种分组。将来如果 UI 需要
+显示换算币种，应额外保留汇率、来源和日期，不能覆盖原始历史估算。
+
 ### 5.5 ModelCall、Event 和 stdout 日志有什么区别
 
 - `ModelCall`：结构化调用账本，适合统计次数、Token、耗时和费用；

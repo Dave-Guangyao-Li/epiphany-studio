@@ -2,6 +2,20 @@
 
 ## 2026-07-28
 
+### M2.3b persistent data guide and provider reconciliation
+
+- Added a dedicated beginner-readable SQLite guide instead of continuing to
+  grow the general local-development chapter.
+- Documented the separate roles of the normal development database, the
+  DeepSeek smoke database, and SQLite WAL/SHM sidecars.
+- Recorded the purpose of each runtime table, safe read-only inspection
+  commands, privacy-sensitive fields, and backup cautions.
+- Reconciled the two persisted ModelCalls and 2,301 local Tokens with the
+  DeepSeek Dashboard, and clarified the boundary between local estimates and
+  provider billing.
+- Recorded the invariant that costs in different currencies must be grouped,
+  not directly summed or silently rewritten.
+
 ### M2.3b-2b first bounded live DeepSeek verification
 
 - Executed the guarded smoke command with its built-in synthetic source and

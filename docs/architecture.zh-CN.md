@@ -160,6 +160,10 @@ Subagent 是一个受约束的 Child Task，而不是独立微服务：
 - `started_at`
 - `completed_at`
 
+`estimated_cost_micros` 与 `cost_currency` 共同构成一次调用的费用估算，不是
+厂商账单。不同币种必须分别汇总；任何展示币种换算都属于带汇率来源和时间的
+派生数据，不能覆盖原始调用记录。
+
 ### 领域对象
 
 - `projects`（M3 前补充）
