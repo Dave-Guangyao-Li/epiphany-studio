@@ -86,6 +86,13 @@ and currency. It enforces the per-Run call limit before entering the Provider.
 The Fake Provider reports zero tokens and zero cost, so this accounting and
 failure behavior can be tested without a network request.
 
+M2.3b-1 adds a direct `httpx` adapter for the current DeepSeek V4 API plus
+Timeline/Theme prompts, strict JSON parsing, error mapping, usage/cost
+accounting, input/output bounds, and log redaction. It remains opt-in:
+`EPIPHANY_MODEL_PROVIDER=fake` is still the default. All current DeepSeek tests
+use MockTransport and incur no API usage; the live synthetic smoke test is the
+next separate step.
+
 No key or personal source material belongs in Git.
 
 Official references:
@@ -135,6 +142,13 @@ six-call default Run budget, and records terminal status, timing, tokens, and
 estimated cost. Retry attempts are counted independently; timeouts and
 budget-limit failures remain visible after restart. A new Alembic migration
 adds the trace table, and the full suite passes with 32 tests.
+
+M2.3b-1 connects the current DeepSeek V4 OpenAI-compatible contract behind the
+same Provider boundary without making a live request. Mock HTTP tests prove the
+request shape, both research prompts, usage/cost calculation, retry
+classification, timeout accounting, strict source validation, and end-to-end
+fan-in. A paid-but-truncated response still records non-zero usage. The next
+slice is one explicit two-call smoke test using only short synthetic material.
 
 ## License
 

@@ -1,6 +1,6 @@
 # MVP 路线图
 
-更新时间：2026-07-24
+更新时间：2026-07-28
 
 路线图按可演示的纵向切片推进，不按“先把所有基础设施搭完”推进。
 
@@ -87,12 +87,17 @@ Provider 以前失败。
 
 #### M2.3b：首个真实托管模型
 
-- [ ] DeepSeek OpenAI-compatible Provider
-- [ ] Timeline Researcher prompt
-- [ ] Theme Researcher prompt
-- [ ] HTTP/auth/rate-limit/overload 错误映射
+- [x] DeepSeek OpenAI-compatible Provider
+- [x] Timeline Researcher prompt
+- [x] Theme Researcher prompt
+- [x] HTTP/auth/rate-limit/overload 错误映射
 - [ ] 使用合成素材完成小额 live smoke test
-- [ ] 对真实返回继续执行结构化输出与引用校验
+- [x] 对 OpenAI-compatible Mock 返回继续执行结构化输出与引用校验
+
+离线验收：默认仍为 Fake；DeepSeek Provider 通过 MockTransport 验证请求、
+JSON、usage、费用、错误分类和日志脱敏。完整双 Researcher Run 能成功
+fan-in；429 只由 Worker 重试，401 不重试，timeout 记为 `timed_out`；
+付费但截断的响应仍保存 Token 和费用。真实联网验收尚未完成。
 
 演示：使用少量真实素材完成两个 Researcher，Trace 中可见调用与成本数据。
 

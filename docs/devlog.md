@@ -1,5 +1,31 @@
 # Development Log
 
+## 2026-07-28
+
+### M2.3b-1 DeepSeek Provider, zero-network validation
+
+- Added a direct OpenAI-compatible DeepSeek V4 adapter using runtime `httpx`.
+- Added separate Timeline and Theme prompts that treat source text as untrusted
+  data and require source-grounded JSON.
+- Added explicit Fake/DeepSeek configuration with a redacted `SecretStr` API
+  key; Fake remains the default.
+- Added HTTP, authentication, balance, rate-limit, server, overload, network,
+  timeout, finish-reason, protocol, model, and usage error handling.
+- Kept retry ownership in the Worker so every HTTP request has its own durable
+  Task attempt and `ModelCall`.
+- Corrected HTTP client timeouts to persist as `timed_out`.
+- Preserved tokens and estimated cost for paid HTTP 200 responses whose content
+  is truncated, filtered, overloaded, or otherwise unusable.
+- Restricted the first adapter to the official HTTPS host and added source
+  character and output Token bounds.
+- Added Provider/model/call/usage fields to JSON operational logs without
+  logging source content, prompts, model responses, error bodies, or keys.
+- Added MockTransport Provider unit tests and full dual-Researcher runtime
+  integration tests. No live request or API cost was used in this slice.
+- No migration was needed; the existing `model_calls` schema remains sufficient.
+- Ruff lint/format, all 68 tests, Alembic current/check, and diff whitespace
+  validation pass.
+
 ## 2026-07-27
 
 ### M2.3a zero-network model call trace

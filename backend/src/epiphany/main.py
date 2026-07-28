@@ -19,13 +19,30 @@ from epiphany.observability import (
     reset_request_id,
 )
 from epiphany.runtime.orchestrator import Orchestrator
-from epiphany.runtime.providers import FakeProvider, ModelProvider
+from epiphany.runtime.providers import DeepSeekProvider, FakeProvider, ModelProvider
 from epiphany.runtime.worker import Worker
 from epiphany.services import RunService
 from epiphany.source_api import router as source_router
 from epiphany.source_service import SourceService
 
 logger = logging.getLogger("epiphany.http")
+
+
+def build_provider(settings: Settings) -> ModelProvider:
+    if settings.model_provider == "fake":
+        return FakeProvider()
+    if settings.deepseek_api_key is None:
+        raise ValueError("EPIPHANY_MODEL_PROVIDER=deepseek requires EPIPHANY_DEEPSEEK_API_KEY")
+    return DeepSeekProvider(
+        api_key=settings.deepseek_api_key.get_secret_value(),
+        base_url=settings.deepseek_base_url,
+        model=settings.deepseek_model,
+        max_tokens=settings.deepseek_max_tokens,
+        max_source_chars=settings.deepseek_max_source_chars,
+        # The Worker owns the total deadline. Give httpx a slightly larger
+        # timeout so both layers do not race at the same millisecond.
+        request_timeout_seconds=settings.task_timeout_seconds + 5,
+    )
 
 
 def create_app(
@@ -41,7 +58,7 @@ def create_app(
     worker = Worker(
         database=database,
         orchestrator=orchestrator,
-        provider=provider or FakeProvider(),
+        provider=provider or build_provider(resolved_settings),
         lease_seconds=resolved_settings.worker_lease_seconds,
         timeout_seconds=resolved_settings.task_timeout_seconds,
         poll_interval_seconds=resolved_settings.worker_poll_interval_seconds,

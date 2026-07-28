@@ -267,6 +267,16 @@ M2.3a 在调用 Provider 以前先写入一条 `ModelCall(status=started)`，并
 真实模型的 Key、模型名、API 地址和数据保留选项通过配置传入。本地数据库
 仍是产品状态来源；不得在日志或 Event 中保存 prompt、响应正文或密钥。
 
+M2.3b 的 DeepSeek 适配器直接使用 `httpx`，自身不执行 retry。一次
+`generate()` 最多发送一个 HTTP 请求；429、500、503、网络和 timeout 交回
+Worker，以新的 Task attempt 和 `ModelCall` 重试。JSON Output 仍需通过
+Pydantic、引用范围和逐字 Quote 校验。
+
+首版只允许官方 `https://api.deepseek.com`，默认模型为
+`deepseek-v4-flash`，thinking 关闭。单 Task 还有素材字符数和输出 Token
+上限。即使 HTTP 200 的内容被截断或 JSON 不可用，只要响应带有可信 usage，
+失败的 `ModelCall` 也必须保存 Token 和预估费用。
+
 ## 11. API 和事件
 
 最小 API：
@@ -313,6 +323,10 @@ M2.2 的稳定事件包括 `workflow.fan_out.started`、
 Event 还会记录 Manager 失败及兄弟 Task 的 `sibling_failed` 取消原因；
 stdout 对应 `worker.task.failed` 和迟到结果的
 `worker.task.stale_result`，均不包含素材正文或模型输出。
+
+M2.3b 增加 `provider.deepseek.request.started/completed/failed`。它们只记录
+Run、Task、attempt、provider、model、Token、费用和错误码，不记录 HTTP
+请求体、响应正文、素材或密钥。
 
 ## 13. 升级触发条件
 

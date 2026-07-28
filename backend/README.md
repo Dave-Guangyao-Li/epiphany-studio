@@ -2,8 +2,9 @@
 
 The backend currently implements a single-user, single-machine durable task
 runner plus the M2.2 parallel research workflow and the M2.3a model-call trace.
-It intentionally uses a deterministic `FakeProvider`; no API key, network
-request, or paid model call is needed.
+M2.3b-1 also includes an opt-in DeepSeek V4 adapter. The default remains the
+deterministic `FakeProvider`, so setup, Swagger, and the default test suite need
+no API key, network request, or paid model call.
 
 The first workflow is deliberately small:
 
@@ -185,6 +186,40 @@ pytest tests/test_model_call_trace.py -vv
 This test module uses only Fake Providers. It verifies successful usage
 accounting, retry accounting, timeout traces, and rejection before an
 over-budget invocation.
+
+## M2.3b-1 DeepSeek adapter without live usage
+
+The DeepSeek adapter supports `deepseek-v4-flash` and `deepseek-v4-pro` through
+`https://api.deepseek.com/chat/completions`. It sends one HTTP request per Task
+attempt, uses JSON Output with thinking disabled, and returns usage and
+estimated USD micros to the existing ledger.
+
+It is disabled by default. The committed example remains:
+
+```env
+EPIPHANY_MODEL_PROVIDER=fake
+EPIPHANY_DEEPSEEK_API_KEY=
+EPIPHANY_DEEPSEEK_MODEL=deepseek-v4-flash
+EPIPHANY_DEEPSEEK_MAX_TOKENS=2000
+EPIPHANY_DEEPSEEK_MAX_SOURCE_CHARS=24000
+```
+
+Focused zero-network verification:
+
+```bash
+pytest tests/test_deepseek_provider.py \
+       tests/test_deepseek_research_workflow.py -vv
+```
+
+These tests use `httpx.MockTransport`; they do not read the local API key or
+contact DeepSeek. They cover successful dual research, 429 retry accounting,
+terminal authentication failure, timeout status, invalid citations, response
+usage/cost, and secret/content log redaction.
+
+When DeepSeek is selected, use `workflow_type: "episode-research"`. The old
+`fake-podcast` workflow is intentionally rejected before HTTP rather than sent
+to the hosted model. The explicit two-call synthetic live smoke command will be
+added in M2.3b-2.
 
 ## Debugging and logs
 

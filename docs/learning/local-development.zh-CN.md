@@ -268,9 +268,9 @@ uvicorn epiphany.main:app --reload --port 8001
 
 ### 为什么还没有调用真实模型
 
-这是当前阶段的设计。M2.2 先用 Fake Provider 证明编排、并发、引用和失败
-传播正确；M2.3a 再用 Fake Provider 证明预算、retry、timeout、tokens、
-延迟和费用记录正确。M2.3b 才会在同一契约后面接 DeepSeek。
+默认不调用真实模型是安全设计。M2.2 先用 Fake Provider 证明编排、并发、
+引用和失败传播；M2.3a 证明预算、retry、timeout、tokens、延迟和费用记录；
+M2.3b-1 已接入 DeepSeek HTTP 契约，但继续用 MockTransport 免费验证。
 
 检查零费用模型调用 Trace：
 
@@ -280,3 +280,19 @@ pytest tests/test_model_call_trace.py -vv
 
 成功路径的 Run JSON 会出现 `model_calls`。Fake 调用的 Token 和费用是 0，
 但 status、attempt 和 duration 会真实记录。
+
+检查 DeepSeek 适配器但不联网：
+
+```bash
+pytest tests/test_deepseek_provider.py \
+       tests/test_deepseek_research_workflow.py -vv
+```
+
+默认环境必须保持：
+
+```env
+EPIPHANY_MODEL_PROVIDER=fake
+```
+
+只有执行独立 live smoke 时才临时切换为 `deepseek`。不要把 Key、个人日记、
+播客原稿或真实响应复制进命令历史、测试 fixture、日志和 Git。

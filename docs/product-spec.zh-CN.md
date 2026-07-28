@@ -65,7 +65,8 @@ MVP 文字来源契约：
 ### 3.4 Local-first for MVP
 
 数据库、原始素材和产物默认保存在本机。上传到模型服务的内容应最小化，
-并明确记录调用范围。
+并明确记录调用范围。真实 Provider 必须显式开启，默认仍使用 Fake；首版还
+限制单次发送的素材字符数和输出 Token。
 
 ### 3.5 Observable agents
 
@@ -100,7 +101,7 @@ Subagent 对话。
 - 等待用户与恢复；
 - 运行事件和错误展示；
 - Markdown 导出；
-- 可替换的托管模型 Provider（首个计划接入 DeepSeek）与测试用 Fake Provider。
+- 可替换的托管模型 Provider（首个为 DeepSeek）与测试用 Fake Provider。
 
 ### 暂不包含
 
@@ -151,8 +152,9 @@ Subagent 对话。
 - 任一 Child 输出无效时，Manager 失败、仍在运行的同级 Child 被取消，
   lease 被清除，迟到结果不能写入 Artifact。
 
-M2.2 使用确定性 Fake Provider 验证以上契约，不评价研究内容质量；真实
-模型质量从 M2.3 开始验证。
+M2.2 使用确定性 Fake Provider 验证以上契约，不评价研究内容质量。M2.3b
+让 DeepSeek 格式的 HTTP 返回继续经过同一套校验；真实模型内容质量从小额
+live smoke 开始验证。
 
 ### Interviewer
 

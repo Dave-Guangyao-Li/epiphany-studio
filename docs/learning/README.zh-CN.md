@@ -1,6 +1,6 @@
 # Epiphany Studio 学习实践手册
 
-更新时间：2026-07-27
+更新时间：2026-07-28
 
 ## 这套手册解决什么问题
 
@@ -42,6 +42,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 6. [M2.1：Source 与来源引用](m2-1-source-contract.zh-CN.md)
 7. [M2.2：双 Agent 并行编排](m2-2-parallel-agents.zh-CN.md)
 8. [M2.3a：零费用模型调用 Trace](m2-3a-model-call-trace.zh-CN.md)
+9. [M2.3b：DeepSeek Provider](m2-3b-deepseek-provider.zh-CN.md)
 
 ## 当前进度
 
@@ -53,8 +54,9 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | 可观测性 | 请求、任务和错误可以通过 ID 与日志追踪 | 完成 | `0f5dd5a` |
 | M2.1 | 可以导入、分段并稳定引用文字素材 | 完成 | `0f2b46b` |
 | M2.2 | Manager 可以并行调度两个研究 Child Task | 完成 | `8e4306a` |
-| M2.3a | 在真实调用前记录预算、尝试、耗时与费用 | 完成 | 本次 focused commit |
-| M2.3b | 接入真实 DeepSeek Provider | 尚未开始 | — |
+| M2.3a | 在真实调用前记录预算、尝试、耗时与费用 | 完成 | `4d48c90` |
+| M2.3b-1 | DeepSeek 接口、Prompt、错误和费用可离线验证 | Mock 已验证 | 本次 focused commit |
+| M2.3b-2 | 使用短合成素材执行两次真实调用 | 待执行 | — |
 
 ## 当前系统已经能做什么
 
@@ -71,13 +73,13 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
   -> 从 Run、Task、Artifact、Event 和日志中复盘全过程
 ```
 
-M2.3a 进一步让每次 Provider attempt 产生持久化调用记录，并在调用前执行
-单 Run 预算。它验证了 Agent 产品的“运行骨架”和“调用电表”，但还没有
-验证真实模型生成内容的质量。
+M2.3a 让每次 Provider attempt 产生持久化调用记录，并在调用前执行单 Run
+预算。M2.3b-1 又把 DeepSeek 的 HTTP、Prompt、JSON、错误和费用接到这条链路，
+但默认仍是 Fake，尚未执行小额 live smoke。
 
 ## 当前还不能做什么
 
-- 尚未接入真实 DeepSeek API；
+- DeepSeek 适配器已完成，但尚未执行真实 API smoke；
 - 尚未生成真正有质量的时间线或主题分析；
 - 尚未生成采访脚手架和播客稿；
 - 尚未进入 `waiting_for_user`；
