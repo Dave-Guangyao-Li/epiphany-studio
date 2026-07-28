@@ -14,6 +14,7 @@ class FakeProvider:
 
     name = "fake"
     model = "fake-v1"
+    billing_currency = "USD"
 
     async def generate(self, invocation: TaskInvocation) -> ProviderResult:
         configured_failures = self._configured_failures(invocation.input_json)

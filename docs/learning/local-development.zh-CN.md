@@ -200,33 +200,22 @@ No new upgrade operations detected.
 
 ## 7. 数据库怎样查看
 
-默认数据库文件：
+普通本地开发与 Swagger 默认使用：
 
 ```text
 backend/data/epiphany.db
 ```
 
-它被 `.gitignore` 排除，不能提交到 GitHub。
+真实 DeepSeek smoke 使用独立的：
 
-如果本机安装了 `sqlite3`：
-
-```bash
-sqlite3 data/epiphany.db
+```text
+backend/data/deepseek-live-smoke.db
 ```
 
-进入后可以执行：
-
-```sql
-.headers on
-.mode column
-SELECT id, workflow_type, status, current_step FROM runs;
-SELECT id, run_id, parent_task_id, kind, status FROM tasks;
-SELECT run_id, sequence, type, task_id FROM events ORDER BY run_id, sequence;
-```
-
-输入 `.quit` 退出。
-
-不要直接手动修改这些表。结构变化通过 Alembic，业务状态通过应用代码。
+这些文件都被 `.gitignore` 排除，不能提交到 GitHub。`.db`、`-wal`、`-shm`
+各自是什么、每张表存什么、怎样用 `sqlite3 -readonly` 安全查看，以及哪些
+正文与输出字段不应打印，统一参见
+[SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)。
 
 ## 8. 标准排错顺序
 
@@ -268,9 +257,9 @@ uvicorn epiphany.main:app --reload --port 8001
 
 ### 为什么还没有调用真实模型
 
-这是当前阶段的设计。M2.2 先用 Fake Provider 证明编排、并发、引用和失败
-传播正确；M2.3a 再用 Fake Provider 证明预算、retry、timeout、tokens、
-延迟和费用记录正确。M2.3b 才会在同一契约后面接 DeepSeek。
+默认不调用真实模型是安全设计。M2.2 先用 Fake Provider 证明编排、并发、
+引用和失败传播；M2.3a 证明预算、retry、timeout、tokens、延迟和费用记录；
+M2.3b-1 已接入 DeepSeek HTTP 契约，但继续用 MockTransport 免费验证。
 
 检查零费用模型调用 Trace：
 
@@ -280,3 +269,49 @@ pytest tests/test_model_call_trace.py -vv
 
 成功路径的 Run JSON 会出现 `model_calls`。Fake 调用的 Token 和费用是 0，
 但 status、attempt 和 duration 会真实记录。
+
+检查 DeepSeek 适配器但不联网：
+
+```bash
+pytest tests/test_deepseek_provider.py \
+       tests/test_deepseek_research_workflow.py -vv
+```
+
+默认环境必须保持：
+
+```env
+EPIPHANY_MODEL_PROVIDER=fake
+```
+
+检查显式 smoke 命令但不联网：
+
+```bash
+python -m epiphany.live_deepseek_smoke
+```
+
+它默认只打印 preflight，不创建数据库，也不会发送请求。真正执行前，把 Key
+只放在忽略提交的 `backend/.env`：
+
+```env
+EPIPHANY_DEEPSEEK_API_KEY=your-local-key
+```
+
+然后显式运行：
+
+```bash
+python -m epiphany.live_deepseek_smoke --execute
+```
+
+这条独立命令不要求修改默认的 `EPIPHANY_MODEL_PROVIDER=fake`，也不需要启动
+Uvicorn 或 Swagger。它只使用短合成素材，最多调用两次，每个任务只尝试一次，
+Trace 保存在忽略提交的 `data/deepseek-live-smoke.db`。不要把 Key、个人日记、
+播客原稿或真实响应复制进命令历史、测试 fixture、日志和 Git。
+
+常见 smoke 排错：
+
+- `api_key_status=absent`：Key 尚未写入 `backend/.env`；
+- `live_smoke.crashed`：先看紧邻的结构化日志和稳定 `error_code`；
+- `passed=false`：检查摘要中 Task 与 ModelCall 的 status / `error_code`；
+- `ModelCall=succeeded` 但 Task failed：厂商调用成功，失败发生在 Schema、
+  引用或逐字 quote 校验；
+- `pytest: command not found`：先执行 `source .venv/bin/activate`。

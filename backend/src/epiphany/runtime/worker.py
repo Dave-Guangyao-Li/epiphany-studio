@@ -407,6 +407,7 @@ class Worker:
                 invocation,
                 provider=self.provider.name,
                 model=self.provider.model,
+                cost_currency=self.provider.billing_currency,
             )
         except ModelCallLeaseLost:
             logger.warning(
@@ -438,6 +439,19 @@ class Worker:
                 invocation,
                 status="timed_out",
                 duration_ms=duration_ms,
+                result=error.accounting_result,
+                error_code=error.code,
+            )
+            await self.fail(invocation, error)
+            return
+        except ProviderTimeoutError as error:
+            duration_ms = max(0, round((perf_counter() - started_at) * 1000))
+            await self.model_call_ledger.finish(
+                model_call_id,
+                invocation,
+                status="timed_out",
+                duration_ms=duration_ms,
+                result=error.accounting_result,
                 error_code=error.code,
             )
             await self.fail(invocation, error)
@@ -449,6 +463,7 @@ class Worker:
                 invocation,
                 status="failed",
                 duration_ms=duration_ms,
+                result=getattr(error, "accounting_result", None),
                 error_code=getattr(error, "code", "provider_error"),
             )
             await self.fail(invocation, error)

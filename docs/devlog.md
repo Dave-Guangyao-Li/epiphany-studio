@@ -1,5 +1,103 @@
 # Development Log
 
+## 2026-07-28
+
+### M2.3b explicit DeepSeek billing currency
+
+- Added `EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY|USD`, with `USD` as the
+  backward-compatible default.
+- Kept billing currency explicit because DeepSeek model responses report usage
+  but do not identify the account's settlement currency; no locale, API-key, or
+  balance-based guessing is performed.
+- Allowed the current local CNY-billed account to opt into the official CNY
+  price schedule while USD-billed accounts retain the existing USD schedule.
+- Changed live-smoke cost totals to remain grouped by currency rather than
+  adding unlike amounts.
+- Persisted the configured currency when a ModelCall is reserved, so failures
+  without usage data do not silently fall back to USD.
+- Reused the existing `estimated_cost_micros` and `cost_currency` columns, so no
+  database migration is needed and historical USD ModelCalls remain unchanged.
+- Added zero-network coverage for the compatibility default, explicit CNY
+  accounting, invalid configuration, grouped summaries, and CNY failure and
+  timeout traces.
+
+### M2.3b persistent data guide and provider reconciliation
+
+- Added a dedicated beginner-readable SQLite guide instead of continuing to
+  grow the general local-development chapter.
+- Documented the separate roles of the normal development database, the
+  DeepSeek smoke database, and SQLite WAL/SHM sidecars.
+- Recorded the purpose of each runtime table, safe read-only inspection
+  commands, privacy-sensitive fields, and backup cautions.
+- Reconciled the two persisted ModelCalls and 2,301 local Tokens with the
+  DeepSeek Dashboard, and clarified the boundary between local estimates and
+  provider billing.
+- Recorded the invariant that costs in different currencies must be grouped,
+  not directly summed or silently rewritten.
+
+### M2.3b-2b first bounded live DeepSeek verification
+
+- Executed the guarded smoke command with its built-in synthetic source and
+  dedicated ignored SQLite trace database.
+- Completed Timeline and Theme calls with `deepseek-v4-flash`; both succeeded
+  on attempt 1 without retry, timeout, or an error code.
+- Passed strict response schema, source-reference, verbatim-quote, and
+  deterministic fan-in validation, producing the three expected Artifacts.
+- Persisted two ModelCalls and the full Run/Task/Event trace under
+  `run_e8ad6452087c479cb84293ae3919201d`.
+- Recorded 1,092 input tokens, 1,209 output tokens, 15,435 ms combined Provider
+  latency, and USD 0.000491 estimated cost.
+- Independently queried the SQLite trace and confirmed Run success, three
+  successful Tasks, two completed ModelCalls, and one completed fan-in.
+- The captured output contained only key presence and sanitized metadata; it
+  did not expose the API key, source text, Prompt, or generated content.
+
+### M2.3b-2a bounded live-smoke harness
+
+- Added an explicit DeepSeek live-smoke module whose default behavior is a
+  zero-network dry run.
+- Fixed the live boundary to short synthetic material, `deepseek-v4-flash`,
+  two calls, one attempt per Task, one in-flight request, 800 output tokens per
+  call, and a longer Worker deadline.
+- Applied the normal Alembic migrations to a dedicated ignored
+  `data/deepseek-live-smoke.db` before execution so the real call trace remains
+  inspectable without touching the normal development database.
+- Kept programmatic Alembic logging from disabling existing application
+  loggers; the full suite exposed and now guards this cross-tool interaction.
+- Limited terminal output to Run/Task/ModelCall IDs, status, tokens, latency,
+  estimated cost, artifact kinds, and stable error codes.
+- Added safety tests proving dry-run does not create a database or enable
+  network access, the preflight cannot accept or print a key value, the
+  dedicated database reaches the current Alembic head, the workflow is bounded
+  to two calls, a first failure cancels the second call before Provider entry,
+  and the summary excludes source and Artifact content.
+- Verified the dry-run locally. No API key was present, so no external request
+  or paid usage occurred in this slice.
+
+### M2.3b-1 DeepSeek Provider, zero-network validation
+
+- Added a direct OpenAI-compatible DeepSeek V4 adapter using runtime `httpx`.
+- Added separate Timeline and Theme prompts that treat source text as untrusted
+  data and require source-grounded JSON.
+- Added explicit Fake/DeepSeek configuration with a redacted `SecretStr` API
+  key; Fake remains the default.
+- Added HTTP, authentication, balance, rate-limit, server, overload, network,
+  timeout, finish-reason, protocol, model, and usage error handling.
+- Kept retry ownership in the Worker so every HTTP request has its own durable
+  Task attempt and `ModelCall`.
+- Corrected HTTP client timeouts to persist as `timed_out`.
+- Preserved tokens and estimated cost for paid HTTP 200 responses whose content
+  is truncated, filtered, overloaded, or otherwise unusable.
+- Restricted the first adapter to the official HTTPS host and added source
+  character and output Token bounds.
+- Added Provider/model/call/usage fields to JSON operational logs without
+  logging source content, prompts, model responses, error bodies, or keys.
+- Added MockTransport Provider unit tests and full dual-Researcher runtime
+  integration tests. No live request or API cost was used in this slice.
+- No migration was needed; the existing `model_calls` schema remains sufficient.
+- Ruff lint/format, all 68 tests, Alembic current/check, and diff whitespace
+  validation pass.
+
 ## 2026-07-27
 
 ### M2.3a zero-network model call trace

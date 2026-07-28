@@ -1,6 +1,6 @@
 # MVP 路线图
 
-更新时间：2026-07-24
+更新时间：2026-07-28
 
 路线图按可演示的纵向切片推进，不按“先把所有基础设施搭完”推进。
 
@@ -87,14 +87,35 @@ Provider 以前失败。
 
 #### M2.3b：首个真实托管模型
 
-- [ ] DeepSeek OpenAI-compatible Provider
-- [ ] Timeline Researcher prompt
-- [ ] Theme Researcher prompt
-- [ ] HTTP/auth/rate-limit/overload 错误映射
-- [ ] 使用合成素材完成小额 live smoke test
-- [ ] 对真实返回继续执行结构化输出与引用校验
+- [x] DeepSeek OpenAI-compatible Provider
+- [x] Timeline Researcher prompt
+- [x] Theme Researcher prompt
+- [x] HTTP/auth/rate-limit/overload 错误映射
+- [x] 受限 live smoke 命令与零联网安全测试
+- [x] 使用合成素材完成小额 live smoke test
+- [x] 显式选择 USD/CNY 结算币种，默认 USD 保持兼容
+- [x] live summary 按币种分组，历史记录不换算或覆盖
+- [x] 对 OpenAI-compatible Mock 返回继续执行结构化输出与引用校验
 
-演示：使用少量真实素材完成两个 Researcher，Trace 中可见调用与成本数据。
+离线验收：默认仍为 Fake；DeepSeek Provider 通过 MockTransport 验证请求、
+JSON、usage、费用、错误分类和日志脱敏。完整双 Researcher Run 能成功
+fan-in；429 只由 Worker 重试，401 不重试，timeout 记为 `timed_out`；
+付费但截断的响应仍保存 Token 和费用。独立 smoke 命令默认 dry-run，只有
+显式 `--execute` 才允许两次短合成素材请求。DeepSeek 响应不提供账户结算
+币种，因此通过 `EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY|USD` 明确选择，不
+根据地区、Key 或余额猜测。默认 `USD` 保持旧行为；当前 CNY 账户在本地
+`.env` 设为 `CNY`。
+
+真实联网验收：`deepseek-v4-flash` 的 Timeline 与 Theme 调用均在 attempt 1
+成功，严格 Schema、来源引用、逐字 quote 与 fan-in 全部通过。合计 1,092
+input tokens、1,209 output tokens、15,435 ms Provider 耗时，预估费用
+0.000491 USD；无 retry、timeout 或错误码。
+
+币种正确性验收：新的调用按所选官方价格表保存 `cost_currency`，摘要分别
+汇总 USD 与 CNY。现有 USD smoke 记录保持不变；复用现有表结构，不新增
+migration。
+
+演示：使用短合成素材完成两个 Researcher，Trace 中可见调用与分币种成本数据。
 
 ### M2.4：采访脚手架
 

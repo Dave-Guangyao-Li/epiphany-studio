@@ -61,7 +61,7 @@ The initial implementation will use:
 - Python 3.12;
 - FastAPI and Pydantic;
 - SQLite in WAL mode;
-- a vendor-neutral model Provider, with DeepSeek planned as the first live adapter;
+- a vendor-neutral model Provider, with DeepSeek as the first live adapter;
 - one in-process durable worker loop;
 - `asyncio` for bounded fan-out/fan-in;
 - Server-Sent Events for live progress;
@@ -85,6 +85,30 @@ status, attempt, provider, model, latency, input/output tokens, estimated cost,
 and currency. It enforces the per-Run call limit before entering the Provider.
 The Fake Provider reports zero tokens and zero cost, so this accounting and
 failure behavior can be tested without a network request.
+
+M2.3b-1 adds a direct `httpx` adapter for the current DeepSeek V4 API plus
+Timeline/Theme prompts, strict JSON parsing, error mapping, usage/cost
+accounting, input/output bounds, and log redaction. It remains opt-in:
+`EPIPHANY_MODEL_PROVIDER=fake` is still the default. Provider HTTP tests use
+MockTransport and smoke safety tests use a Fake Provider, so neither incurs API
+usage.
+
+M2.3b-2a adds a separate, bounded live-smoke command. Its default mode is a
+zero-network preflight; `--execute` is required before it can send two requests
+using short synthetic material. It fixes the model to `deepseek-v4-flash`,
+allows one attempt per child Task, applies Alembic to a dedicated ignored
+SQLite trace database, and prints only IDs, status, tokens, latency, cost, and
+error codes. M2.3b-2b used this boundary to complete the first two-call live
+smoke successfully: both Research Tasks passed strict validation and fan-in,
+with an estimated total cost of USD 0.000491.
+
+M2.3b-3 makes DeepSeek cost estimates follow an explicit billing currency.
+`EPIPHANY_DEEPSEEK_BILLING_CURRENCY` accepts `USD` or `CNY` and defaults to
+`USD` for compatibility. DeepSeek does not return the account billing currency
+in a model response, so the backend does not guess from locale, API key, or
+balance. Live summaries keep totals grouped by currency instead of adding
+unlike amounts. No database migration is required, and existing USD traces
+remain historical USD estimates.
 
 No key or personal source material belongs in Git.
 
@@ -135,6 +159,22 @@ six-call default Run budget, and records terminal status, timing, tokens, and
 estimated cost. Retry attempts are counted independently; timeouts and
 budget-limit failures remain visible after restart. A new Alembic migration
 adds the trace table, and the full suite passes with 32 tests.
+
+M2.3b-1 connects the current DeepSeek V4 OpenAI-compatible contract behind the
+same Provider boundary without making a live request. Mock HTTP tests prove the
+request shape, both research prompts, usage/cost calculation, retry
+classification, timeout accounting, strict source validation, and end-to-end
+fan-in. A paid-but-truncated response still records non-zero usage.
+
+M2.3b-2a adds the explicit two-call smoke harness and verifies its dry-run,
+call/attempt bounds, isolated trace database, and redacted summary without
+network access. M2.3b-2b then completes one explicit live run with synthetic
+material: two `deepseek-v4-flash` calls succeed without retry, strict source
+validation accepts both results, and deterministic fan-in produces the final
+research bundle. The persistent trace records 1,092 input tokens, 1,209 output
+tokens, 15,435 ms of combined Provider latency, and USD 0.000491 estimated cost.
+M2.3b-3 adds explicit USD/CNY pricing selection and currency-grouped summaries
+without rewriting this historical USD trace or changing the database schema.
 
 ## License
 

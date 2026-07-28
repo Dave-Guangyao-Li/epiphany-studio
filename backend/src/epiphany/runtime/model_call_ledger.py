@@ -38,7 +38,11 @@ class ModelCallLedger:
         *,
         provider: str,
         model: str,
+        cost_currency: str,
     ) -> str:
+        normalized_cost_currency = cost_currency.strip().upper()
+        if len(normalized_cost_currency) != 3 or not normalized_cost_currency.isalpha():
+            raise ValueError("model call cost currency must be a three-letter code")
         limit_exceeded = False
         call_id: str | None = None
         async with self._reservation_lock:
@@ -97,6 +101,7 @@ class ModelCallLedger:
                         provider=provider,
                         model=model,
                         status="started",
+                        cost_currency=normalized_cost_currency,
                     )
                     session.add(model_call)
                     run.model_call_count += 1
@@ -111,6 +116,7 @@ class ModelCallLedger:
                             "attempt": invocation.attempt,
                             "provider": model_call.provider,
                             "model": model_call.model,
+                            "cost_currency": model_call.cost_currency,
                         },
                     )
                     call_id = model_call.id
@@ -144,6 +150,7 @@ class ModelCallLedger:
                 "model_call_id": call_id,
                 "provider": provider,
                 "model": model,
+                "cost_currency": normalized_cost_currency,
             },
         )
         return call_id

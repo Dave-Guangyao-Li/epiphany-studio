@@ -26,6 +26,9 @@ def test_json_log_contains_request_and_domain_context() -> None:
         record.event = "worker.task.completed"
         record.run_id = "run_test"
         record.task_id = "task_test"
+        record.model_call_id = "mcall_test"
+        record.provider = "deepseek"
+        record.model = "deepseek-v4-flash"
         RequestContextFilter().filter(record)
         payload = json.loads(JsonFormatter().format(record))
     finally:
@@ -36,3 +39,6 @@ def test_json_log_contains_request_and_domain_context() -> None:
     assert payload["request_id"] == "req_test_123"
     assert payload["run_id"] == "run_test"
     assert payload["task_id"] == "task_test"
+    assert payload["model_call_id"] == "mcall_test"
+    assert payload["provider"] == "deepseek"
+    assert payload["model"] == "deepseek-v4-flash"

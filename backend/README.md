@@ -2,8 +2,9 @@
 
 The backend currently implements a single-user, single-machine durable task
 runner plus the M2.2 parallel research workflow and the M2.3a model-call trace.
-It intentionally uses a deterministic `FakeProvider`; no API key, network
-request, or paid model call is needed.
+M2.3b-1 also includes an opt-in DeepSeek V4 adapter. The default remains the
+deterministic `FakeProvider`, so setup, Swagger, and the default test suite need
+no API key, network request, or paid model call.
 
 The first workflow is deliberately small:
 
@@ -185,6 +186,132 @@ pytest tests/test_model_call_trace.py -vv
 This test module uses only Fake Providers. It verifies successful usage
 accounting, retry accounting, timeout traces, and rejection before an
 over-budget invocation.
+
+## M2.3b-1 DeepSeek adapter without live usage
+
+The DeepSeek adapter supports `deepseek-v4-flash` and `deepseek-v4-pro` through
+`https://api.deepseek.com/chat/completions`. It sends one HTTP request per Task
+attempt, uses JSON Output with thinking disabled, and returns usage and
+estimated cost micros in the explicitly configured billing currency to the
+existing ledger.
+
+It is disabled by default. The committed example remains:
+
+```env
+EPIPHANY_MODEL_PROVIDER=fake
+EPIPHANY_DEEPSEEK_API_KEY=
+EPIPHANY_DEEPSEEK_MODEL=deepseek-v4-flash
+EPIPHANY_DEEPSEEK_BILLING_CURRENCY=USD
+EPIPHANY_DEEPSEEK_MAX_TOKENS=2000
+EPIPHANY_DEEPSEEK_MAX_SOURCE_CHARS=24000
+```
+
+`EPIPHANY_DEEPSEEK_BILLING_CURRENCY` accepts `USD` or `CNY`. It defaults to
+`USD` so existing installations retain their previous behavior. The DeepSeek
+completion response contains Token usage but not the account's billing
+currency, so the backend cannot safely auto-detect it. Set it explicitly in
+the ignored `backend/.env`; for an account whose Dashboard and balance are in
+CNY, use:
+
+```env
+EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY
+```
+
+Each new `ModelCall` stores the estimate and its configured currency together.
+Existing USD rows are not converted or rewritten, and no database migration is
+needed. When a summary contains more than one currency, it reports one total
+per currency rather than producing an invalid mixed-currency sum.
+
+Focused zero-network verification:
+
+```bash
+pytest tests/test_deepseek_provider.py \
+       tests/test_deepseek_research_workflow.py -vv
+```
+
+The Provider HTTP tests use `httpx.MockTransport`; they do not read the local
+API key or contact DeepSeek. They cover successful dual research, 429 retry
+accounting, terminal authentication failure, timeout status, invalid
+citations, response usage/cost, and secret/content log redaction.
+
+When DeepSeek is selected, use `workflow_type: "episode-research"`. The old
+`fake-podcast` workflow is intentionally rejected before HTTP rather than sent
+to the hosted model.
+
+## M2.3b-2a bounded live-smoke command
+
+The smoke harness is deliberately separate from `pytest`, `uvicorn`, and
+Swagger. Running it without `--execute` is a zero-network preflight:
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m epiphany.live_deepseek_smoke
+```
+
+The preflight reports whether a key is present, but never prints its value. It
+also shows the fixed safety boundary:
+
+- synthetic text only;
+- `deepseek-v4-flash`;
+- two model calls maximum;
+- one attempt per child Task;
+- one in-flight request, so an early failure can cancel the second call;
+- 800 output tokens maximum per call;
+- a small estimated cost in the explicitly configured billing currency, rather
+  than a billing guarantee.
+
+To perform the intentional live check, put the key only in ignored
+`backend/.env`:
+
+```env
+EPIPHANY_DEEPSEEK_API_KEY=your-local-key
+EPIPHANY_DEEPSEEK_BILLING_CURRENCY=CNY
+```
+
+The example uses `CNY` because the current local DeepSeek account is billed in
+CNY. Use `USD` for a USD-billed account.
+
+Then run:
+
+```bash
+python -m epiphany.live_deepseek_smoke --execute
+```
+
+The command applies Alembic to the dedicated ignored
+`data/deepseek-live-smoke.db`, imports a short synthetic Source, runs the two
+Researcher Tasks, and exits successfully only if both ModelCalls and the final
+fan-in succeed. It prints IDs, task/call status, tokens, duration, estimated
+cost totals grouped by currency, and artifact kinds. It does not print the key,
+Prompt, source text, generated content, or error response body. No FastAPI
+server or Swagger page is needed.
+
+Focused zero-network safety verification:
+
+```bash
+pytest tests/test_live_deepseek_smoke.py -vv
+```
+
+If the live command fails, start with the final `run.id`, Task `error_code`,
+ModelCall status, and the structured logs. A 401 usually means an invalid key,
+402 means insufficient API balance, and network/timeout failures leave a
+durable trace in the dedicated database.
+
+The first live verification completed on 2026-07-28 with Run
+`run_e8ad6452087c479cb84293ae3919201d`:
+
+- both `timeline_research` and `theme_research` succeeded on attempt 1;
+- two `deepseek-v4-flash` ModelCalls succeeded;
+- strict schema, source-reference, and quote validation passed;
+- deterministic fan-in produced all three expected Artifacts;
+- usage was 1,092 input and 1,209 output tokens;
+- combined Provider latency was 15,435 ms;
+- estimated total cost was USD 0.000491.
+
+These values are a historical smoke result, not a future latency or billing
+guarantee. The ignored SQLite trace retains the corresponding Tasks, Events,
+ModelCalls, and Artifact metadata. Enabling CNY for future calls does not alter
+these two USD rows.
 
 ## Debugging and logs
 

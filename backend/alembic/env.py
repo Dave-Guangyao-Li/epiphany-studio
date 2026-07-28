@@ -13,7 +13,10 @@ from epiphany.models import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Programmatic migration callers (for example the bounded live-smoke
+    # harness) share a process with application loggers. Alembic must configure
+    # its own output without disabling those existing loggers.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 if database_url := os.getenv("EPIPHANY_DATABASE_URL"):
     config.set_main_option("sqlalchemy.url", database_url)

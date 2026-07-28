@@ -101,10 +101,17 @@ run.model_call_count += 1
 新实现先写：
 
 ```text
-ModelCall(status="started")
+ModelCall(
+  status="started",
+  provider=...,
+  model=...,
+  cost_currency=...
+)
 ```
 
-并同时增加 Run 计数。无论后面成功还是失败，这次尝试都不会消失。
+并同时增加 Run 计数。无论后面成功还是失败，这次尝试都不会消失；即使失败
+发生在 Provider 返回 Token usage 以前，Trace 也保留请求开始前已经确定的
+费用币种。
 
 ### 5.2 为什么 retry 要单独记账
 
@@ -156,6 +163,10 @@ cost_currency = "CNY"
 
 表示预估 `0.4 CNY`。币种单独保存，因为 DeepSeek、Qwen、Kimi 或其他
 Provider 可能使用不同结算币种，不能把它们直接相加。
+
+一条 `ModelCall` 当前保存一组不可拆开的“估算金额 + 币种”，不是厂商发票。
+历史 USD 与 CNY 记录可以并存，但统计时必须按币种分组。将来如果 UI 需要
+显示换算币种，应额外保留汇率、来源和日期，不能覆盖原始历史估算。
 
 ### 5.5 ModelCall、Event 和 stdout 日志有什么区别
 

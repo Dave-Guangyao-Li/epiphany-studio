@@ -198,9 +198,10 @@ Theme 开始 ────┘
 
 把“需要生成一个结构化结果”转换成具体模型调用的适配层。
 
-当前 `FakeProvider` 只返回确定性测试数据，不联网、不收费。M2.3a 已经让
-Fake 调用经过和真实模型相同的预算、耗时与用量记录边界；M2.3b 再增加
-真实 DeepSeek Provider 和网络请求。
+`FakeProvider` 返回确定性测试数据，不联网、不收费。M2.3a 让 Fake 调用
+经过和真实模型相同的预算、耗时与用量记录边界；M2.3b 增加
+`DeepSeekProvider`，负责 HTTP、认证、JSON、usage、费用和错误映射。默认
+仍是 Fake，只有显式配置后才允许真实网络请求。
 
 ### Lease
 

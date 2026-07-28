@@ -7,6 +7,15 @@ from typing import Any, Protocol
 class ProviderError(RuntimeError):
     code = "provider_error"
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        accounting_result: ProviderResult | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.accounting_result = accounting_result
+
 
 class RetryableProviderError(ProviderError):
     code = "provider_temporarily_unavailable"
@@ -14,6 +23,50 @@ class RetryableProviderError(ProviderError):
 
 class ProviderTimeoutError(RetryableProviderError):
     code = "provider_timeout"
+
+
+class ProviderNetworkError(RetryableProviderError):
+    code = "provider_network_error"
+
+
+class ProviderRateLimitedError(RetryableProviderError):
+    code = "provider_rate_limited"
+
+
+class ProviderServerError(RetryableProviderError):
+    code = "provider_server_error"
+
+
+class ProviderOverloadedError(RetryableProviderError):
+    code = "provider_overloaded"
+
+
+class ProviderAuthenticationError(ProviderError):
+    code = "provider_authentication_failed"
+
+
+class ProviderInsufficientBalanceError(ProviderError):
+    code = "provider_insufficient_balance"
+
+
+class ProviderInvalidRequestError(ProviderError):
+    code = "provider_invalid_request"
+
+
+class ProviderResponseError(ProviderError):
+    code = "provider_response_invalid"
+
+
+class ProviderOutputTruncatedError(ProviderResponseError):
+    code = "provider_output_truncated"
+
+
+class ProviderContentFilteredError(ProviderResponseError):
+    code = "provider_content_filtered"
+
+
+class ProviderInputTooLargeError(ProviderError):
+    code = "provider_input_too_large"
 
 
 class ModelCallLimitExceeded(ProviderError):
@@ -52,5 +105,6 @@ class ProviderResult:
 class ModelProvider(Protocol):
     name: str
     model: str
+    billing_currency: str
 
     async def generate(self, invocation: TaskInvocation) -> ProviderResult: ...
