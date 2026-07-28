@@ -308,13 +308,22 @@ M2.3b 的 DeepSeek 适配器直接使用 `httpx`，自身不执行 retry。一�
 Worker，以新的 Task attempt 和 `ModelCall` 重试。JSON Output 仍需通过
 Pydantic、引用范围和逐字 Quote 校验。
 
-M2.4 为 Interviewer 增加独立的 strict 输入、Prompt 与输出契约。Prompt
-只序列化已校验 Timeline/Theme 结果和从中收集的 `allowed_source_refs`，
-将研究文字明确视为不可信数据，并继续执行素材字符上限。输出禁止额外字段，
+M2.4 为 Interviewer 增加独立的 strict 输入、Prompt 与输出契约。两个
+Researcher 同时接收 `topic` 与 SourceSegment，并把二者都视为不可信数据；
+topic 只帮助筛选相关证据，不能改变系统规则。Interviewer Prompt 只序列化
+已校验 Timeline/Theme 结果和从中收集的 `allowed_source_refs`，研究文字仍被
+视为不可信数据。Provider 和应用配置为原始 Researcher 输入、已校验的合并
+研究 Bundle 提供两个独立字符上限，避免聚合结果错误复用单份素材限制；默认
+都为 24,000 以保持兼容，realistic E2E 则显式使用 8,000 / 24,000。输出禁止额外字段，
 标题必须逐字等于 Run 的 `topic`；episode intent、开场、收束、section、
 known context、transition、question 和 material gap 都必须带引用，且引用
 只能来自研究 Bundle。Worker 在 Artifact 提交前统一调度这套验证，未知 Agent
 若没有注册 validator 会直接失败。
+
+Interviewer 还必须保留素材中的事实状态：计划、草稿、愿望、准备和尝试不能
+改写成已经完成或发布。当前这是一条 Prompt 约束，不是形式化语义证明；
+引用白名单只验证可追踪性，正式内容仍需要人工确认或未来的 claim-level
+verifier。
 
 调用预算仍在进入 Provider 前原子预留。将单 Run 预算设为二时，两个并行
 Researcher 可以完成，第三个 Interviewer 调用会以
@@ -348,9 +357,12 @@ SSE 用于低成本实时显示。客户端断线后先从数据库按 `sequence
 导出 endpoint 接受 `waiting_for_user` 或 `succeeded`，但
 `output_artifact_id` 必须指向 `build_interview_scaffold_result`；未就绪、
 类型不符或内容无效时返回冲突错误。这样用户能先读脚手架再补充口述。
-Markdown 由已验证 JSON 确定性渲染，保留每处 Source ID 与 Segment ID，并
-对所有模型文本转义 Markdown 控制字符和原始 HTML，避免模型文本改变文档
-结构或注入链接、标签。运行追踪用的 `_execution` metadata 不会进入导出。
+Markdown 由已验证 JSON 确定性渲染。正文把原始 Source/Segment ID 显示为
+短标签 `[S1]`，文末通过数据库中的 Source 标题与 Segment 位置生成来源索引；
+结构化 Artifact 与数据库仍保留原始 ID，因此追踪能力没有丢失。任何引用
+无法解析到对应 Source/Segment 元数据时，导出返回 409，不会猜测来源。所有
+模型文本会转义 Markdown 控制字符和原始 HTML，避免改变文档结构或注入链接、
+标签。运行追踪用的 `_execution` metadata 不会进入导出。
 
 M3.1 的实际 Resume 契约是：
 

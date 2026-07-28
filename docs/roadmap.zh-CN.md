@@ -172,9 +172,13 @@ ModelCall 仍为三次、不会产生额外 Token 或费用；最终
 同 ID 不同素材返回 409；缺失 Source 返回 404 且继续等待；等待时可以取消，
 取消后不能 Resume；同进程内并发 Resume、并发 Resume/Cancel 均只有一个有效
 状态转换。v1 仍停在研究 Bundle，v2 仍在脚手架后成功。复用既有表结构，无
-新 migration；Fake 全流程 E2E 与当前 120 项测试通过，Alembic 无 schema
-drift。真实 DeepSeek 已进行三次有界 E2E 尝试，验证了调用账本、费用和失败
-诊断，但尚未完整走到 Resume 成功。
+新 migration；Fake 全流程 E2E、受限 DeepSeek 真实 E2E 与当前 130 项测试
+通过，Alembic 无 schema drift。真实验收使用三份完整初始素材和一份补充
+口述，成功走到 `waiting_for_user -> Resume -> succeeded`：4 个 Source、
+21 个 Segment、4 个成功 Task、3 次模型调用、最终 5 个 Artifact 和 29 个
+Event，本地估算 CNY 0.023386。第一次完整素材 Run 暴露了合并 Bundle 错误
+复用 8,000 字原始素材上限的问题；现在分别使用 8,000 / 24,000 字边界。
+失败记录与内容质量复核均保留在学习章节。
 
 边界：本步的“口述”只指文本，不申请麦克风权限，也不处理录音、实时语音
 转文字、TTS 或语音克隆。多进程 Resume 的数据库级 CAS/冲突重读属于部署

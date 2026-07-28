@@ -6,11 +6,12 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from epiphany.config import Settings
 from epiphany.db import Database
 from epiphany.main import create_app
-from epiphany.models import Run
+from epiphany.models import Run, Task
 from epiphany.runtime.providers import FakeProvider, ProviderResult, TaskInvocation
 from epiphany.runtime.worker import Worker
 from epiphany.services import RunService
@@ -55,6 +56,11 @@ async def test_episode_research_fans_out_and_fans_in(
         "theme_research",
     }
     assert all(task.status == "queued" for task in children)
+    async with database.sessions() as session:
+        child_rows = (
+            await session.execute(select(Task).where(Task.id.in_([task.id for task in children])))
+        ).scalars()
+        assert all(task.input_json["topic"] == "五年后重新开始录播客" for task in child_rows)
 
     assert await worker.run_until_idle() == 3
 
@@ -120,8 +126,8 @@ async def test_episode_research_fans_out_and_fans_in(
     assert waiting_record.task_id == scaffold_task.id
     assert waiting_record.artifact_id == completed.output_artifact_id
     assert waiting_record.checkpoint == "interview_scaffold"
-    assert waiting_record.section_count == 2
-    assert waiting_record.question_count == 2
+    assert waiting_record.section_count == 3
+    assert waiting_record.question_count == 6
 
 
 async def test_in_flight_v1_research_run_finishes_without_new_topic_or_scaffold(

@@ -46,7 +46,9 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 10. [M2.4：从研究结果生成采访脚手架](m2-4-interview-scaffold.zh-CN.md)
 11. [M3.1：可持久化的人工暂停与恢复](m3-1-human-checkpoint.zh-CN.md)
 12. [M3.1：后端 / API 全流程 E2E 验证](m3-1-backend-e2e.zh-CN.md)
-13. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+13. [M3.1：一次接近真实用户的 DeepSeek 全流程验收](m3-1-realistic-e2e.zh-CN.md)
+14. [M3.1 realistic E2E：运行证据与内容复核](m3-1-realistic-e2e-evidence.zh-CN.md)
+15. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -65,7 +67,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M2.3b-3 | DeepSeek 费用可显式按 USD/CNY 估算与分组 | 完成 | 本次 focused commit |
 | M2.4 | fan-in 后串行生成并安全导出采访脚手架 | 完成 | `81b150d`、`d30f68f` |
 | M3.1 | 生成脚手架后持久化等待用户，并用补充 Source 幂等恢复 | 完成 | 本次 focused commit |
-| M3.1 E2E | 用合成素材自动跑通 Source、Checkpoint、Resume、日志、数据库与 Markdown | Fake 全流程通过 | 本次 focused commit |
+| M3.1 E2E | 用完整合成素材跑通 Source、Checkpoint、Resume、日志、数据库与 Markdown | Fake + DeepSeek 全流程通过 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -113,12 +115,15 @@ Source / SourceSegment 引用的 `user_material_submission` Artifact，随后
 
 不打开 Swagger 也可以通过
 [M3.1 后端 / API 全流程 E2E](m3-1-backend-e2e.zh-CN.md) 一条命令复现整条
-链路。当前 Fake E2E 与完整 120 项测试通过；真实 DeepSeek 已进入有调用上限的
-E2E，但尚未完整走到 Resume 成功，文档保留了三次尝试的失败类型与费用估算。
+链路。当前 Fake E2E、受限 DeepSeek E2E 与完整 130 项测试均通过。真实验收
+使用三份完整初始素材和一份补充口述，成功走到
+`waiting_for_user -> Resume -> succeeded`；第一次容量失败、修复过程、Token、
+费用、日志与内容质量复核记录在
+[真实用户路径验收章节](m3-1-realistic-e2e.zh-CN.md)。
 
 ## 当前还不能做什么
 
-- DeepSeek 真实 API 已通过合成素材 smoke，但尚未用个人素材评价内容质量；
+- DeepSeek 真实 API 已用完整合成素材评价脚手架质量，但尚未使用个人隐私素材；
 - 已能生成采访脚手架，但还不是完整播客稿；
 - 尚未提供采访脚手架 editor；
 - 尚未根据补充 Source 运行新的 Editor Agent；

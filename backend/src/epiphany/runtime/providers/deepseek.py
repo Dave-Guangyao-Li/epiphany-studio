@@ -79,6 +79,7 @@ class DeepSeekProvider:
         base_url: str = DEFAULT_BASE_URL,
         max_tokens: int = 2_000,
         max_source_chars: int = 24_000,
+        max_interview_bundle_chars: int | None = None,
         request_timeout_seconds: float = 30,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -96,6 +97,11 @@ class DeepSeekProvider:
             raise ValueError("DeepSeek max_tokens must be positive")
         if max_source_chars < 1:
             raise ValueError("DeepSeek max_source_chars must be positive")
+        resolved_interview_bundle_chars = (
+            max_source_chars if max_interview_bundle_chars is None else max_interview_bundle_chars
+        )
+        if resolved_interview_bundle_chars < 1:
+            raise ValueError("DeepSeek max_interview_bundle_chars must be positive")
         if request_timeout_seconds <= 0:
             raise ValueError("DeepSeek request timeout must be positive")
 
@@ -105,6 +111,7 @@ class DeepSeekProvider:
         self.base_url = _validated_base_url(base_url)
         self.max_tokens = max_tokens
         self.max_source_chars = max_source_chars
+        self.max_interview_bundle_chars = resolved_interview_bundle_chars
         self.request_timeout_seconds = request_timeout_seconds
         self._client = client
 
@@ -112,7 +119,7 @@ class DeepSeekProvider:
         if invocation.kind == BUILD_INTERVIEW_SCAFFOLD:
             prompt = build_interview_prompt(
                 task_input=invocation.input_json,
-                max_source_chars=self.max_source_chars,
+                max_bundle_chars=self.max_interview_bundle_chars,
             )
         else:
             prompt = build_research_prompt(

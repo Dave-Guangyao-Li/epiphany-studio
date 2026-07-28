@@ -2,7 +2,47 @@
 
 ## 2026-07-28
 
-### M3.1 guarded backend/API E2E harness
+### M3.1 realistic Fake + DeepSeek E2E acceptance
+
+- Replaced the short/filler fixture with three coherent initial Sources and one
+  complete supplemental voice-note transcript. Tests now enforce minimum
+  lengths, paragraph counts, roles, uniqueness, and privacy markers.
+- Made the deterministic Fake Provider extract topic-relevant sentences,
+  dates, themes, and verbatim quotes from the fixture. It remains offline,
+  repeatable, zero-token, and zero-cost, but its exported Scaffold is now
+  readable enough for human regression review.
+- Changed Markdown citations from raw `src_...#seg_...` strings to stable
+  `[S1]` labels plus a Source-title/segment-position index. Raw IDs remain in
+  structured Artifacts and SQLite; missing citation metadata fails export.
+- Forwarded the Run topic into both Researchers and treated topic and Source
+  text as untrusted data. Added a prompt rule that plans, drafts, wishes, and
+  attempts cannot be rewritten as already completed or published facts.
+- The first full-material DeepSeek Run completed both Researchers and fan-in
+  but rejected the Interviewer before network entry with
+  `provider_input_too_large`. It exposed that the validated merged research
+  Bundle had incorrectly reused the raw-source 8,000-character limit.
+- Split the boundaries into 8,000 characters for Researcher source input and
+  24,000 for the Interviewer research Bundle, while retaining a bounded
+  three-call, one-attempt, one-concurrent-request live harness.
+- The corrected DeepSeek Run
+  `run_44c9db75a74744ac940efd2d27172107` passed the complete
+  `waiting_for_user -> Resume -> succeeded` journey with 4 Sources, 21
+  Segments, 4 successful Tasks, 5 final Artifacts, 3 ModelCalls, and 29 Events.
+  It used 10,046 input and 6,670 output tokens, 52,003 ms combined Provider
+  time, and an estimated CNY 0.023386.
+- The failed diagnostic Run used an estimated CNY 0.012172, so the two new
+  realistic attempts total an estimated CNY 0.035558. These are local price
+  table estimates, not provider billing guarantees.
+- Human content review found concrete, multi-source interview questions and
+  readable citations, plus one unsupported tense escalation from “planning an
+  Episode 0” to “already published.” The original evidence remains untouched;
+  the prompt was tightened, while semantic entailment remains a human-review
+  or future verifier concern.
+- All 130 tests pass. Full Ruff, Alembic, diff, and secret checks are completed
+  before the focused commit. The detailed evidence and debugging flow live in
+  `docs/learning/m3-1-realistic-e2e.zh-CN.md`.
+
+### M3.1 guarded backend/API E2E harness and earlier probes
 
 - Added a committed, privacy-safe Chinese fixture with three initial Sources
   and one supplemental voice-note transcript.
@@ -23,12 +63,13 @@
 - Three isolated DeepSeek attempts were bounded and stopped safely: two
   reached a truncated Interviewer response and one hit a provider network
   error. Their combined local CNY price-table estimate is `¥0.035096`; a
-  complete live E2E has not yet passed.
+  complete live E2E had not yet passed at that earlier checkpoint. The
+  realistic acceptance section above records the later successful Run.
 - Tightened the live Interviewer prompt to request a concise three-section
   scaffold within the output budget.
-- All 120 tests, Ruff lint/format, Alembic current/check, and `git diff --check`
-  pass. M3.1 still exports a Scaffold; M3.2 will add the Editor, podcast draft,
-  and Show Notes.
+- At that earlier checkpoint, all 120 tests, Ruff lint/format, Alembic
+  current/check, and `git diff --check` passed. M3.1 still exports a Scaffold;
+  M3.2 will add the Editor, podcast draft, and Show Notes.
 
 ### M3.1 durable human checkpoint and idempotent Resume
 

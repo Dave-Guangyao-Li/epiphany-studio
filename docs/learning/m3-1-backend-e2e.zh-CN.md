@@ -74,7 +74,10 @@ python -m epiphany.checkpoint_e2e --provider deepseek --execute
 
 这条命令最多允许 3 次模型调用，每个模型 Task 只尝试一次，同时最多只有一个
 请求，模型固定为 `deepseek-v4-flash`。失败不会在背后无限重试或继续花钱。
-预检中的费用上界只是保护性估算，不是厂商账单保证。
+每个 Researcher 的原始素材最多 8,000 字，Interviewer 的已校验合并 Bundle
+最多 24,000 字；两者使用不同边界，因为聚合结果会比单份原始输入更大。
+预检中的 `0.08` 使用所配置的 billing currency（本次记录为 CNY），它是计划
+阈值，不是程序强制的花费上限，也不是厂商账单保证。
 
 运行 E2E 不需要先启动 Uvicorn 或打开 Swagger。命令会在进程内启动 FastAPI
 lifespan 和真正的 Worker，再通过 HTTP ASGI 接口操作它。
@@ -131,12 +134,14 @@ API Key、Source 正文、Prompt 或生成正文。Markdown 内容单独存放�
 
 2026-07-28 的 Fake 全流程结果为：
 
-- 完整后端测试基线：`120 passed`；
+- 完整后端测试基线：`130 passed`；
 - 等待点：4 Tasks、4 Artifacts、3 个成功 Fake ModelCalls；
 - 最终状态：4 Tasks、5 Artifacts、3 ModelCalls；
 - 首次 Resume 生效，相同请求重放被识别为幂等 replay；
-- 两次 Markdown 导出的 SHA-256 都是
-  `68d24de09fcfbf670e90be9ffc950b4f441921617f7c0870ff513d3fee2e6a27`；
+- 三份初始素材均不少于 600 字，补充口述不少于 800 字；
+- Fake 从素材中确定性提取具体文字、时间、主题和 quote，不再输出英文 filler；
+- Markdown 正文使用 `[S1]`，文末按“来源标题 + 片段编号”集中索引，不显示
+  原始 `src_...#seg_...`；
 - 结构化日志全部可解析，合成 Source 正文没有出现在日志中；
 - Token 和本地费用均为 0；
 - Ruff、Alembic current/check 也通过。
@@ -146,30 +151,54 @@ API Key、Source 正文、Prompt 或生成正文。Markdown 内容单独存放�
 
 ## 6. DeepSeek 真实 E2E 的诚实结果
 
-同一天进行了 3 次彼此隔离、有调用上限的 DeepSeek E2E 尝试：
+### 6.1 第一次完整素材 Run：输入边界失败
 
-1. 前两个 Researcher 成功，Interviewer 输出达到上限，被记录为
-   `provider_output_truncated`；
-2. 提高受控输出空间后，两个 Researcher 再次成功，Interviewer 仍在完整
-   JSON 结束前达到上限；
-3. Timeline 成功，Theme 遇到一次 `provider_network_error`，Run 按设计失败，
-   没有无限重试。
+两个 Researcher 均成功并完成 fan-in，但合并后的研究 Bundle 约 14,750 字。
+Interviewer 错误复用了原始 Source 的 8,000 字上限，因此在第三个网络请求
+发出前以 `provider_input_too_large` 失败。
 
-三次尝试保留了独立的数据库和脱敏日志。本地按配置的 CNY 价格表累计估算为：
+这次 Run 已产生两次真实调用：
+
+- 4,748 input tokens；
+- 3,712 output tokens；
+- 本地估算 CNY 0.012172。
+
+失败记录没有被删除。它证明 ModelCall 账本和费用追踪有效，也促使代码把
+8,000 字原始素材边界与 24,000 字研究 Bundle 边界分开。
+
+### 6.2 修复后的完整 Run：通过
+
+同一套完整合成素材随后成功走完：
 
 ```text
-¥0.035096
+Source -> Research -> Scaffold -> waiting_for_user
+  -> supplemental Source -> Resume -> succeeded
 ```
 
-这是本地 Token 计价估算，不是 DeepSeek Dashboard 的最终结算承诺。
+关键结果：
 
-结论必须如实写成：**DeepSeek Provider 已经真实进入 E2E、成功完成多次研究
-调用，并且失败账本、错误传播和成本边界有效；但真实 DeepSeek 版本尚未完整
-走到 `waiting_for_user -> Resume -> succeeded`，所以不能宣称 live E2E 已
-通过。** 当前完全通过的是 Fake E2E。
+- Run：`run_44c9db75a74744ac940efd2d27172107`；
+- 4 个 Sources、21 个 Segments；
+- 4 个 Tasks 全部成功；
+- 等待点为 4 Artifacts、3 ModelCalls、26 Events；
+- Resume 后为 5 Artifacts、3 ModelCalls、29 Events；
+- 10,046 input tokens、6,670 output tokens；
+- 三次 Provider 耗时合计 52,003 ms；
+- 本地估算 CNY 0.023386；
+- 102 行 JSONL 日志全部可解析，没有 error code，素材正文和 Key 均未进入日志。
 
-这类结果正是提前做 E2E 的价值：它在 UI 之前暴露了模型输出长度、严格 JSON
-契约与外部网络可靠性问题，同时没有掩盖已经验证成功的后端编排行为。
+两次真实验收合计本地估算 CNY 0.035558。这是本地价格表估算，不是 DeepSeek
+Dashboard 的最终结算承诺。
+
+内容人工复核认为脚手架已经包含具体时间、场景、认知变化、六道采访问题和
+11 个可读来源，不再是机械 filler；同时发现模型把“计划录 Episode 0”轻微
+夸大成“Episode 0 已发布”。因此 Prompt 已增加“计划、草稿、愿望不得改写成
+已完成事实”的约束。引用合法仍不等于语义蕴含，正式内容仍需要人工确认。
+
+完整失败分析、数据库数量、Event 顺序、费用表和内容复核见
+[realistic E2E 运行证据与内容复核](m3-1-realistic-e2e-evidence.zh-CN.md)；
+技术改动和学习总结见
+[一次接近真实用户的 DeepSeek 全流程验收](m3-1-realistic-e2e.zh-CN.md)。
 
 ## 7. 自动化测试
 

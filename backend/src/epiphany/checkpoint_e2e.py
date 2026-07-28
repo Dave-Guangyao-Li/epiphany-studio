@@ -37,6 +37,7 @@ MAX_TASK_ATTEMPTS = 1
 MAX_CONCURRENCY = 1
 MAX_OUTPUT_TOKENS_PER_CALL = 3_200
 MAX_SOURCE_CHARS = 8_000
+MAX_INTERVIEW_BUNDLE_CHARS = 24_000
 TASK_TIMEOUT_SECONDS = 120
 FLOW_TIMEOUT_SECONDS = 420
 POLL_INTERVAL_SECONDS = 1.0
@@ -115,18 +116,22 @@ def build_preflight(
         "max_attempts_per_task": MAX_TASK_ATTEMPTS,
         "max_concurrency": MAX_CONCURRENCY,
         "max_output_tokens_per_call": (MAX_OUTPUT_TOKENS_PER_CALL if provider == "deepseek" else 0),
+        "max_research_source_chars": MAX_SOURCE_CHARS,
+        "max_interview_bundle_chars": MAX_INTERVIEW_BUNDLE_CHARS,
         "flow_timeout_seconds": FLOW_TIMEOUT_SECONDS,
         "billing_currency": billing_currency if provider == "deepseek" else "USD",
         "expected_cost": {
             "currency": billing_currency,
-            "upper_bound": "0.04",
+            "planning_ceiling": "0.08",
             "is_estimate": True,
+            "hard_currency_limit_enforced": False,
         }
         if provider == "deepseek"
         else {
             "currency": "USD",
-            "upper_bound": "0",
+            "planning_ceiling": "0",
             "is_estimate": False,
+            "hard_currency_limit_enforced": True,
         },
         "paths": {
             "fixture": str(paths.fixture),
@@ -204,6 +209,7 @@ def build_provider(
         base_url=settings.deepseek_base_url,
         max_tokens=MAX_OUTPUT_TOKENS_PER_CALL,
         max_source_chars=MAX_SOURCE_CHARS,
+        max_interview_bundle_chars=MAX_INTERVIEW_BUNDLE_CHARS,
         request_timeout_seconds=TASK_TIMEOUT_SECONDS + 5,
     )
 
@@ -539,7 +545,11 @@ def _markdown_checks(markdown: str, *, topic: str) -> dict[str, bool]:
         "has_opening": "## 开场" in markdown,
         "has_at_least_two_sections": len(numbered_sections) >= 2,
         "has_interview_questions": "### 采访问题" in markdown,
-        "has_source_labels": "来源：`src_" in markdown,
+        "has_source_labels": (
+            "来源：[S" in markdown
+            and "## 来源索引" in markdown
+            and re.search(r"src_[^\s`]+#seg_[^\s`]+", markdown) is None
+        ),
     }
 
 

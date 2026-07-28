@@ -217,7 +217,7 @@ M3.1 does not request microphone permission and does not implement recording,
 speech-to-text, TTS, voice cloning, a final podcast draft, Show Notes, or a Web
 UI. The supported runtime remains local and single-process; database-level
 multi-process Resume coordination is deferred to deployment hardening. The
-current full suite passes with 120 tests, Ruff lint/format and Alembic
+current full suite passes with 130 tests, Ruff lint/format and Alembic
 current/check pass.
 
 A committed synthetic fixture and guarded command now exercise the complete
@@ -229,10 +229,22 @@ python -m epiphany.checkpoint_e2e --provider fake --execute
 ```
 
 It writes an ignored SQLite database, structured JSONL log, machine-readable
-report, and Interview Scaffold Markdown. A separate explicit DeepSeek mode is
-bounded to three calls; current live attempts proved accounting and failure
-diagnostics but have not yet completed the entire live journey. See the
-[backend E2E learning chapter](docs/learning/m3-1-backend-e2e.zh-CN.md).
+report, and Interview Scaffold Markdown. Fake output now derives deterministic
+topic-relevant sentences from its assigned SourceSegments—the committed
+synthetic fixture in this E2E—instead of English filler.
+Exported Markdown uses `[S1]` labels and a Source-title/segment-position index,
+while raw Source/Segment IDs remain in SQLite and structured Artifacts.
+
+A separate explicit DeepSeek mode is bounded to three calls. A realistic
+three-initial-Source plus one-supplemental-Source run has now completed
+`waiting_for_user -> Resume -> succeeded`: 4 Tasks succeeded, 3 ModelCalls
+used 10,046 input and 6,670 output tokens, and local estimated cost was CNY
+0.023386. The earlier input-bound failure, its 8k/24k fix, full event trace,
+content-quality review, and limitations are recorded in the
+[realistic E2E learning chapter](docs/learning/m3-1-realistic-e2e.zh-CN.md) and
+[evidence chapter](docs/learning/m3-1-realistic-e2e-evidence.zh-CN.md);
+the [E2E runbook](docs/learning/m3-1-backend-e2e.zh-CN.md) keeps the repeatable
+commands.
 
 ## License
 

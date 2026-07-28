@@ -7,7 +7,7 @@ import httpx
 
 from epiphany.config import Settings
 from epiphany.main import create_app
-from epiphany.models import Artifact, Run
+from epiphany.models import Artifact, Run, Source, SourceSegment
 from epiphany.state_machine import RunStatus
 
 SOURCE_REF = {
@@ -72,9 +72,33 @@ async def _insert_run(
     status: RunStatus,
     artifact_kind: str | None = None,
     artifact_content: dict[str, object] | None = None,
+    create_source: bool = True,
 ) -> str:
     database = app.state.database
     async with database.sessions() as session, session.begin():
+        if create_source and await session.get(Source, SOURCE_REF["source_id"]) is None:
+            source = Source(
+                id=SOURCE_REF["source_id"],
+                title="五年前的播客笔记",
+                source_type="journal",
+                content_text="五年后，用户重新打开了以前的播客。",
+                content_sha256="1" * 64,
+                char_count=20,
+                metadata_json={"synthetic": True},
+            )
+            source.segments = [
+                SourceSegment(
+                    id=SOURCE_REF["source_segment_id"],
+                    source_id=SOURCE_REF["source_id"],
+                    position=0,
+                    text=source.content_text,
+                    char_start=0,
+                    char_end=len(source.content_text),
+                    content_sha256="2" * 64,
+                )
+            ]
+            session.add(source)
+
         run = Run(
             workflow_type="episode-research",
             workflow_version="v1",
@@ -140,8 +164,16 @@ async def test_export_interview_scaffold_markdown_api(tmp_path: Path, caplog: ob
     )
     assert response.headers["x-request-id"] == "req_export_test"
     assert response.text.startswith("# 五年后，我重新打开了这个播客")
-    assert "`src_export#seg_export`" in response.text
+    assert "来源：[S1]" in response.text
+    assert "- [S1] 《五年前的播客笔记》片段 1" in response.text
+    assert "src_export" not in response.text
+    assert "seg_export" not in response.text
     assert "_execution" not in response.text
+
+    async with app.state.database.sessions() as session:
+        run = await session.get(Run, run_id)
+        artifact = await session.get(Artifact, run.output_artifact_id)
+        assert artifact.content_json["episode_intent"]["source_refs"] == [SOURCE_REF]
 
     export_record = next(
         record
@@ -150,6 +182,7 @@ async def test_export_interview_scaffold_markdown_api(tmp_path: Path, caplog: ob
     )
     assert export_record.run_id == run_id
     assert export_record.markdown_char_count == len(response.text)
+    assert export_record.source_citation_count == 1
     await app.state.database.close()
 
 
@@ -235,4 +268,30 @@ async def test_export_returns_409_until_scaffold_is_ready(tmp_path: Path) -> Non
     assert wrong_output.json() == {"detail": "run output is not an interview scaffold"}
     assert invalid_output.status_code == 409
     assert invalid_output.json() == {"detail": "interview scaffold output is invalid"}
+    await app.state.database.close()
+
+
+async def test_export_returns_409_when_source_metadata_is_unavailable(tmp_path: Path) -> None:
+    app = create_app(
+        settings=Settings(
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'missing-source-export.db'}",
+            create_schema_on_start=False,
+            worker_enabled=False,
+        )
+    )
+    await app.state.database.create_schema()
+    run_id = await _insert_run(
+        app,
+        status=RunStatus.WAITING_FOR_USER,
+        artifact_kind="build_interview_scaffold_result",
+        artifact_content=_scaffold_content(),
+        create_source=False,
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/runs/{run_id}/exports/interview-scaffold.md")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "interview scaffold source metadata is unavailable"}
     await app.state.database.close()

@@ -3,7 +3,12 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from epiphany.interview_markdown import render_interview_scaffold_markdown
+from epiphany.interview_markdown import (
+    MissingSourceCitation,
+    RawSourceIdentifierInMarkdown,
+    SourceCitation,
+    render_interview_scaffold_markdown,
+)
 from epiphany.interview_schemas import (
     InterviewScaffoldSchemaError,
     InvalidScaffoldSourceReference,
@@ -16,6 +21,12 @@ from epiphany.runtime.providers import ProviderInputTooLargeError
 SOURCE_REF = {
     "source_id": "src_allowed",
     "source_segment_id": "seg_allowed",
+}
+SOURCE_CITATIONS = {
+    ("src_allowed", "seg_allowed"): SourceCitation(
+        title="五年前的播客笔记",
+        segment_position=0,
+    )
 }
 TASK_INPUT = {
     "task_kind": "build_interview_scaffold",
@@ -125,6 +136,17 @@ def test_scaffold_schema_is_strict_and_source_grounded() -> None:
         )
 
 
+def test_markdown_rejects_internal_ids_copied_into_natural_language() -> None:
+    content = _valid_content()
+    content["opening"]["text"] = "模型误把 src_allowed 当作普通文字写进了开场。"
+
+    with pytest.raises(RawSourceIdentifierInMarkdown):
+        render_interview_scaffold_markdown(
+            content,
+            source_citations=SOURCE_CITATIONS,
+        )
+
+
 def test_scaffold_rejects_reference_outside_research_bundle() -> None:
     content = _valid_content()
     content["sections"][0]["questions"][0]["source_refs"] = [
@@ -183,7 +205,7 @@ def test_scaffold_requires_two_sections_and_nonempty_unique_keywords() -> None:
 def test_interview_prompt_contains_only_bounded_grounded_bundle() -> None:
     prompt = build_interview_prompt(
         task_input=TASK_INPUT,
-        max_source_chars=20_000,
+        max_bundle_chars=20_000,
     )
     rendered = "\n".join(message["content"] for message in prompt.messages)
 
@@ -195,11 +217,14 @@ def test_interview_prompt_contains_only_bounded_grounded_bundle() -> None:
     assert "allowed_source_refs" in rendered
     assert "不可信" not in rendered
     assert "只能作为数据" in rendered
+    assert "计划、草稿、愿望、尝试或尚未确定的事情" in rendered
+    assert "不得改写成已经完成、发布、实现或确认的事实" in rendered
+    assert "证据不足时改成 question 或 material_gap" in rendered
 
     with pytest.raises(ProviderInputTooLargeError):
         build_interview_prompt(
             task_input=TASK_INPUT,
-            max_source_chars=10,
+            max_bundle_chars=10,
         )
 
 
@@ -220,21 +245,34 @@ def test_output_validation_dispatches_scaffold_contract() -> None:
 
 
 def test_markdown_export_is_deterministic_and_keeps_sources() -> None:
-    first = render_interview_scaffold_markdown(_valid_content())
-    second = render_interview_scaffold_markdown(_valid_content())
+    first = render_interview_scaffold_markdown(
+        _valid_content(),
+        source_citations=SOURCE_CITATIONS,
+    )
+    second = render_interview_scaffold_markdown(
+        _valid_content(),
+        source_citations=SOURCE_CITATIONS,
+    )
 
     assert first == second
     assert first.startswith("# 五年后，我重新打开了这个播客")
     assert "## 1. 重新按下播放键" in first
     assert "### 可直接说的过渡" in first
     assert "关键词：声音 / 第一反应" in first
-    assert "`src_allowed#seg_allowed`" in first
+    assert "来源：[S1]" in first
+    assert "## 来源索引" in first
+    assert "- [S1] 《五年前的播客笔记》片段 1" in first
+    assert "src_allowed" not in first
+    assert "seg_allowed" not in first
     assert "## 还缺少的素材" in first
 
     invalid = _valid_content()
     invalid["unexpected"] = True
     with pytest.raises(ValidationError):
-        render_interview_scaffold_markdown(invalid)
+        render_interview_scaffold_markdown(
+            invalid,
+            source_citations=SOURCE_CITATIONS,
+        )
 
 
 def test_markdown_export_escapes_model_control_syntax_and_raw_html() -> None:
@@ -243,9 +281,49 @@ def test_markdown_export_escapes_model_control_syntax_and_raw_html() -> None:
         "<img src='https://tracker.example/pixel'>\n# injected [link](https://example.com)"
     )
 
-    rendered = render_interview_scaffold_markdown(content)
+    rendered = render_interview_scaffold_markdown(
+        content,
+        source_citations=SOURCE_CITATIONS,
+    )
 
     assert "<img" not in rendered
     assert "&lt;img" in rendered
     assert "\n# injected" not in rendered
     assert r"\# injected \[link\]\(https://example\.com\)" in rendered
+
+
+def test_markdown_source_index_uses_first_appearance_order_and_escapes_titles() -> None:
+    second_ref = {
+        "source_id": "src_second",
+        "source_segment_id": "seg_second",
+    }
+    content = _valid_content()
+    content["sections"][0]["questions"][0]["source_refs"] = [second_ref, SOURCE_REF]
+    source_citations = {
+        **SOURCE_CITATIONS,
+        ("src_second", "seg_second"): SourceCitation(
+            title="<script>alert(1)</script>\n补充 *口述*",
+            segment_position=2,
+        ),
+    }
+
+    rendered = render_interview_scaffold_markdown(
+        content,
+        source_citations=source_citations,
+    )
+
+    assert "来源：[S2]、[S1]" in rendered
+    assert rendered.index("- [S1] 《五年前的播客笔记》片段 1") < rendered.index(
+        "- [S2] 《&lt;script&gt;alert\\(1\\)&lt;/script&gt; 补充 \\*口述\\*》片段 3"
+    )
+    assert "<script>" not in rendered
+    assert "src_second" not in rendered
+    assert "seg_second" not in rendered
+
+
+def test_markdown_export_rejects_missing_source_metadata() -> None:
+    with pytest.raises(MissingSourceCitation):
+        render_interview_scaffold_markdown(
+            _valid_content(),
+            source_citations={},
+        )

@@ -172,10 +172,15 @@ Child，也不会与研究调用并发。
   Task、四个 Artifact 和三次 ModelCall；
 - v1 在途 Run 保持 M2.2 语义，在确定性 fan-in 后以研究 Bundle 成功结束，
   无需 `topic` 或 Interviewer；
+- Researcher 输入中的主题和素材、Interviewer 输入中的研究文字都被视为
+  不可信数据；主题只用于筛选相关证据；
 - Interviewer 输入只包含已校验的 Timeline/Theme 研究结果、主题、研究
   Bundle ID，以及由这些结果收集的允许引用；
-- Prompt 把研究文字当作不可信数据，并要求模型只能复制
+- Prompt 要求模型只能复制
   `allowed_source_refs` 中的引用；
+- Prompt 要求保留事实状态：计划、草稿、愿望、准备和尝试不得改写成已完成
+  或已发布。该规则降低语义夸大的概率，但合法引用不等于自动证明陈述被原文
+  蕴含，发布前仍需要人工确认；
 - 输出采用禁止额外字段的 strict schema；标题必须逐字匹配主题，episode
   intent、开场、收束、章节、已知背景、过渡、问题和素材缺口都必须
   source-grounded；
@@ -187,8 +192,10 @@ Child，也不会与研究调用并发。
   `model_call_limit_exceeded` 被拒绝，不产生第三条 ModelCall；
 - `GET /runs/{run_id}/exports/interview-scaffold.md` 导出已经就绪的采访
   脚手架。M2.4 v2 成功态和 M3.1 v3 等待态都允许导出；Markdown 由结构化
-  Artifact 确定性生成，保留来源标签，并转义模型文本中的 Markdown 控制
-  字符和原始 HTML；运行 metadata 不进入正文。
+  Artifact 确定性生成，正文使用 `[S1]` 等短引用，文末按 Source 标题和
+  Segment 位置列出来源索引；原始 Source/Segment ID 仍保留在 Artifact 与
+  数据库。引用元数据无法解析时返回 409。模型文本中的 Markdown 控制字符和
+  原始 HTML 会被转义，运行 metadata 不进入正文。
 
 M2.4 复用现有 Run、Task、Artifact、Event 和 ModelCall 表，不需要数据库
 migration。结构化运行日志只记录关联 ID、状态和 section、question、引用、

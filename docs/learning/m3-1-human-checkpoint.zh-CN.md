@@ -348,7 +348,7 @@ alembic check
 当前全量基线是：
 
 ```text
-120 passed
+130 passed
 ```
 
 这些测试默认使用 Fake Provider，不联网、不读取 DeepSeek Key，也不产生模型
@@ -358,7 +358,9 @@ API 费用。M3.1 的 Resume 本身无论使用哪种 Provider 都不会新增�
 自动走完 Source 导入、Run、等待、Markdown 导出、补充 Source、Resume 和
 幂等重放，并保存数据库、JSONL 日志与机器可读报告。操作与真实 DeepSeek
 尝试结果见
-[M3.1 后端 / API 全流程 E2E](m3-1-backend-e2e.zh-CN.md)。
+[M3.1 后端 / API 全流程 E2E](m3-1-backend-e2e.zh-CN.md)。完整合成素材的
+真实成功 Run、输入边界修复、费用和内容质量复核见
+[一次接近真实用户的 DeepSeek 全流程验收](m3-1-realistic-e2e.zh-CN.md)。
 
 ## 8. Swagger 手动验证
 

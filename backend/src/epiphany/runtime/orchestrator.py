@@ -240,6 +240,7 @@ class Orchestrator:
                 parent_task_id=manager.id,
                 input_json={
                     "task_kind": kind,
+                    "topic": run.input_json["topic"],
                     "source_segments": source_segments,
                 },
             )

@@ -64,7 +64,7 @@ Run tests:
 pytest
 ```
 
-The current full suite passes with 120 tests.
+The current full suite passes with 130 tests.
 
 The default SQLite database is written to `./data/epiphany.db`, which is ignored
 by Git.
@@ -211,11 +211,14 @@ Resume adds no Token or API cost. Repeating the exact request returns
 `idempotent_replay: true` without another Artifact or Event. Reusing the same
 submission ID with different Sources returns HTTP 409.
 
-The Fake Provider is not pretending to provide useful AI research or
-interviewing. It validates the orchestration contract without a paid call:
-true bounded parallel research, a sequential Interviewer after bundle
-creation, strict structured output, citation scope, exact quote matching,
-failure propagation, idempotent transitions, and late-result fencing.
+The Fake Provider creates deterministic, source-grounded regression output
+without a paid call. It extracts topic-relevant sentences, dates, themes, and
+quotes from the SourceSegments assigned to each Task; the guarded E2E supplies
+the committed synthetic fixture. The exported Scaffold is therefore readable
+during manual testing. It is still not a model-quality benchmark: its main job is to
+validate bounded parallel research, the sequential Interviewer, strict output,
+citation scope, failure propagation, idempotent transitions, and late-result
+fencing.
 
 Focused verification:
 
@@ -276,7 +279,13 @@ EPIPHANY_DEEPSEEK_MODEL=deepseek-v4-flash
 EPIPHANY_DEEPSEEK_BILLING_CURRENCY=USD
 EPIPHANY_DEEPSEEK_MAX_TOKENS=2000
 EPIPHANY_DEEPSEEK_MAX_SOURCE_CHARS=24000
+EPIPHANY_DEEPSEEK_MAX_INTERVIEW_BUNDLE_CHARS=24000
 ```
+
+The two character limits are independent. `MAX_SOURCE_CHARS` protects raw
+Researcher input; `MAX_INTERVIEW_BUNDLE_CHARS` protects the validated
+Timeline/Theme bundle passed to the Interviewer. They default to the same value
+for compatibility, but a deployment may tune them separately.
 
 `EPIPHANY_DEEPSEEK_BILLING_CURRENCY` accepts `USD` or `CNY`. It defaults to
 `USD` so existing installations retain their previous behavior. The DeepSeek
@@ -389,10 +398,10 @@ ModelCalls, and Artifact metadata. Enabling CNY for future calls does not alter
 these two USD rows.
 
 M2.4 changed the current harness ceiling from two calls to three; M3.1 keeps
-that ceiling and expects workflow v3 to stop at `waiting_for_user`. Both stages
-used only the zero-network dry-run. No new
-paid live smoke was performed; the two-call, 2,301-token, USD 0.000491 result
-above remains the only historical paid trace documented here.
+that ceiling and expects workflow v3 to stop at `waiting_for_user`. M2.4 itself
+used only the zero-network dry-run; the later M3.1 realistic E2E section records
+the newer paid validation. The two-call, 2,301-token, USD 0.000491 result above
+remains the historical M2.3b trace.
 
 ## M2.4 Interview Scaffold and Markdown export
 
@@ -413,10 +422,13 @@ curl -OJ \
 ```
 
 `GET /runs/{run_id}/exports/interview-scaffold.md` returns deterministic
-`text/markdown`, preserves source citations, and escapes raw HTML and Markdown
-control syntax from model-produced text. It returns HTTP 404 for an unknown Run
-and HTTP 409 until a valid scaffold is available. Current v3 Runs may export it
-while `waiting_for_user`; v2 Runs may export it after `succeeded`.
+`text/markdown`, renders citations as `[S1]` labels plus a Source-title and
+segment-position appendix, and escapes raw HTML and Markdown control syntax
+from model-produced text. Structured Artifacts and SQLite retain the original
+Source/Segment IDs. It returns HTTP 404 for an unknown Run and HTTP 409 until
+a valid scaffold and all referenced source metadata are available. Current v3
+Runs may export it while `waiting_for_user`; v2 Runs may export it after
+`succeeded`.
 
 Existing in-flight `episode-research` Runs stamped `workflow_version: "v1"`
 retain their original completion semantics: they stop after fan-in with
@@ -475,7 +487,7 @@ catch-and-reread conflict handling before a multi-worker deployment.
 
 No migration was added. `alembic current` remains
 `0003_model_call_trace (head)` and `alembic check` reports no new operations.
-The complete backend suite currently contains 120 tests.
+The complete backend suite currently contains 130 tests.
 
 ## M3.1 backend E2E
 
@@ -501,9 +513,37 @@ report summarizes Run/Task/Artifact/ModelCall state, events, tokens, estimated
 cost, redaction checks, and failures. The exported file is still an Interview
 Scaffold; M3.2 will extend this path to a podcast draft and Show Notes.
 
+The current realistic fixture contains three coherent initial Sources plus one
+complete supplemental transcript. Researcher source input is capped at 8,000
+characters; the validated merged research Bundle has a separate 24,000
+character ceiling before the Interviewer. This distinction was added after a
+real run completed both Researchers but rejected the larger Bundle before the
+third network request.
+
+The corrected bounded DeepSeek run
+`run_44c9db75a74744ac940efd2d27172107` completed the full M3.1 journey:
+
+- 4 Sources and 21 SourceSegments;
+- 4 succeeded Tasks;
+- 4 Artifacts / 3 ModelCalls / 26 Events while waiting;
+- 5 Artifacts / 3 ModelCalls / 29 Events after Resume;
+- 10,046 input and 6,670 output tokens;
+- 52,003 ms combined Provider time;
+- estimated CNY 0.023386;
+- structured-log redaction and idempotent replay checks passed.
+
+Human review found useful concrete questions and one unsupported tense
+escalation from a planned Episode 0 to an already-published episode. The
+Interviewer prompt now explicitly preserves plan/draft/wish status, but valid
+citation IDs still do not prove semantic entailment; human review remains part
+of the product boundary.
+
 See
 [`docs/learning/m3-1-backend-e2e.zh-CN.md`](../docs/learning/m3-1-backend-e2e.zh-CN.md)
-for the fixture, exact assertions, evidence files, and live DeepSeek results.
+for repeatable commands, and
+[`docs/learning/m3-1-realistic-e2e-evidence.zh-CN.md`](../docs/learning/m3-1-realistic-e2e-evidence.zh-CN.md)
+for the failure analysis, successful live evidence, cost table, and content
+review.
 
 ## Debugging and logs
 

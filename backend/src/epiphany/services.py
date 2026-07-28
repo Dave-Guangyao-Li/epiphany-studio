@@ -12,7 +12,11 @@ from epiphany.db import Database
 from epiphany.events import append_event
 from epiphany.human_input_schemas import INTERVIEW_SCAFFOLD_CHECKPOINT
 from epiphany.ids import stable_id
-from epiphany.interview_markdown import render_interview_scaffold_markdown
+from epiphany.interview_markdown import (
+    SourceCitation,
+    interview_scaffold_reference_keys,
+    render_interview_scaffold_markdown,
+)
 from epiphany.models import Artifact, Event, Run, Source, Task
 from epiphany.research_schemas import EpisodeResearchPayload
 from epiphany.runtime.orchestrator import INTERVIEW_RESEARCH_WORKFLOW_VERSION, Orchestrator
@@ -236,10 +240,42 @@ class RunService:
                 key: value for key, value in artifact.content_json.items() if key != "_execution"
             }
             try:
-                markdown = render_interview_scaffold_markdown(content)
+                reference_keys = interview_scaffold_reference_keys(content)
             except (ValueError, TypeError) as error:
                 raise InterviewScaffoldExportNotReady(
                     "interview scaffold output is invalid"
+                ) from error
+
+            referenced_source_ids = sorted({source_id for source_id, _ in reference_keys})
+            sources = (
+                (
+                    await session.execute(
+                        select(Source)
+                        .where(Source.id.in_(referenced_source_ids))
+                        .options(selectinload(Source.segments))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            required_keys = set(reference_keys)
+            source_citations = {
+                (source.id, segment.id): SourceCitation(
+                    title=source.title,
+                    segment_position=segment.position,
+                )
+                for source in sources
+                for segment in source.segments
+                if (source.id, segment.id) in required_keys
+            }
+            try:
+                markdown = render_interview_scaffold_markdown(
+                    content,
+                    source_citations=source_citations,
+                )
+            except (ValueError, TypeError) as error:
+                raise InterviewScaffoldExportNotReady(
+                    "interview scaffold source metadata is unavailable"
                 ) from error
 
         logger.info(
@@ -249,6 +285,7 @@ class RunService:
                 "run_id": run_id,
                 "artifact_id": artifact.id,
                 "markdown_char_count": len(markdown),
+                "source_citation_count": len(reference_keys),
             },
         )
         return markdown

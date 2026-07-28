@@ -25,12 +25,23 @@ def _runtime_counts(database_path: Path) -> dict[str, int]:
 def test_checkpoint_fixture_is_synthetic_valid_and_unique() -> None:
     fixture = load_fixture(DEFAULT_FIXTURE_PATH)
     sources = [*fixture["initial_sources"], fixture["supplemental_source"]]
+    initial_roles = {source["metadata"]["role"] for source in fixture["initial_sources"]}
 
     assert fixture["fixture_id"] == "m3-1-voice-time-capsule"
     assert fixture["topic"]
     assert fixture["submission_id"]
     assert len(fixture["initial_sources"]) == 3
     assert fixture["supplemental_source"]["source_type"] == "voice_note_transcript"
+    assert initial_roles == {
+        "timeline_and_scenes",
+        "reflection_and_principles",
+        "episode_zero_draft",
+    }
+    assert fixture["supplemental_source"]["metadata"]["role"] == "interview_response"
+    assert all(len(source["text"]) >= 600 for source in fixture["initial_sources"])
+    assert len(fixture["supplemental_source"]["text"]) >= 800
+    assert all(source["text"].count("\n\n") >= 4 for source in fixture["initial_sources"])
+    assert fixture["supplemental_source"]["text"].count("\n\n") >= 5
     assert all(source["text"].strip() for source in sources)
     assert all(source["metadata"]["synthetic"] is True for source in sources)
     assert all(source["metadata"]["contains_personal_data"] is False for source in sources)
@@ -127,6 +138,19 @@ def test_checkpoint_e2e_fake_provider_runs_full_http_journey(
     assert markdown.startswith(f"# {fixture['topic']}")
     assert "## 开场" in markdown
     assert "### 采访问题" in markdown
+    assert markdown.count("### 采访问题") == 3
+    assert "来源：[S" in markdown
+    assert "## 来源索引" in markdown
+    assert "《合成素材A｜五年时间线与重听旧录音的晚上》" in markdown
+    assert "2026年7月12日" in markdown
+    assert "重新听见过去的自己" in markdown
+    assert "生活习惯" in markdown
+    assert "src_" not in markdown
+    assert "seg_" not in markdown
+    assert "A deterministic" not in markdown
+    assert "Candidate moment" not in markdown
+    assert markdown.count("“") == markdown.count("”")
+    assert markdown.count("《") == markdown.count("》")
 
     log_rows = [json.loads(line) for line in log_text.splitlines() if line.strip()]
     assert log_rows

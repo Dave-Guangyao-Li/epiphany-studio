@@ -151,8 +151,9 @@ SQLite 中，重启 Uvicorn 后仍可查询，Worker 也不会重复运行这些
 - HTTP 200；
 - `content-type: text/markdown; charset=utf-8`；
 - 文件名为 `interview-scaffold-{run_id}.md`；
-- 正文包含开场、采访段落、问题、素材缺口和
-  ``source_id#source_segment_id`` 来源标签。
+- 正文包含开场、采访段落、问题、素材缺口和 `[S1]` 等短来源标签；
+- 文末包含 `## 来源索引`，按“《Source 标题》片段 N”解释每个短标签；
+- 正文不直接显示 `src_...#seg_...`，但数据库和 Artifact 仍保存原始 ID。
 
 `waiting_for_user` 和 Resume 后的 `succeeded` Run 都允许导出。脚手架尚未
 生成或最终 Artifact 不是合法脚手架时会返回 409。导出器会重新校验严格
@@ -242,7 +243,7 @@ pytest
 当前全量基线：
 
 ```text
-120 passed
+130 passed
 ```
 
 定向测试研究、采访脚手架、人工检查点和导出：
