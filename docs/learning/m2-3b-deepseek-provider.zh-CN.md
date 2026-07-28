@@ -1,11 +1,11 @@
-# M2.3b：让真实模型接入，但先不花钱
+# M2.3b：让真实模型接入，并安全准备第一次调用
 
 ## 基本信息
 
-- 阶段：M2.3b-1 DeepSeek Provider 离线适配
+- 阶段：M2.3b-1 Provider 离线适配 + M2.3b-2a 受限 smoke 工具
 - 日期：2026-07-28
 - Commit：本章节与实现处于同一个 focused commit
-- 状态：Mock 已验证，live smoke 待执行
+- 状态：Mock、dry-run 和 smoke 安全边界已验证，live smoke 待执行
 
 ## 1. 为什么做这一步
 
@@ -72,7 +72,17 @@ Workflow 不需要知道 Bearer Token、`/chat/completions` 或 HTTP 429。
     拼错或恶意地址；
 14. 单次 Research Task 默认最多发送 24,000 个素材字符、最多生成 2,000
     Token；
-15. 全部 DeepSeek 自动化测试使用 `httpx.MockTransport`，没有网络和费用。
+15. Provider HTTP 自动化测试使用 `httpx.MockTransport`，smoke 安全测试使用
+    Fake Provider，没有网络和费用。
+16. 独立 smoke 命令默认只做 dry-run，只有显式 `--execute` 才联网；
+17. smoke 固定使用合成素材、Flash 模型、两次调用、一次 attempt 和每次 800
+    个输出 Token；
+18. smoke 串行发送请求，因此第一个任务失败时，可以在第二个请求发出前取消
+    兄弟任务；
+19. smoke 使用独立 SQLite 并自动执行 Alembic，便于失败后检查 Trace；
+20. 最终摘要只显示 ID、状态、Token、耗时、费用与错误码，不显示内容或 Key。
+21. Alembic 在同一进程运行时不会禁用应用 logger，后续日志与排错能力保持
+    可用。
 
 本步骤没有修改数据库表，因此没有新增 migration。M2.3a 的 `model_calls`
 已经足够保存当前字段。
@@ -88,8 +98,10 @@ Workflow 不需要知道 Bearer Token、`/chat/completions` 或 HTTP 429。
 | `main.py` | 根据配置构造 Fake 或 DeepSeek | 默认安全，显式开启才联网 |
 | `runtime/worker.py` | timeout、retry 和失败用量记账 | 每次副作用都由 durable attempt 管理 |
 | `observability.py` | 输出 Provider/ModelCall 元数据 | 能按 ID 排错，但不打印内容 |
+| `live_deepseek_smoke.py` | 显式付费验收入口与安全摘要 | 普通测试和启动应用不会误触发 |
 | `test_deepseek_provider.py` | HTTP 适配器单元测试 | 精确验证厂商边界 |
 | `test_deepseek_research_workflow.py` | 完整双 Agent Mock 集成 | 验证 Provider 接上现有编排与账本 |
+| `test_live_deepseek_smoke.py` | dry-run、调用上限与脱敏测试 | 联网前先证明命令本身安全 |
 
 ## 5. 背后的技术点
 
@@ -204,6 +216,31 @@ EPIPHANY_DEEPSEEK_MAX_TOKENS=2000
 
 这只是第一道字符级保险丝，还不是精确 Token 预算。
 
+### 5.8 为什么真实调用不能放进 pytest
+
+`pytest` 应该可以反复运行、结果稳定，并且默认没有外部副作用。真实 API 会
+受网络、余额、限流和模型版本影响，也会产生费用。如果把它混进普通测试：
+
+```text
+开发者运行全量测试
+  -> 不知情地联网
+  -> 结果因外部服务波动
+  -> 费用和失败难以预测
+```
+
+所以本项目把两类验证分开：
+
+```text
+pytest / dry-run
+  -> 默认、免费、确定性、安全边界
+
+python -m epiphany.live_deepseek_smoke --execute
+  -> 人主动确认、两次上限、合成素材、保留 Trace
+```
+
+这叫 explicit side effect：有费用或外部影响的动作必须通过一个清楚的命令
+显式开启，不能藏在“启动应用”或“跑测试”里面。
+
 ## 6. 自动化测试
 
 定向运行：
@@ -212,7 +249,8 @@ EPIPHANY_DEEPSEEK_MAX_TOKENS=2000
 cd backend
 source .venv/bin/activate
 pytest tests/test_deepseek_provider.py \
-       tests/test_deepseek_research_workflow.py -vv
+       tests/test_deepseek_research_workflow.py \
+       tests/test_live_deepseek_smoke.py -vv
 ```
 
 主要覆盖：
@@ -231,19 +269,26 @@ pytest tests/test_deepseek_provider.py \
 - HTTP 成功但非法引用会让 Task 失败；
 - 截断响应仍记录非零 Token 与费用；
 - DeepSeek 模式下不支持的 Fake Workflow 不会误发 HTTP。
+- dry-run 不创建数据库、不联网；
+- preflight 只接受 Key 是否存在，无法打印 Key 值；
+- 专用 smoke 数据库确实通过 Alembic 升级到当前 head；
+- 程序化迁移后，应用 logger 仍能被后续测试和调试捕获；
+- smoke harness 固定两次调用、一次 attempt；
+- 第一个调用失败时，排队中的第二个任务会在调用 Provider 前取消；
+- 最终摘要不包含 Source、Artifact 内容或错误正文。
 
 当前结果：
 
-- 定向 Provider/Runtime/Trace/日志测试：41 项通过；
-- 完整测试：68 项通过；
+- 新增 smoke 安全测试：5 项通过；
+- 完整测试：73 项通过；
 - Ruff lint 与 format check：通过；
 - Alembic 当前为 `0003_model_call_trace (head)`，`alembic check` 无差异；
-- 所有 DeepSeek 测试均使用 MockTransport；
+- Provider HTTP 测试使用 MockTransport，smoke 安全测试使用 Fake Provider；
 - 没有读取本地 API Key，没有访问互联网，没有费用。
 
 ## 7. 本地手动验证
 
-本切片先验证离线行为：
+先验证离线 Provider 行为：
 
 ```bash
 cd backend
@@ -262,14 +307,56 @@ pytest tests/test_deepseek_research_workflow.py -vv
   -> Run succeeded
 ```
 
+再检查 live-smoke preflight：
+
+```bash
+python -m epiphany.live_deepseek_smoke
+```
+
+它会显示：
+
+```text
+mode = dry-run
+network_enabled = false
+synthetic_source_only = true
+max_model_calls_per_run = 2
+max_attempts_per_task = 1
+max_concurrency = 1
+api_key_status = present 或 absent
+```
+
+dry-run 不创建数据库，也不发送请求。真正执行前，把 Key 只放在不会提交的
+`backend/.env`：
+
+```env
+EPIPHANY_DEEPSEEK_API_KEY=your-local-key
+```
+
+然后运行：
+
+```bash
+python -m epiphany.live_deepseek_smoke --execute
+```
+
+不需要启动 Uvicorn 或 Swagger，也不需要把默认 Provider 改成 DeepSeek。
+脚本会自动对 `data/deepseek-live-smoke.db` 执行 Alembic，再创建一次
+`episode-research`。成功标准是：
+
+```text
+2 个 Research Child Task succeeded
+  -> 2 个 ModelCall succeeded
+  -> 3 个 Artifact
+  -> Run succeeded
+```
+
 默认启动应用仍使用：
 
 ```env
 EPIPHANY_MODEL_PROVIDER=fake
 ```
 
-所以运行 `uvicorn` 和打开 Swagger 不会因为本章节而产生任何真实调用。
-显式 live smoke 将在下一小步提供独立命令，不放进默认 pytest。
+所以运行 `uvicorn`、打开 Swagger 或执行普通 pytest 都不会因为本章节而
+产生真实调用。
 
 ## 8. 日志与排错
 
@@ -298,6 +385,10 @@ model.call.failed
 5. 401 检查 Key，402 检查余额，429/503 检查服务状态；
 6. `provider_response_invalid` 检查请求契约或 Mock fixture；
 7. `provider_input_too_large` 检查素材字符上限。
+8. smoke 失败后，使用摘要中的 `run.id` 在
+   `data/deepseek-live-smoke.db` 对照 Task、ModelCall 和 Event；
+9. `api_key_status=absent` 表示 Key 尚未放进 `backend/.env`，dry-run 本身
+   仍然是成功的安全检查。
 
 日志只包含 ID、状态、模型、Token、费用和错误码，不包含素材、Prompt、模型
 正文、API Key 或 DeepSeek 错误响应正文。
@@ -326,15 +417,19 @@ model.call.failed
 - 支持代理或任意 OpenAI-compatible Base URL；
 - 为 DeepSeek 模式运行旧 `fake-podcast`。
 
-下一小步是显式 live smoke：
+显式 live smoke 工具已经具备：
 
 - 只使用短合成素材；
 - `max_calls=2`；
 - `max_attempts=1`；
 - 使用 `deepseek-v4-flash`；
 - 拉长 Worker 总 timeout；
+- 串行发送最多两个请求，第一次失败时不继续浪费第二次调用；
 - 执行前显示配置，执行后只输出 ID、tokens、耗时和预估费用；
 - 不打印 Prompt、响应正文或 Key。
+
+下一小步只剩在本地 Key 可用时运行一次 `--execute`，记录脱敏的 Run 状态、
+Token、耗时与费用，然后再进入 M2.4 Interview Scaffold。
 
 官方参考：
 
@@ -350,6 +445,7 @@ model.call.failed
 - [x] 失败路径测试通过
 - [x] 本地离线手动验证通过
 - [x] 日志中无隐私内容
+- [x] smoke harness / dry-run 安全验证通过
 - [ ] 小额 live smoke 通过
 - [x] README / Roadmap / Devlog 已同步
 - [x] 学习手册已同步

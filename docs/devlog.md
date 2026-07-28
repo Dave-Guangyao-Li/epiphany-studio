@@ -2,6 +2,28 @@
 
 ## 2026-07-28
 
+### M2.3b-2a bounded live-smoke harness
+
+- Added an explicit DeepSeek live-smoke module whose default behavior is a
+  zero-network dry run.
+- Fixed the live boundary to short synthetic material, `deepseek-v4-flash`,
+  two calls, one attempt per Task, one in-flight request, 800 output tokens per
+  call, and a longer Worker deadline.
+- Applied the normal Alembic migrations to a dedicated ignored
+  `data/deepseek-live-smoke.db` before execution so the real call trace remains
+  inspectable without touching the normal development database.
+- Kept programmatic Alembic logging from disabling existing application
+  loggers; the full suite exposed and now guards this cross-tool interaction.
+- Limited terminal output to Run/Task/ModelCall IDs, status, tokens, latency,
+  estimated cost, artifact kinds, and stable error codes.
+- Added safety tests proving dry-run does not create a database or enable
+  network access, the preflight cannot accept or print a key value, the
+  dedicated database reaches the current Alembic head, the workflow is bounded
+  to two calls, a first failure cancels the second call before Provider entry,
+  and the summary excludes source and Artifact content.
+- Verified the dry-run locally. No API key was present, so no external request
+  or paid usage occurred in this slice.
+
 ### M2.3b-1 DeepSeek Provider, zero-network validation
 
 - Added a direct OpenAI-compatible DeepSeek V4 adapter using runtime `httpx`.

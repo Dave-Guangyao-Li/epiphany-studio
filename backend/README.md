@@ -211,15 +211,69 @@ pytest tests/test_deepseek_provider.py \
        tests/test_deepseek_research_workflow.py -vv
 ```
 
-These tests use `httpx.MockTransport`; they do not read the local API key or
-contact DeepSeek. They cover successful dual research, 429 retry accounting,
-terminal authentication failure, timeout status, invalid citations, response
-usage/cost, and secret/content log redaction.
+The Provider HTTP tests use `httpx.MockTransport`; they do not read the local
+API key or contact DeepSeek. They cover successful dual research, 429 retry
+accounting, terminal authentication failure, timeout status, invalid
+citations, response usage/cost, and secret/content log redaction.
 
 When DeepSeek is selected, use `workflow_type: "episode-research"`. The old
 `fake-podcast` workflow is intentionally rejected before HTTP rather than sent
-to the hosted model. The explicit two-call synthetic live smoke command will be
-added in M2.3b-2.
+to the hosted model.
+
+## M2.3b-2a bounded live-smoke command
+
+The smoke harness is deliberately separate from `pytest`, `uvicorn`, and
+Swagger. Running it without `--execute` is a zero-network preflight:
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m epiphany.live_deepseek_smoke
+```
+
+The preflight reports whether a key is present, but never prints its value. It
+also shows the fixed safety boundary:
+
+- synthetic text only;
+- `deepseek-v4-flash`;
+- two model calls maximum;
+- one attempt per child Task;
+- one in-flight request, so an early failure can cancel the second call;
+- 800 output tokens maximum per call;
+- expected total cost below USD 0.01, as an estimate rather than a billing
+  guarantee.
+
+To perform the intentional live check, put the key only in ignored
+`backend/.env`:
+
+```env
+EPIPHANY_DEEPSEEK_API_KEY=your-local-key
+```
+
+Then run:
+
+```bash
+python -m epiphany.live_deepseek_smoke --execute
+```
+
+The command applies Alembic to the dedicated ignored
+`data/deepseek-live-smoke.db`, imports a short synthetic Source, runs the two
+Researcher Tasks, and exits successfully only if both ModelCalls and the final
+fan-in succeed. It prints IDs, task/call status, tokens, duration, estimated
+cost, and artifact kinds. It does not print the key, Prompt, source text,
+generated content, or error response body. No FastAPI server or Swagger page is
+needed.
+
+Focused zero-network safety verification:
+
+```bash
+pytest tests/test_live_deepseek_smoke.py -vv
+```
+
+If the live command fails, start with the final `run.id`, Task `error_code`,
+ModelCall status, and the structured logs. A 401 usually means an invalid key,
+402 means insufficient API balance, and network/timeout failures leave a
+durable trace in the dedicated database.
 
 ## Debugging and logs
 

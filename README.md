@@ -61,7 +61,7 @@ The initial implementation will use:
 - Python 3.12;
 - FastAPI and Pydantic;
 - SQLite in WAL mode;
-- a vendor-neutral model Provider, with DeepSeek planned as the first live adapter;
+- a vendor-neutral model Provider, with DeepSeek as the first live adapter;
 - one in-process durable worker loop;
 - `asyncio` for bounded fan-out/fan-in;
 - Server-Sent Events for live progress;
@@ -89,9 +89,17 @@ failure behavior can be tested without a network request.
 M2.3b-1 adds a direct `httpx` adapter for the current DeepSeek V4 API plus
 Timeline/Theme prompts, strict JSON parsing, error mapping, usage/cost
 accounting, input/output bounds, and log redaction. It remains opt-in:
-`EPIPHANY_MODEL_PROVIDER=fake` is still the default. All current DeepSeek tests
-use MockTransport and incur no API usage; the live synthetic smoke test is the
-next separate step.
+`EPIPHANY_MODEL_PROVIDER=fake` is still the default. Provider HTTP tests use
+MockTransport and smoke safety tests use a Fake Provider, so neither incurs API
+usage.
+
+M2.3b-2a adds a separate, bounded live-smoke command. Its default mode is a
+zero-network preflight; `--execute` is required before it can send two requests
+using short synthetic material. It fixes the model to `deepseek-v4-flash`,
+allows one attempt per child Task, applies Alembic to a dedicated ignored
+SQLite trace database, and prints only IDs, status, tokens, latency, cost, and
+error codes. The command is ready, but the first live call remains pending
+until a local API key is present.
 
 No key or personal source material belongs in Git.
 
@@ -147,8 +155,12 @@ M2.3b-1 connects the current DeepSeek V4 OpenAI-compatible contract behind the
 same Provider boundary without making a live request. Mock HTTP tests prove the
 request shape, both research prompts, usage/cost calculation, retry
 classification, timeout accounting, strict source validation, and end-to-end
-fan-in. A paid-but-truncated response still records non-zero usage. The next
-slice is one explicit two-call smoke test using only short synthetic material.
+fan-in. A paid-but-truncated response still records non-zero usage.
+
+M2.3b-2a adds the explicit two-call smoke harness and verifies its dry-run,
+call/attempt bounds, isolated trace database, and redacted summary without
+network access. The actual paid smoke remains one explicit `--execute` command
+after `EPIPHANY_DEEPSEEK_API_KEY` is stored only in `backend/.env`.
 
 ## License
 

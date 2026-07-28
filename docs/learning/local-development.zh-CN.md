@@ -294,5 +294,35 @@ pytest tests/test_deepseek_provider.py \
 EPIPHANY_MODEL_PROVIDER=fake
 ```
 
-只有执行独立 live smoke 时才临时切换为 `deepseek`。不要把 Key、个人日记、
+检查显式 smoke 命令但不联网：
+
+```bash
+python -m epiphany.live_deepseek_smoke
+```
+
+它默认只打印 preflight，不创建数据库，也不会发送请求。真正执行前，把 Key
+只放在忽略提交的 `backend/.env`：
+
+```env
+EPIPHANY_DEEPSEEK_API_KEY=your-local-key
+```
+
+然后显式运行：
+
+```bash
+python -m epiphany.live_deepseek_smoke --execute
+```
+
+这条独立命令不要求修改默认的 `EPIPHANY_MODEL_PROVIDER=fake`，也不需要启动
+Uvicorn 或 Swagger。它只使用短合成素材，最多调用两次，每个任务只尝试一次，
+Trace 保存在忽略提交的 `data/deepseek-live-smoke.db`。不要把 Key、个人日记、
 播客原稿或真实响应复制进命令历史、测试 fixture、日志和 Git。
+
+常见 smoke 排错：
+
+- `api_key_status=absent`：Key 尚未写入 `backend/.env`；
+- `live_smoke.crashed`：先看紧邻的结构化日志和稳定 `error_code`；
+- `passed=false`：检查摘要中 Task 与 ModelCall 的 status / `error_code`；
+- `ModelCall=succeeded` 但 Task failed：厂商调用成功，失败发生在 Schema、
+  引用或逐字 quote 校验；
+- `pytest: command not found`：先执行 `source .venv/bin/activate`。

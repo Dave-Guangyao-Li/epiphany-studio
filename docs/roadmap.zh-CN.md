@@ -91,15 +91,18 @@ Provider 以前失败。
 - [x] Timeline Researcher prompt
 - [x] Theme Researcher prompt
 - [x] HTTP/auth/rate-limit/overload 错误映射
+- [x] 受限 live smoke 命令与零联网安全测试
 - [ ] 使用合成素材完成小额 live smoke test
 - [x] 对 OpenAI-compatible Mock 返回继续执行结构化输出与引用校验
 
 离线验收：默认仍为 Fake；DeepSeek Provider 通过 MockTransport 验证请求、
 JSON、usage、费用、错误分类和日志脱敏。完整双 Researcher Run 能成功
 fan-in；429 只由 Worker 重试，401 不重试，timeout 记为 `timed_out`；
-付费但截断的响应仍保存 Token 和费用。真实联网验收尚未完成。
+付费但截断的响应仍保存 Token 和费用。独立 smoke 命令默认 dry-run，只有
+显式 `--execute` 才允许两次短合成素材请求；命令、上限和脱敏输出已验证，
+真实联网验收尚未完成。
 
-演示：使用少量真实素材完成两个 Researcher，Trace 中可见调用与成本数据。
+演示：使用短合成素材完成两个 Researcher，Trace 中可见调用与成本数据。
 
 ### M2.4：采访脚手架
 
