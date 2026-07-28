@@ -25,7 +25,8 @@ from epiphany.services import RunService
 from epiphany.source_service import SourceService
 
 LIVE_MODEL = "deepseek-v4-flash"
-MAX_MODEL_CALLS = 2
+MAX_MODEL_CALLS = 3
+EXPECTED_RESEARCH_CHILDREN = 2
 MAX_TASK_ATTEMPTS = 1
 MAX_CONCURRENCY = 1
 MAX_OUTPUT_TOKENS_PER_CALL = 800
@@ -43,6 +44,7 @@ EXPECTED_ARTIFACT_KINDS = {
     "timeline_research_result",
     "theme_research_result",
     "episode_research_bundle",
+    "build_interview_scaffold_result",
 }
 
 
@@ -85,7 +87,7 @@ async def run_smoke_workflow(
     database_url: str,
     provider: ModelProvider,
 ) -> tuple[RunView, int]:
-    """Run the real two-child workflow against an already-migrated database."""
+    """Run two Researchers and one sequential Interviewer against a migrated database."""
 
     database = Database(database_url)
     orchestrator = Orchestrator(task_max_attempts=MAX_TASK_ATTEMPTS)
@@ -113,11 +115,14 @@ async def run_smoke_workflow(
         )
         created = await service.create_run(
             workflow_type="episode-research",
-            payload={"source_ids": [imported.source.id]},
+            payload={
+                "topic": "声音如何让不同年份的自己重新相遇",
+                "source_ids": [imported.source.id],
+            },
         )
         child_tasks = [task for task in created.tasks if task.parent_task_id is not None]
         safety_boundary_ready = (
-            len(child_tasks) == MAX_MODEL_CALLS
+            len(child_tasks) == EXPECTED_RESEARCH_CHILDREN
             and all(task.max_attempts == MAX_TASK_ATTEMPTS for task in child_tasks)
             and worker.max_model_calls_per_run == MAX_MODEL_CALLS
             and worker.max_concurrency == MAX_CONCURRENCY
@@ -246,14 +251,14 @@ def migrate_database(database_url: str) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a bounded two-call DeepSeek smoke test with synthetic source material. "
+            "Run a bounded three-call DeepSeek smoke test with synthetic source material. "
             "Without --execute this command is a zero-network dry run."
         )
     )
     parser.add_argument(
         "--execute",
         action="store_true",
-        help="allow the two external DeepSeek API calls",
+        help="allow the three external DeepSeek API calls",
     )
     parser.add_argument(
         "--database",

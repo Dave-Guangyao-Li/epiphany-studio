@@ -9,6 +9,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
+from epiphany.runtime.interview_prompts import build_interview_prompt
 from epiphany.runtime.providers.base import (
     ProviderAuthenticationError,
     ProviderContentFilteredError,
@@ -107,11 +109,17 @@ class DeepSeekProvider:
         self._client = client
 
     async def generate(self, invocation: TaskInvocation) -> ProviderResult:
-        prompt = build_research_prompt(
-            task_kind=invocation.kind,
-            task_input=invocation.input_json,
-            max_source_chars=self.max_source_chars,
-        )
+        if invocation.kind == BUILD_INTERVIEW_SCAFFOLD:
+            prompt = build_interview_prompt(
+                task_input=invocation.input_json,
+                max_source_chars=self.max_source_chars,
+            )
+        else:
+            prompt = build_research_prompt(
+                task_kind=invocation.kind,
+                task_input=invocation.input_json,
+                max_source_chars=self.max_source_chars,
+            )
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": prompt.messages,

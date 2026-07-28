@@ -21,7 +21,10 @@ async def _create_research_run(
     )
     created = await service.create_run(
         workflow_type="episode-research",
-        payload={"source_ids": [imported.source.id]},
+        payload={
+            "topic": "模型调用记账",
+            "source_ids": [imported.source.id],
+        },
     )
     return created.id
 
@@ -48,18 +51,18 @@ async def test_usage_latency_and_cost_are_persisted_without_network(
     worker.provider = UsageFakeProvider()
     run_id = await _create_research_run(database, service)
 
-    assert await worker.run_until_idle() == 2
+    assert await worker.run_until_idle() == 3
     completed = await service.get_run(run_id)
 
     assert completed.status == "succeeded"
-    assert completed.model_call_count == 2
-    assert len(completed.model_calls) == 2
+    assert completed.model_call_count == 3
+    assert len(completed.model_calls) == 3
     assert all(call.status == "succeeded" for call in completed.model_calls)
     assert all(call.provider == "fake-usage" for call in completed.model_calls)
     assert all(call.model == "fake-usage-v1" for call in completed.model_calls)
-    assert sum(call.input_tokens for call in completed.model_calls) == 240
-    assert sum(call.output_tokens for call in completed.model_calls) == 60
-    assert sum(call.estimated_cost_micros for call in completed.model_calls) == 34
+    assert sum(call.input_tokens for call in completed.model_calls) == 360
+    assert sum(call.output_tokens for call in completed.model_calls) == 90
+    assert sum(call.estimated_cost_micros for call in completed.model_calls) == 51
     assert all(call.cost_currency == "USD" for call in completed.model_calls)
     assert all(
         call.duration_ms is not None and call.duration_ms >= 1 for call in completed.model_calls
@@ -67,8 +70,8 @@ async def test_usage_latency_and_cost_are_persisted_without_network(
 
     events = await service.list_events(run_id)
     event_types = [event.type for event in events]
-    assert event_types.count("model.call.started") == 2
-    assert event_types.count("model.call.completed") == 2
+    assert event_types.count("model.call.started") == 3
+    assert event_types.count("model.call.completed") == 3
 
 
 async def test_retry_attempts_are_each_accounted_for(

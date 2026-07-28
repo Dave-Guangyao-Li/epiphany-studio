@@ -58,7 +58,7 @@ uvicorn epiphany.main:app --reload
 
 它是开发调试界面，不是产品最终体验。
 
-## 4. 手动走通 Source 到双 Agent
+## 4. 手动走通 Source 到采访脚手架
 
 ### 第一步：导入测试素材
 
@@ -85,6 +85,7 @@ uvicorn epiphany.main:app --reload
 {
   "workflow_type": "episode-research",
   "payload": {
+    "topic": "五年后重新开始录播客",
     "source_ids": [
       "src_把这里替换成上一步返回的ID"
     ]
@@ -101,13 +102,17 @@ uvicorn epiphany.main:app --reload
 成功结果应该包含：
 
 - Run 状态为 `succeeded`；
+- `workflow_version` 为 `v2`；
 - 一个 `research_manager`；
 - 一个 `timeline_research`；
 - 一个 `theme_research`；
-- 三个 Artifact；
-- `model_call_count` 为 2。
+- 一个串行的 `build_interview_scaffold`；
+- 四个 Artifact：Timeline、Theme、Research Bundle 和 Interview Scaffold；
+- `model_call_count` 为 3；
+- `output_artifact_id` 指向 `build_interview_scaffold_result`。
 
-这里的两次调用是 Fake Provider 执行，不是付费模型调用。
+Manager 只做确定性编排，不调用模型。三次 ModelCall 分别属于 Timeline、
+Theme 和 Interviewer；默认由 Fake Provider 执行，Token 和费用都是 0。
 
 ### 第四步：查看执行历史
 
@@ -119,10 +124,29 @@ uvicorn epiphany.main:app --reload
 - 两个 `task.started`
 - `workflow.fan_in.waiting`
 - `workflow.fan_in.completed`
+- `workflow.interview_scaffold.queued`
+- `workflow.interview_scaffold.completed`
 - `run.succeeded`
 
-这能直观看见 fan-out 和 fan-in 不是抽象术语，而是数据库中可回放的真实
-执行过程。
+`workflow.fan_in.completed` 必须早于
+`workflow.interview_scaffold.queued`。这能直观看见：两个 Researcher
+先 fan-out 并行，fan-in 汇总完成后，Interviewer 才串行开始。
+
+### 第五步：下载 Markdown
+
+在 `GET /runs/{run_id}/exports/interview-scaffold.md` 中填入同一个 Run ID。
+
+成功时应该看到：
+
+- HTTP 200；
+- `content-type: text/markdown; charset=utf-8`；
+- 文件名为 `interview-scaffold-{run_id}.md`；
+- 正文包含开场、采访段落、问题、素材缺口和
+  ``source_id#source_segment_id`` 来源标签。
+
+Run 尚未完成或最终 Artifact 不是合法脚手架时会返回 409。导出器会重新
+校验严格 Schema，并转义模型文字中的 HTML 与 Markdown 控制字符，避免它
+偷偷插入标题、链接或远程图片。
 
 ## 5. 自动化测试
 
@@ -132,27 +156,36 @@ uvicorn epiphany.main:app --reload
 pytest
 ```
 
-当前基线：
+当前全量基线：
 
 ```text
-28 passed
+99 passed
 ```
 
-只测试双 Agent：
+定向测试研究、采访脚手架和导出：
 
 ```bash
-pytest tests/test_research_schemas.py tests/test_research_workflow.py -vv
+pytest tests/test_research_schemas.py \
+       tests/test_research_workflow.py \
+       tests/test_interview_scaffold.py \
+       tests/test_interview_export_api.py -vv
 ```
 
 其中包含：
 
 - 严格 Schema 测试；
-- 越权引用拒绝测试；
+- Researcher 与 Interviewer 两层越权引用拒绝测试；
 - 原话必须存在于来源片段的测试；
 - 两个 Child Task 确实同时执行的并发探针；
-- 正常 fan-out/fan-in 测试；
+- 正常 fan-out/fan-in 后串行 Interviewer 测试；
+- 4 Tasks、4 Artifacts、3 ModelCalls 的完整链路；
+- v2 新流程与已在途 v1 Run 的兼容测试；
+- Markdown 确定性、HTML/Markdown 注入转义和 200/404/409 API 测试；
 - 一个 Child 失败后的父子失败传播；
 - 完整 HTTP API 集成测试。
+
+这里的 99 是当前基线；M2.2 的 28 项、M2.3a 的 32 项和 M2.3b 的 83 项
+仍是各阶段当时的历史结果，不应回写修改。
 
 检查代码质量：
 
@@ -174,6 +207,10 @@ alembic check
 No new upgrade operations detected.
 ```
 
+M2.4 复用已有 Run、Task、Artifact、Event 和 ModelCall 表，没有新增数据库
+字段，因此 Alembic 仍为 `0003_model_call_trace (head)`，没有新的
+migration。
+
 ## 6. 日志怎么看
 
 启动 Uvicorn 的终端会输出一行一个 JSON 日志，例如：
@@ -193,8 +230,15 @@ No new upgrade operations detected.
 - `request_id`
 - `run_id`
 - `task_id`
+- `artifact_id`
+- `model_call_id`
 - `event`
 - `error_code`
+
+M2.4 重点事件是 `workflow.interview_scaffold.queued`、
+`workflow.interview_scaffold.completed` 和
+`run.interview_scaffold_markdown.exported`。完成日志只增加段落数、问题数
+或 Markdown 字符数，不打印生成正文。
 
 日志禁止包含素材正文、prompt、模型完整输出和 API Key。
 
@@ -303,9 +347,12 @@ python -m epiphany.live_deepseek_smoke --execute
 ```
 
 这条独立命令不要求修改默认的 `EPIPHANY_MODEL_PROVIDER=fake`，也不需要启动
-Uvicorn 或 Swagger。它只使用短合成素材，最多调用两次，每个任务只尝试一次，
-Trace 保存在忽略提交的 `data/deepseek-live-smoke.db`。不要把 Key、个人日记、
-播客原稿或真实响应复制进命令历史、测试 fixture、日志和 Git。
+Uvicorn 或 Swagger。它只使用短合成素材；M2.4 当前 harness 最多调用三次，
+覆盖两个 Researcher 和一个串行 Interviewer，每个任务只尝试一次。Trace
+保存在忽略提交的 `data/deepseek-live-smoke.db`。M2.3b 已完成的历史 live
+smoke 仍是两次调用、总计 2301 tokens；不要用当前三调用上限反向改写那次
+记录。也不要把 Key、个人日记、播客原稿或真实响应复制进命令历史、测试
+fixture、日志和 Git。
 
 常见 smoke 排错：
 

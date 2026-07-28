@@ -11,9 +11,9 @@ from epiphany.db import Database
 from epiphany.events import append_event
 from epiphany.ids import new_id
 from epiphany.models import Artifact, Run, Task
-from epiphany.research_schemas import validate_research_output
 from epiphany.runtime.model_call_ledger import ModelCallLeaseLost, ModelCallLedger
 from epiphany.runtime.orchestrator import Orchestrator
+from epiphany.runtime.output_validation import validate_task_output
 from epiphany.runtime.providers import (
     ModelProvider,
     ProviderTimeoutError,
@@ -478,7 +478,7 @@ class Worker:
             result=result,
         )
         try:
-            validated_content = validate_research_output(
+            validated_content = validate_task_output(
                 task_kind=invocation.kind,
                 task_input=invocation.input_json,
                 content=result.content,

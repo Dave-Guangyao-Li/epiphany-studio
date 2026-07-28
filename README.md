@@ -94,13 +94,15 @@ MockTransport and smoke safety tests use a Fake Provider, so neither incurs API
 usage.
 
 M2.3b-2a adds a separate, bounded live-smoke command. Its default mode is a
-zero-network preflight; `--execute` is required before it can send two requests
-using short synthetic material. It fixes the model to `deepseek-v4-flash`,
-allows one attempt per child Task, applies Alembic to a dedicated ignored
-SQLite trace database, and prints only IDs, status, tokens, latency, cost, and
-error codes. M2.3b-2b used this boundary to complete the first two-call live
-smoke successfully: both Research Tasks passed strict validation and fan-in,
-with an estimated total cost of USD 0.000491.
+zero-network preflight; `--execute` is required before it can send requests
+using short synthetic material. The current workflow-v2 harness is capped at
+three calls—two Researchers followed by one serial Interviewer—fixes the model
+to `deepseek-v4-flash`, allows one attempt per model-backed Task, applies
+Alembic to a dedicated ignored SQLite trace database, and prints only IDs,
+status, tokens, latency, cost, and error codes. M2.3b-2b used the earlier
+two-call boundary to complete the first live smoke successfully: both Research
+Tasks passed strict validation and fan-in, with an estimated total cost of USD
+0.000491.
 
 M2.3b-3 makes DeepSeek cost estimates follow an explicit billing currency.
 `EPIPHANY_DEEPSEEK_BILLING_CURRENCY` accepts `USD` or `CNY` and defaults to
@@ -175,6 +177,25 @@ research bundle. The persistent trace records 1,092 input tokens, 1,209 output
 tokens, 15,435 ms of combined Provider latency, and USD 0.000491 estimated cost.
 M2.3b-3 adds explicit USD/CNY pricing selection and currency-grouped summaries
 without rewriting this historical USD trace or changing the database schema.
+
+M2.4 completes the Interview Scaffold slice. Every new `episode-research`
+payload must include a non-blank `topic` with its `source_ids` and is stamped
+as workflow `v2`. The Timeline and Theme Researchers still fan out in parallel
+and produce a deterministic research bundle; only after that bundle exists
+does a serial Interviewer run with its own strict schema and prompt. The
+scaffold validator rejects extra fields, blank content, topic drift, and any
+source reference outside the research bundle. A complete v2 Run therefore has
+four Tasks, four Artifacts, and three ModelCalls. Completed scaffolds can be
+rendered through `GET /runs/{run_id}/exports/interview-scaffold.md`; the
+renderer is deterministic, keeps citations, and escapes Markdown control
+syntax and raw HTML. Existing in-flight workflow-v1 Runs retain their original
+behavior and finish at the research bundle. This slice needs no database
+migration. The Fake Provider remains the zero-token, zero-cost default.
+
+The live-smoke harness now has a three-call ceiling for the v2 shape, but M2.4
+was verified only in dry-run mode: no new paid live smoke was performed. The
+full suite passes with 99 tests. The historical M2.3b live result above remains
+the two-call, 2,301-token, USD 0.000491 trace.
 
 ## License
 

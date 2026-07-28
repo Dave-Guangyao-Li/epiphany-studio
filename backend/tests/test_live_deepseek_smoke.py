@@ -155,8 +155,8 @@ async def test_smoke_summary_groups_costs_by_currency(
     assert summary["passed"] is True
     assert summary["totals"]["estimated_costs"] == {
         "CNY": {
-            "micros": 11,
-            "amount": "0.000011",
+            "micros": 22,
+            "amount": "0.000022",
         },
         "USD": {
             "micros": 7,
