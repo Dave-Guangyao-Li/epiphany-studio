@@ -79,7 +79,15 @@ async def _insert_run(
             workflow_type="episode-research",
             workflow_version="v1",
             status=status,
-            current_step="complete" if status == RunStatus.SUCCEEDED else "research_fan_out",
+            current_step=(
+                "complete"
+                if status == RunStatus.SUCCEEDED
+                else (
+                    "awaiting_interview_response"
+                    if status == RunStatus.WAITING_FOR_USER
+                    else "research_fan_out"
+                )
+            ),
             input_json={
                 "topic": "五年后重新开始录播客",
                 "source_ids": ["src_export"],
@@ -160,6 +168,31 @@ async def test_export_returns_404_for_missing_run(tmp_path: Path) -> None:
 
     assert response.status_code == 404
     assert response.json() == {"detail": "run not found"}
+    await app.state.database.close()
+
+
+async def test_export_is_available_while_run_waits_for_user(tmp_path: Path) -> None:
+    app = create_app(
+        settings=Settings(
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'waiting-export.db'}",
+            create_schema_on_start=False,
+            worker_enabled=False,
+        )
+    )
+    await app.state.database.create_schema()
+    run_id = await _insert_run(
+        app,
+        status=RunStatus.WAITING_FOR_USER,
+        artifact_kind="build_interview_scaffold_result",
+        artifact_content=_scaffold_content(),
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/runs/{run_id}/exports/interview-scaffold.md")
+
+    assert response.status_code == 200
+    assert response.text.startswith("# 五年后，我重新打开了这个播客")
     await app.state.database.close()
 
 

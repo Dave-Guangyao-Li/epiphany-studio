@@ -186,7 +186,7 @@ async def test_mocked_deepseek_research_succeeds_end_to_end(
     finally:
         await client.aclose()
 
-    assert completed.status == "succeeded"
+    assert completed.status == "waiting_for_user"
     assert request_count == 3
     assert completed.model_call_count == 3
     assert len(completed.model_calls) == 3
@@ -224,7 +224,7 @@ async def test_cny_estimate_is_persisted_in_model_call_ledger(
     finally:
         await client.aclose()
 
-    assert completed.status == "succeeded"
+    assert completed.status == "waiting_for_user"
     assert len(completed.model_calls) == 3
     assert all(call.cost_currency == "CNY" for call in completed.model_calls)
     # Per call: 80 cache-miss input * CNY 1/M + 20 output * CNY 2/M.
@@ -261,7 +261,7 @@ async def test_rate_limit_retries_in_worker_and_accounts_each_request(
     finally:
         await client.aclose()
 
-    assert completed.status == "succeeded"
+    assert completed.status == "waiting_for_user"
     assert request_counts == {
         "timeline_research": 2,
         "theme_research": 1,

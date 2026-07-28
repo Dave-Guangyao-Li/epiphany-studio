@@ -44,7 +44,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 8. [M2.3a：零费用模型调用 Trace](m2-3a-model-call-trace.zh-CN.md)
 9. [M2.3b：DeepSeek Provider](m2-3b-deepseek-provider.zh-CN.md)
 10. [M2.4：从研究结果生成采访脚手架](m2-4-interview-scaffold.zh-CN.md)
-11. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+11. [M3.1：可持久化的人工暂停与恢复](m3-1-human-checkpoint.zh-CN.md)
+12. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -62,6 +63,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M2.3b-2b | 使用短合成素材执行两次真实调用 | 完成 | 本次 focused commit |
 | M2.3b-3 | DeepSeek 费用可显式按 USD/CNY 估算与分组 | 完成 | 本次 focused commit |
 | M2.4 | fan-in 后串行生成并安全导出采访脚手架 | 完成 | `81b150d`、`d30f68f` |
+| M3.1 | 生成脚手架后持久化等待用户，并用补充 Source 幂等恢复 | 完成 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -70,14 +72,17 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 ```text
 导入一段测试文字
   -> 保存 Source 和 SourceSegment
-  -> 用 topic 和 source_ids 创建 episode-research v2 Run
+  -> 用 topic 和 source_ids 创建 episode-research v3 Run
   -> Manager 分发两个 Child Task
   -> Timeline / Theme Fake Researcher 并行执行
   -> 严格校验结构和来源引用
   -> 合并为 episode_research_bundle
   -> 串行 Interviewer 生成 build_interview_scaffold_result
   -> 严格校验脚手架内每一处来源引用
+  -> 持久化停在 waiting_for_user
   -> 通过 API 安全导出带引用的 Markdown
+  -> 用户把补充口述文字导入为新 Source
+  -> 用 Source ID 幂等 Resume
   -> 从 Run、Task、Artifact、Event 和日志中复盘全过程
 ```
 
@@ -90,16 +95,27 @@ fan-in。真实 Trace 保存在独立 SQLite 中，查看方法见
 USD 或 CNY 价格表；默认 USD 保持兼容，不自动猜测账户币种，也不改写历史
 记录。M2.4 把研究结果继续变成可使用的采访脚手架：正常 Fake Run 最终有
 4 个 Task、4 个 Artifact 和 3 个 ModelCall；Manager 只负责编排，不调用
-模型。新建 `episode-research` 使用 v2，已在 M2.4 开始前运行的 v1 Run
-仍按旧流程在 research bundle 处结束。M2.4 没有修改数据库结构，因此没有
-新增 migration。
+模型。M2.4 当时的新建 `episode-research` 使用 v2，已在该阶段开始前运行的
+v1 Run 仍按旧流程在 research bundle 处结束。M2.4 没有修改数据库结构，
+因此没有新增 migration。M3.1 将新建 Run 升级为 v3：脚手架完成后保留 4 个 Task、
+4 个 Artifact 和 3 个 ModelCall，但状态停在 `waiting_for_user`，且等待
+期间仍可导出脚手架。用户通过 `POST /sources` 导入一段已经转成文字的补充
+口述，再调用 `POST /runs/{run_id}/resume`。首次 Resume 新增一个只保存
+Source / SourceSegment 引用的 `user_material_submission` Artifact，随后
+确定性结束 Run；Task 仍为 4 个，Artifact 变成 5 个，ModelCall 仍为 3 个。
+相同 submission 可安全重放，重启和并发路径也有自动化测试。M3.1 同样没有
+修改数据库结构；v1 与 v2 在途 Run 保持原有结束方式。
+
+这里的 `voice_note_transcript` 是“已经转成文字的口述”这一 Source 分类，
+不是麦克风或语音识别功能。当前可以在 Swagger 中直接输入或粘贴文字。
 
 ## 当前还不能做什么
 
 - DeepSeek 真实 API 已通过合成素材 smoke，但尚未用个人素材评价内容质量；
 - 已能生成采访脚手架，但还不是完整播客稿；
-- 尚未进入 `waiting_for_user`；
 - 尚未提供采访脚手架 editor；
+- 尚未根据补充 Source 运行新的 Editor Agent；
+- 尚未提供麦克风录音、音频上传、STT 或语音克隆；
 - 尚未提供普通用户使用的 Web UI；
 - 尚未实现 SSE 实时 Trace 页面；
 - 尚未部署到线上。

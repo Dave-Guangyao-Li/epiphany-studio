@@ -78,17 +78,25 @@ create_run
 `timeline_research`、`theme_research`、`build_interview_scaffold` 和
 `draft_episode` 才调用模型。
 
-M2.4 将当前可执行边界推进到 `build_interview_scaffold`：两个 Researcher
+M2.4 将可执行边界推进到 `build_interview_scaffold`：两个 Researcher
 仍以同级 Child Task 并行调用模型，确定性 fan-in 持久化研究 Bundle 后，才
 排队一个 `parent_task_id=None` 的串行根 Interviewer Task。它不是第三个
 并行 Child，也不会与研究调用重叠。一次成功的 v2 Run 因而固定产生四个
 Task（Manager、两个 Researcher、Interviewer）、四个 Artifact（两个研究
 结果、一个研究 Bundle、一个采访脚手架）和三次 ModelCall。
 
-新的 `episode-research` Run 使用 workflow v2。为使升级时已经在途的 Run
-仍可恢复，v1 保留原有语义：fan-in 后以 `episode_research_bundle` 成功结束，
-不要求新增 `topic`，也不排队 Interviewer。这个版本分支复用现有表和字段，
-M2.4 不需要数据库 migration。
+M3.1 将当前边界推进到人工检查点。新的 `episode-research` Run 使用
+workflow v3：Interviewer 成功后保存脚手架，但 Run 进入
+`waiting_for_user / awaiting_interview_response`，而不是立刻成功。用户把
+已经转成文字的补充口述作为新 Source 导入，再用 Source ID 调用 Resume。
+Resume 保存一份只含引用的 `user_material_submission` Artifact，并在同一
+事务中完成 `waiting -> running -> succeeded`。此步没有新增 Task 或
+ModelCall，最终 output 暂时仍是采访脚手架。
+
+为使升级时已经在途的 Run 仍可恢复，v1 保留原有语义：fan-in 后以
+`episode_research_bundle` 成功结束，不要求新增 `topic`，也不排队
+Interviewer；v2 仍在采访脚手架完成后成功。三个版本分支都复用现有表和
+字段，M3.1 不需要数据库 migration。
 
 ## 5. Subagent 定义
 
@@ -235,6 +243,13 @@ Worker 循环：
 兄弟状态；耗时的 Provider 调用仍然真实并发。未来多 Worker 需要借助
 PostgreSQL 行锁或等价的数据库协调后再解除这个单进程约束。
 
+M3.1 的 `RunService` 也在单进程内用同一个 mutation lock 串行 Resume 与
+Cancel，防止两个请求同时从 `waiting_for_user` 穿过状态边界。相同 Resume
+由 Artifact idempotency key 防止重复落库。这个边界不等于多进程
+exactly-once：两个独立 `RunService` 同时写入时，SQLite 唯一约束能阻止
+重复数据，但 loser 还不会被转换成友好的 replay/409。多进程部署前应加入
+数据库 CAS/行锁，或捕获唯一约束后回读已有提交。
+
 进程启动时将已过期的 `running` Task 重新排队。后续如果需要多 Worker，
 再迁移 PostgreSQL，不在 SQLite 上模拟分布式队列。
 
@@ -330,12 +345,30 @@ GET  /runs/{id}/events/stream
 SSE 用于低成本实时显示。客户端断线后先从数据库按 `sequence` 补事件，
 再连接实时流。SSE 不是状态真相。
 
-M2.4 的导出 endpoint 只接受已经成功且最终 Artifact 类型为
-`build_interview_scaffold_result` 的 Run；未就绪、类型不符或内容无效时
-返回冲突错误。Markdown 由已验证 JSON 确定性渲染，保留每处 Source ID 与
-Segment ID，并对所有模型文本转义 Markdown 控制字符和原始 HTML，避免模型
-文本改变文档结构或注入链接、标签。运行追踪用的 `_execution` metadata
-不会进入导出内容。
+导出 endpoint 接受 `waiting_for_user` 或 `succeeded`，但
+`output_artifact_id` 必须指向 `build_interview_scaffold_result`；未就绪、
+类型不符或内容无效时返回冲突错误。这样用户能先读脚手架再补充口述。
+Markdown 由已验证 JSON 确定性渲染，保留每处 Source ID 与 Segment ID，并
+对所有模型文本转义 Markdown 控制字符和原始 HTML，避免模型文本改变文档
+结构或注入链接、标签。运行追踪用的 `_execution` metadata 不会进入导出。
+
+M3.1 的实际 Resume 契约是：
+
+```text
+POST /sources
+  -> source_type = voice_note_transcript
+  -> text = 已经转成文字的补充口述
+
+POST /runs/{id}/resume
+  -> checkpoint = interview_scaffold
+  -> submission_id = 调用方稳定重试键
+  -> source_ids = 新 Source ID 列表
+```
+
+Resume 不接受原始正文。正文只存于 `sources` / `source_segments`；
+`user_material_submission` Artifact 和 Events 只保存检查点、Artifact ID、
+Source ID、Segment ID 与计数。相同 submission 和相同 Source 列表重放返回
+已有结果；同一 submission 对应不同 Source 返回 409。
 
 ## 12. 可观测性与调试
 
@@ -373,6 +406,14 @@ Run、Task、attempt、provider、model、Token、费用和错误码，不记录
 M2.4 增加采访脚手架排队、完成与 Markdown 导出的稳定事件/日志。字段只包含
 Run、Task、Artifact、ModelCall 等 ID，以及 section、question、引用片段和
 Markdown 字符数等计数；不记录研究内容、Prompt、模型输出或导出的正文。
+
+M3.1 新增持久事件
+`workflow.user_input.requested`、`run.waiting_for_user`、`run.resumed` 和
+`workflow.user_material.accepted`，以及操作日志
+`run.resume.accepted`、`run.resume.idempotent_replay` 和
+`run.resume.rejected`。它们只记录关联 ID、checkpoint、Source/Segment
+数量、状态和错误码；不记录 submission label、补充口述正文或 SourceSegment
+文本。
 
 ## 13. 升级触发条件
 

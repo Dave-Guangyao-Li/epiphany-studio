@@ -2,6 +2,47 @@
 
 ## 2026-07-28
 
+### M3.1 durable human checkpoint and idempotent Resume
+
+- Versioned new `episode-research` Runs as v3 while preserving in-flight v1
+  completion at the research Bundle and v2 completion at the Interview
+  Scaffold.
+- Changed v3 so the completed Interviewer leaves the Run durably at
+  `waiting_for_user / awaiting_interview_response`, with all four Tasks
+  terminal, four Artifacts persisted, three ModelCalls completed, and no work
+  left for the Worker to poll.
+- Allowed the validated Interview Scaffold Markdown to be exported while the
+  Run is waiting, so the human can read the questions before supplying more
+  material.
+- Reused `POST /sources` for already-transcribed supplemental speech and added
+  `POST /runs/{run_id}/resume`, whose strict request contains a checkpoint,
+  caller-stable submission ID, and one or more Source IDs.
+- Persisted a `user_material_submission` Artifact containing only the
+  checkpoint, Scaffold ID, Source IDs, and SourceSegment references. Source
+  text remains in `sources` / `source_segments` and is not copied into Events
+  or operational logs.
+- Made identical Resume retries return an idempotent replay without duplicate
+  Artifacts or Events; conflicting material, missing Sources, wrong states,
+  and invalid bodies return bounded HTTP 409/404/422 responses.
+- Serialized Resume and Cancel through one single-process mutation boundary.
+  This fixed a review-discovered race where both terminal actions could
+  previously succeed. Regression tests now prove that only one terminal event
+  wins.
+- Kept M3.1 intentionally deterministic after Resume: it records the human
+  submission and completes the checkpoint without another Task, Provider call,
+  Token, or cost. `output_artifact_id` still points to the Scaffold; the M3.2
+  Editor will consume the new Source and create the draft.
+- Reused the existing runtime schema, so no migration is needed. The full 113
+  test suite, Ruff lint/format, Alembic current/check, and guarded DeepSeek
+  dry-run pass; no live API request or paid usage was made.
+- Recorded the remaining deployment boundary: concurrent Resume across
+  multiple processes is protected from duplicate rows by SQLite's unique
+  constraint, but the losing request is not yet translated to replay/409.
+  The supported M3.1 runtime remains local and single-process.
+- Audio capture, microphone permission, speech-to-text, TTS, and voice cloning
+  remain outside this slice. “Voice note transcript” means text supplied after
+  transcription.
+
 ### M2.4 source-grounded interview scaffold and Markdown export
 
 - Extended `episode-research` after its parallel Timeline/Theme fan-out and

@@ -54,7 +54,7 @@ async def test_usage_latency_and_cost_are_persisted_without_network(
     assert await worker.run_until_idle() == 3
     completed = await service.get_run(run_id)
 
-    assert completed.status == "succeeded"
+    assert completed.status == "waiting_for_user"
     assert completed.model_call_count == 3
     assert len(completed.model_calls) == 3
     assert all(call.status == "succeeded" for call in completed.model_calls)

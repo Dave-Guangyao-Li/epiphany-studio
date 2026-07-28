@@ -13,6 +13,8 @@ from epiphany.state_machine import (
 
 def test_valid_run_and_task_transitions() -> None:
     validate_run_transition(RunStatus.QUEUED, RunStatus.RUNNING)
+    validate_run_transition(RunStatus.RUNNING, RunStatus.WAITING_FOR_USER)
+    validate_run_transition(RunStatus.WAITING_FOR_USER, RunStatus.RUNNING)
     validate_run_transition(RunStatus.RUNNING, RunStatus.SUCCEEDED)
     validate_task_transition(TaskStatus.QUEUED, TaskStatus.RUNNING)
     validate_task_transition(TaskStatus.RUNNING, TaskStatus.QUEUED)

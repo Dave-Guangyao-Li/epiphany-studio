@@ -51,6 +51,8 @@ MVP 文字来源契约：
 ### 3.2 Human-led
 
 系统生成候选素材、问题和草稿；用户负责确认、修正、补充和最终采用。
+M3.1 中的“补充口述”特指用户已经转成文字后导入的 Source。浏览器不申请
+麦克风权限，后端不接收音频，也不执行实时语音转文字。
 
 ### 3.3 Semi-scripted
 
@@ -166,7 +168,7 @@ Child，也不会与研究调用并发。
 
 ### M2.4 采访脚手架契约与导出
 
-- 新建 `episode-research` Run 使用 workflow v2；一次成功运行固定包含四个
+- M2.4 新建的 `episode-research` Run 使用 workflow v2；一次成功运行固定包含四个
   Task、四个 Artifact 和三次 ModelCall；
 - v1 在途 Run 保持 M2.2 语义，在确定性 fan-in 后以研究 Bundle 成功结束，
   无需 `topic` 或 Interviewer；
@@ -183,13 +185,42 @@ Child，也不会与研究调用并发。
   继续保留，失败的 Run 不会伪装成可导出的成功结果；
 - 单 Run 调用预算设为二时，第三次 Interviewer 调用在进入 Provider 前以
   `model_call_limit_exceeded` 被拒绝，不产生第三条 ModelCall；
-- `GET /runs/{run_id}/exports/interview-scaffold.md` 只导出已成功 Run 的采访
-  脚手架。Markdown 由结构化 Artifact 确定性生成，保留来源标签，并转义模型
-  文本中的 Markdown 控制字符和原始 HTML；运行 metadata 不进入正文。
+- `GET /runs/{run_id}/exports/interview-scaffold.md` 导出已经就绪的采访
+  脚手架。M2.4 v2 成功态和 M3.1 v3 等待态都允许导出；Markdown 由结构化
+  Artifact 确定性生成，保留来源标签，并转义模型文本中的 Markdown 控制
+  字符和原始 HTML；运行 metadata 不进入正文。
 
 M2.4 复用现有 Run、Task、Artifact、Event 和 ModelCall 表，不需要数据库
 migration。结构化运行日志只记录关联 ID、状态和 section、question、引用、
 字符等计数，不记录素材、Prompt、模型响应或导出正文。
+
+### M3.1 人工检查点与 Resume 契约
+
+- 新建 `episode-research` Run 使用 workflow v3；v1 和 v2 在途 Run 保持各自
+  原来的完成边界；
+- Interviewer 成功后，v3 Run 保存脚手架并进入
+  `waiting_for_user / awaiting_interview_response`；
+- 等待时四个 Task 都已终结、四个 Artifact 和三次 ModelCall 已持久化，
+  Worker 没有可领取任务，也不会后台继续花费模型费用；
+- 用户通过 `POST /sources` 导入补充文字，建议
+  `source_type="voice_note_transcript"`，再调用
+  `POST /runs/{run_id}/resume`，只提交 checkpoint、稳定 submission ID 和
+  Source ID 列表；
+- Resume 创建一份 `user_material_submission` Artifact。它只引用采访脚手架、
+  Source 与 SourceSegment，不复制补充正文，不改写 Run 的原始 input；
+- 第一次合法 Resume 返回 `resumed=true`；完全相同的网络重试返回
+  `idempotent_replay=true`，不新增 Artifact 或 Event；相同 submission ID
+  对应不同 Source 返回 409；
+- Source 不存在返回 404，Run 继续等待；无效 body 返回 422；非等待态、
+  已取消或已失败的 Run 返回 409；
+- Resume 与 Cancel 在当前单进程服务内共用 mutation lock，只有一个终态能
+  成功；多进程协调不在 M3.1 支持范围；
+- M3.1 的 Resume 只验证人工检查点闭环，在同一事务内确定性完成，不新增
+  Task、Provider 调用、Token 或费用，`output_artifact_id` 仍指向脚手架；
+- M3.2 Editor 才会读取新增 Source，生成口播稿与 Show Notes。
+
+M3.1 同样复用现有表，无 migration。操作日志和 Events 不保存补充口述
+正文、Prompt、模型输出、密钥或语音内容。
 
 ### Editor
 
