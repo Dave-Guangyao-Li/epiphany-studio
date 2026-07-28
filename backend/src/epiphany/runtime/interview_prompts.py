@@ -40,13 +40,17 @@ _INTERVIEW_INSTRUCTIONS = """
 而不是替用户直接写完整文章。
 
 要求：
-1. 生成 2 到 6 个有叙事顺序的 section。
+1. 生成恰好 3 个有叙事顺序的 section。每个 section 只保留 1 条 known_context、
+   2 个 question；每个 question 只给 2 个 keywords。
 2. title 必须逐字等于输入 topic。episode_intent、opening、closing、section title、
    known_context 和 transition 都要带 allowed_source_refs；transition 要像口播时可以
    自然说出的过渡。
 3. question 要具体、能唤起细节或认知变化；每题提供 purpose、1 到 8 个 keywords。
 4. material_gaps 只指出现有证据尚未回答的缺口，不得把猜测写成事实。
 5. 所有 source_refs 只能原样复制 allowed_source_refs 中的对象。
+6. 保持精简：每个 source_refs 列表只选最直接的 1 到 2 个引用，不要复制全部引用；
+   material_gaps 最多 2 条；所有自然语言字段尽量不超过 80 个汉字。整个 JSON 必须
+   能在 3000 tokens 内完整返回。
 
 JSON 格式：
 {

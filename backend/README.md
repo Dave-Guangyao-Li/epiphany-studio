@@ -64,7 +64,7 @@ Run tests:
 pytest
 ```
 
-The current full suite passes with 113 tests.
+The current full suite passes with 120 tests.
 
 The default SQLite database is written to `./data/epiphany.db`, which is ignored
 by Git.
@@ -475,7 +475,35 @@ catch-and-reread conflict handling before a multi-worker deployment.
 
 No migration was added. `alembic current` remains
 `0003_model_call_trace (head)` and `alembic check` reports no new operations.
-The complete backend suite currently contains 113 tests.
+The complete backend suite currently contains 120 tests.
+
+## M3.1 backend E2E
+
+The guarded E2E command drives the real FastAPI lifespan, Worker,
+Orchestrator, SQLite stores, HTTP routes, checkpoint, Resume replay, logs, and
+Markdown export with a committed synthetic fixture. It does not require a
+separately running Uvicorn process.
+
+```bash
+# preflight only: no database, network request, or paid call
+python -m epiphany.checkpoint_e2e --provider deepseek
+
+# complete zero-cost journey
+python -m epiphany.checkpoint_e2e --provider fake --execute
+
+# explicit, bounded live journey; may incur DeepSeek API charges
+python -m epiphany.checkpoint_e2e --provider deepseek --execute
+```
+
+The default ignored evidence is written to
+`data/checkpoint-e2e.db` and `artifacts/checkpoint-e2e/`. The machine-readable
+report summarizes Run/Task/Artifact/ModelCall state, events, tokens, estimated
+cost, redaction checks, and failures. The exported file is still an Interview
+Scaffold; M3.2 will extend this path to a podcast draft and Show Notes.
+
+See
+[`docs/learning/m3-1-backend-e2e.zh-CN.md`](../docs/learning/m3-1-backend-e2e.zh-CN.md)
+for the fixture, exact assertions, evidence files, and live DeepSeek results.
 
 ## Debugging and logs
 

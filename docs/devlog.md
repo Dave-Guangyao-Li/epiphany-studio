@@ -2,6 +2,34 @@
 
 ## 2026-07-28
 
+### M3.1 guarded backend/API E2E harness
+
+- Added a committed, privacy-safe Chinese fixture with three initial Sources
+  and one supplemental voice-note transcript.
+- Added a CLI that drives the real FastAPI lifespan, Worker, HTTP API,
+  Orchestrator, SQLite stores, Markdown export, Resume, and idempotent replay.
+  Dry-run never creates runtime files; Fake execution is deterministic and
+  free; live DeepSeek execution requires an explicit flag and is limited to
+  three calls, one attempt, and one concurrent request.
+- Wrote ignored evidence to a dedicated database plus structured JSONL,
+  machine-readable report, and Interview Scaffold Markdown.
+- Refused databases containing queued/running work before starting the Worker,
+  preventing a reused live database from causing undeclared extra model calls.
+- Added safe Task error codes, log error-code aggregation, request-ID and
+  Markdown-header assertions, provider/model/currency checks, stronger
+  redaction checks, and forced INFO acceptance evidence.
+- The Fake journey passed at 4 Tasks / 4 Artifacts / 3 ModelCalls while waiting
+  and 4 / 5 / 3 after Resume; replay was idempotent and cost stayed zero.
+- Three isolated DeepSeek attempts were bounded and stopped safely: two
+  reached a truncated Interviewer response and one hit a provider network
+  error. Their combined local CNY price-table estimate is `¥0.035096`; a
+  complete live E2E has not yet passed.
+- Tightened the live Interviewer prompt to request a concise three-section
+  scaffold within the output budget.
+- All 120 tests, Ruff lint/format, Alembic current/check, and `git diff --check`
+  pass. M3.1 still exports a Scaffold; M3.2 will add the Editor, podcast draft,
+  and Show Notes.
+
 ### M3.1 durable human checkpoint and idempotent Resume
 
 - Versioned new `episode-research` Runs as v3 while preserving in-flight v1

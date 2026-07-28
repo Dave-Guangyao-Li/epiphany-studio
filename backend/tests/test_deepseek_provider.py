@@ -419,6 +419,8 @@ async def test_interview_scaffold_uses_the_interview_prompt() -> None:
 
     assert "半开放采访脚手架" in captured_prompt
     assert "allowed_source_refs" in captured_prompt
+    assert "恰好 3 个" in captured_prompt
+    assert "能在 3000 tokens 内完整返回" in captured_prompt
     assert "五年后，我重新打开了这个播客" in captured_prompt
     assert result.content == _interview_content()
 

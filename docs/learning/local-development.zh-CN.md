@@ -242,7 +242,7 @@ pytest
 当前全量基线：
 
 ```text
-113 passed
+120 passed
 ```
 
 定向测试研究、采访脚手架、人工检查点和导出：
@@ -275,7 +275,7 @@ pytest tests/test_research_schemas.py \
 - 一个 Child 失败后的父子失败传播；
 - 完整 HTTP API 集成测试。
 
-这里的 113 是当前基线；M2.2 的 28 项、M2.3a 的 32 项、M2.3b 的 83 项和
+这里的 120 是当前基线；M2.2 的 28 项、M2.3a 的 32 项、M2.3b 的 83 项和
 M2.4 的 99 项仍是各阶段当时的历史结果，不应回写修改。
 
 检查代码质量：
@@ -301,6 +301,28 @@ No new upgrade operations detected.
 M2.4 和 M3.1 都复用已有 Run、Task、Artifact、Event、ModelCall、Source 与
 SourceSegment 表，没有新增数据库字段，因此 Alembic 仍为
 `0003_model_call_trace (head)`，没有新的 migration。
+
+### 5.1 一条命令跑完整 M3.1 API 链路
+
+日常回归优先用不联网、不收费的 Fake Provider：
+
+```bash
+python -m epiphany.checkpoint_e2e --provider fake --execute
+```
+
+它会自动导入合成 Source、创建 Run、等待采访检查点、导出 Markdown、导入
+补充口述转写、Resume，并原样重放一次 Resume 验证幂等。证据默认写入：
+
+```text
+data/checkpoint-e2e.db
+artifacts/checkpoint-e2e/runtime.jsonl
+artifacts/checkpoint-e2e/report.json
+artifacts/checkpoint-e2e/interview-scaffold.md
+```
+
+真实 DeepSeek 只能通过额外写明 `--provider deepseek --execute` 显式触发。
+完整说明见
+[M3.1 后端 / API 全流程 E2E](m3-1-backend-e2e.zh-CN.md)。
 
 ## 6. 日志怎么看
 

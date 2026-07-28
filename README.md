@@ -217,9 +217,22 @@ M3.1 does not request microphone permission and does not implement recording,
 speech-to-text, TTS, voice cloning, a final podcast draft, Show Notes, or a Web
 UI. The supported runtime remains local and single-process; database-level
 multi-process Resume coordination is deferred to deployment hardening. The
-current full suite passes with 113 tests, Ruff lint/format and Alembic
-current/check pass, and the guarded DeepSeek validation remained a zero-network
-dry run.
+current full suite passes with 120 tests, Ruff lint/format and Alembic
+current/check pass.
+
+A committed synthetic fixture and guarded command now exercise the complete
+M3.1 backend/API journey without waiting for the Web UI:
+
+```bash
+cd backend
+python -m epiphany.checkpoint_e2e --provider fake --execute
+```
+
+It writes an ignored SQLite database, structured JSONL log, machine-readable
+report, and Interview Scaffold Markdown. A separate explicit DeepSeek mode is
+bounded to three calls; current live attempts proved accounting and failure
+diagnostics but have not yet completed the entire live journey. See the
+[backend E2E learning chapter](docs/learning/m3-1-backend-e2e.zh-CN.md).
 
 ## License
 

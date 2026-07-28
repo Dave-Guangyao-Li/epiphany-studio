@@ -34,6 +34,8 @@ Python 进程中的变量在服务停止后会消失，但一次 Workflow 的状
 | --- | --- | --- |
 | `data/epiphany.db` | Uvicorn、Swagger 和普通本地开发默认使用的数据库 | 否 |
 | `data/deepseek-live-smoke.db` | 受限真实 DeepSeek smoke 独立 Trace | 否 |
+| `data/checkpoint-e2e.db` | M3.1 Fake 全流程 E2E 的专用数据库 | 否 |
+| `data/checkpoint-e2e-deepseek*.db` | 每次受限真实 DeepSeek E2E 的独立失败/成功证据 | 否 |
 | `*.db-wal` | SQLite Write-Ahead Log 写前日志 | 否 |
 | `*.db-shm` | WAL 模式下的共享协调索引 | 否 |
 
@@ -45,6 +47,11 @@ Python 进程中的变量在服务停止后会消失，但一次 Workflow 的状
 
 pytest 通常使用临时目录里的独立数据库。测试结束后可以丢弃，它们不是产品
 数据。
+
+M3.1 E2E 的配套报告、日志和 Markdown 位于
+`backend/artifacts/checkpoint-e2e*/`。这些目录与数据库都被 Git 忽略；合成
+fixture 才会提交到仓库。查看顺序和字段说明见
+[M3.1 后端 / API 全流程 E2E](m3-1-backend-e2e.zh-CN.md)。
 
 ### 2.1 `.db`、`-wal` 和 `-shm` 的关系
 

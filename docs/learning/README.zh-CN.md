@@ -45,7 +45,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 9. [M2.3b：DeepSeek Provider](m2-3b-deepseek-provider.zh-CN.md)
 10. [M2.4：从研究结果生成采访脚手架](m2-4-interview-scaffold.zh-CN.md)
 11. [M3.1：可持久化的人工暂停与恢复](m3-1-human-checkpoint.zh-CN.md)
-12. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+12. [M3.1：后端 / API 全流程 E2E 验证](m3-1-backend-e2e.zh-CN.md)
+13. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -64,6 +65,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M2.3b-3 | DeepSeek 费用可显式按 USD/CNY 估算与分组 | 完成 | 本次 focused commit |
 | M2.4 | fan-in 后串行生成并安全导出采访脚手架 | 完成 | `81b150d`、`d30f68f` |
 | M3.1 | 生成脚手架后持久化等待用户，并用补充 Source 幂等恢复 | 完成 | 本次 focused commit |
+| M3.1 E2E | 用合成素材自动跑通 Source、Checkpoint、Resume、日志、数据库与 Markdown | Fake 全流程通过 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -108,6 +110,11 @@ Source / SourceSegment 引用的 `user_material_submission` Artifact，随后
 
 这里的 `voice_note_transcript` 是“已经转成文字的口述”这一 Source 分类，
 不是麦克风或语音识别功能。当前可以在 Swagger 中直接输入或粘贴文字。
+
+不打开 Swagger 也可以通过
+[M3.1 后端 / API 全流程 E2E](m3-1-backend-e2e.zh-CN.md) 一条命令复现整条
+链路。当前 Fake E2E 与完整 120 项测试通过；真实 DeepSeek 已进入有调用上限的
+E2E，但尚未完整走到 Resume 成功，文档保留了三次尝试的失败类型与费用估算。
 
 ## 当前还不能做什么
 
