@@ -2,6 +2,23 @@
 
 ## 2026-07-28
 
+### M2.3b-2b first bounded live DeepSeek verification
+
+- Executed the guarded smoke command with its built-in synthetic source and
+  dedicated ignored SQLite trace database.
+- Completed Timeline and Theme calls with `deepseek-v4-flash`; both succeeded
+  on attempt 1 without retry, timeout, or an error code.
+- Passed strict response schema, source-reference, verbatim-quote, and
+  deterministic fan-in validation, producing the three expected Artifacts.
+- Persisted two ModelCalls and the full Run/Task/Event trace under
+  `run_e8ad6452087c479cb84293ae3919201d`.
+- Recorded 1,092 input tokens, 1,209 output tokens, 15,435 ms combined Provider
+  latency, and USD 0.000491 estimated cost.
+- Independently queried the SQLite trace and confirmed Run success, three
+  successful Tasks, two completed ModelCalls, and one completed fan-in.
+- The captured output contained only key presence and sanitized metadata; it
+  did not expose the API key, source text, Prompt, or generated content.
+
 ### M2.3b-2a bounded live-smoke harness
 
 - Added an explicit DeepSeek live-smoke module whose default behavior is a

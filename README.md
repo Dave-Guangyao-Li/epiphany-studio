@@ -98,8 +98,9 @@ zero-network preflight; `--execute` is required before it can send two requests
 using short synthetic material. It fixes the model to `deepseek-v4-flash`,
 allows one attempt per child Task, applies Alembic to a dedicated ignored
 SQLite trace database, and prints only IDs, status, tokens, latency, cost, and
-error codes. The command is ready, but the first live call remains pending
-until a local API key is present.
+error codes. M2.3b-2b used this boundary to complete the first two-call live
+smoke successfully: both Research Tasks passed strict validation and fan-in,
+with an estimated total cost of USD 0.000491.
 
 No key or personal source material belongs in Git.
 
@@ -159,8 +160,11 @@ fan-in. A paid-but-truncated response still records non-zero usage.
 
 M2.3b-2a adds the explicit two-call smoke harness and verifies its dry-run,
 call/attempt bounds, isolated trace database, and redacted summary without
-network access. The actual paid smoke remains one explicit `--execute` command
-after `EPIPHANY_DEEPSEEK_API_KEY` is stored only in `backend/.env`.
+network access. M2.3b-2b then completes one explicit live run with synthetic
+material: two `deepseek-v4-flash` calls succeed without retry, strict source
+validation accepts both results, and deterministic fan-in produces the final
+research bundle. The persistent trace records 1,092 input tokens, 1,209 output
+tokens, 15,435 ms of combined Provider latency, and USD 0.000491 estimated cost.
 
 ## License
 

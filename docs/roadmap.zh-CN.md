@@ -92,15 +92,19 @@ Provider 以前失败。
 - [x] Theme Researcher prompt
 - [x] HTTP/auth/rate-limit/overload 错误映射
 - [x] 受限 live smoke 命令与零联网安全测试
-- [ ] 使用合成素材完成小额 live smoke test
+- [x] 使用合成素材完成小额 live smoke test
 - [x] 对 OpenAI-compatible Mock 返回继续执行结构化输出与引用校验
 
 离线验收：默认仍为 Fake；DeepSeek Provider 通过 MockTransport 验证请求、
 JSON、usage、费用、错误分类和日志脱敏。完整双 Researcher Run 能成功
 fan-in；429 只由 Worker 重试，401 不重试，timeout 记为 `timed_out`；
 付费但截断的响应仍保存 Token 和费用。独立 smoke 命令默认 dry-run，只有
-显式 `--execute` 才允许两次短合成素材请求；命令、上限和脱敏输出已验证，
-真实联网验收尚未完成。
+显式 `--execute` 才允许两次短合成素材请求。
+
+真实联网验收：`deepseek-v4-flash` 的 Timeline 与 Theme 调用均在 attempt 1
+成功，严格 Schema、来源引用、逐字 quote 与 fan-in 全部通过。合计 1,092
+input tokens、1,209 output tokens、15,435 ms Provider 耗时，预估费用
+0.000491 USD；无 retry、timeout 或错误码。
 
 演示：使用短合成素材完成两个 Researcher，Trace 中可见调用与成本数据。
 

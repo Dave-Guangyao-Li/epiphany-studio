@@ -275,6 +275,21 @@ ModelCall status, and the structured logs. A 401 usually means an invalid key,
 402 means insufficient API balance, and network/timeout failures leave a
 durable trace in the dedicated database.
 
+The first live verification completed on 2026-07-28 with Run
+`run_e8ad6452087c479cb84293ae3919201d`:
+
+- both `timeline_research` and `theme_research` succeeded on attempt 1;
+- two `deepseek-v4-flash` ModelCalls succeeded;
+- strict schema, source-reference, and quote validation passed;
+- deterministic fan-in produced all three expected Artifacts;
+- usage was 1,092 input and 1,209 output tokens;
+- combined Provider latency was 15,435 ms;
+- estimated total cost was USD 0.000491.
+
+These values are a historical smoke result, not a future latency or billing
+guarantee. The ignored SQLite trace retains the corresponding Tasks, Events,
+ModelCalls, and Artifact metadata.
+
 ## Debugging and logs
 
 The backend writes one-line JSON logs to stdout. HTTP responses include

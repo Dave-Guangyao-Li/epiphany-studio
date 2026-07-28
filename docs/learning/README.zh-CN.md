@@ -56,8 +56,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M2.2 | Manager 可以并行调度两个研究 Child Task | 完成 | `8e4306a` |
 | M2.3a | 在真实调用前记录预算、尝试、耗时与费用 | 完成 | `4d48c90` |
 | M2.3b-1 | DeepSeek 接口、Prompt、错误和费用可离线验证 | Mock 已验证 | `046358c` |
-| M2.3b-2a | 受限真实调用命令、dry-run 与脱敏输出 | 离线已验证 | 本次 focused commit |
-| M2.3b-2b | 使用短合成素材执行两次真实调用 | 待执行 | — |
+| M2.3b-2a | 受限真实调用命令、dry-run 与脱敏输出 | 离线已验证 | `fd232e0` |
+| M2.3b-2b | 使用短合成素材执行两次真实调用 | 完成 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -77,12 +77,12 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 M2.3a 让每次 Provider attempt 产生持久化调用记录，并在调用前执行单 Run
 预算。M2.3b-1 又把 DeepSeek 的 HTTP、Prompt、JSON、错误和费用接到这条链路，
 M2.3b-2a 提供默认不联网、必须显式 `--execute` 的两次调用命令。默认仍是
-Fake，尚未执行小额 live smoke。
+Fake；M2.3b-2b 已用短合成素材完成两次真实调用，并通过严格引用校验与
+fan-in。
 
 ## 当前还不能做什么
 
-- DeepSeek 适配器和受限 smoke 命令已完成，但尚未执行真实 API smoke；
-- 尚未生成真正有质量的时间线或主题分析；
+- DeepSeek 真实 API 已通过合成素材 smoke，但尚未用个人素材评价内容质量；
 - 尚未生成采访脚手架和播客稿；
 - 尚未进入 `waiting_for_user`；
 - 尚未提供普通用户使用的 Web UI；

@@ -1,11 +1,11 @@
-# M2.3b：让真实模型接入，并安全准备第一次调用
+# M2.3b：让真实模型接入，并完成第一次受限调用
 
 ## 基本信息
 
-- 阶段：M2.3b-1 Provider 离线适配 + M2.3b-2a 受限 smoke 工具
+- 阶段：M2.3b-1 Provider 离线适配 + M2.3b-2a/2b 受限 live smoke
 - 日期：2026-07-28
 - Commit：本章节与实现处于同一个 focused commit
-- 状态：Mock、dry-run 和 smoke 安全边界已验证，live smoke 待执行
+- 状态：Mock、dry-run、安全边界与真实 live smoke 均已验证
 
 ## 1. 为什么做这一步
 
@@ -286,6 +286,8 @@ pytest tests/test_deepseek_provider.py \
 - Provider HTTP 测试使用 MockTransport，smoke 安全测试使用 Fake Provider；
 - 没有读取本地 API Key，没有访问互联网，没有费用。
 
+以上是自动化测试结果。真实 smoke 是单独的显式命令，不属于默认 pytest。
+
 ## 7. 本地手动验证
 
 先验证离线 Provider 行为：
@@ -358,6 +360,55 @@ EPIPHANY_MODEL_PROVIDER=fake
 所以运行 `uvicorn`、打开 Swagger 或执行普通 pytest 都不会因为本章节而
 产生真实调用。
 
+### 7.1 本次真实结果
+
+2026-07-28 执行：
+
+```bash
+python -m epiphany.live_deepseek_smoke --execute
+```
+
+得到的脱敏结果：
+
+| 项目 | 结果 |
+| --- | --- |
+| Run | `run_e8ad6452087c479cb84293ae3919201d` |
+| 最终状态 | `succeeded / complete` |
+| Provider / Model | `deepseek / deepseek-v4-flash` |
+| Timeline | attempt 1，525 input，502 output，8,756 ms，214 micros |
+| Theme | attempt 1，567 input，707 output，6,679 ms，277 micros |
+| 总计 | 1,092 input，1,209 output，15,435 ms，491 micros |
+| 预估费用 | 0.000491 USD |
+| Artifact | Timeline、Theme、Bundle 共 3 个 |
+| retry / timeout / error | 均无 |
+
+脚本退出码为 0，`passed=true`。SQLite 独立查询再次确认：
+
+```text
+Run succeeded
+3 Tasks succeeded
+2 model.call.started
+2 model.call.completed
+1 workflow.fan_out.started
+1 workflow.fan_in.completed
+1 run.succeeded
+```
+
+这证明的不只是“API 能返回 200”，而是完整链路已经跑通：
+
+```text
+合成 Source
+  -> 两个真实 DeepSeek 请求
+  -> usage / cost 持久化
+  -> Pydantic Schema 校验
+  -> Source Reference / Quote 校验
+  -> deterministic fan-in
+  -> Run succeeded
+```
+
+这里记录的是一次历史 smoke 结果，不代表以后的固定延迟或账单价格。正文没有
+写进日志或文档，Key 也只以 `api_key_status=present` 出现。
+
 ## 8. 日志与排错
 
 新增稳定日志事件：
@@ -408,8 +459,6 @@ model.call.failed
 
 当前仍然没有：
 
-- 执行真实 DeepSeek 请求；
-- 验证账户余额、网络连通性和真实响应兼容性；
 - 评价 Timeline/Theme 内容质量；
 - retry backoff 或 `Retry-After` 调度；
 - 精确的输入 Token 预估和美元总预算；
@@ -428,8 +477,8 @@ model.call.failed
 - 执行前显示配置，执行后只输出 ID、tokens、耗时和预估费用；
 - 不打印 Prompt、响应正文或 Key。
 
-下一小步只剩在本地 Key 可用时运行一次 `--execute`，记录脱敏的 Run 状态、
-Token、耗时与费用，然后再进入 M2.4 Interview Scaffold。
+M2.3b 已完成。下一小步进入 M2.4 Interview Scaffold：把 Timeline 与 Theme
+Bundle 转换成带来源引用、可供本人继续口述补充的半开放采访脚手架。
 
 官方参考：
 
@@ -446,7 +495,7 @@ Token、耗时与费用，然后再进入 M2.4 Interview Scaffold。
 - [x] 本地离线手动验证通过
 - [x] 日志中无隐私内容
 - [x] smoke harness / dry-run 安全验证通过
-- [ ] 小额 live smoke 通过
+- [x] 小额 live smoke 通过
 - [x] README / Roadmap / Devlog 已同步
 - [x] 学习手册已同步
 - [x] 已创建 focused commit
