@@ -9,6 +9,7 @@ from epiphany.schemas import CreateRunRequest, EventView, ResumeRunResponse, Run
 from epiphany.services import (
     InterviewScaffoldExportNotReady,
     InvalidRunPayload,
+    PodcastDraftExportNotReady,
     RunAlreadyTerminal,
     RunNotFound,
     RunResumeConflict,
@@ -79,6 +80,50 @@ async def export_interview_scaffold_markdown(
         content=markdown,
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": (f'attachment; filename="interview-scaffold-{run_id}.md"')},
+    )
+
+
+@router.get(
+    "/runs/{run_id}/exports/podcast-draft.md",
+    response_class=Response,
+)
+async def export_podcast_draft_markdown(
+    run_id: str,
+    service: RunServiceDependency,
+) -> Response:
+    try:
+        markdown = await service.export_podcast_draft_markdown(run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except PodcastDraftExportNotReady as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": (f'attachment; filename="podcast-draft-{run_id}.md"')},
+    )
+
+
+@router.get(
+    "/runs/{run_id}/exports/show-notes.md",
+    response_class=Response,
+)
+async def export_show_notes_markdown(
+    run_id: str,
+    service: RunServiceDependency,
+) -> Response:
+    try:
+        markdown = await service.export_show_notes_markdown(run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except PodcastDraftExportNotReady as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": (f'attachment; filename="show-notes-{run_id}.md"')},
     )
 
 

@@ -2,7 +2,7 @@
 
 状态：Draft
 
-日期：2026-07-28
+日期：2026-07-29
 
 ## 1. 目标
 
@@ -68,15 +68,17 @@ create_run
   -> fan_in (deterministic)
   -> build_interview_scaffold (serial root Interviewer)
   -> wait_for_user
-  -> incorporate_user_material
-  -> draft_episode
-  -> validate_sources
+  -> import supplemental Source + idempotent Resume
+  -> build_podcast_draft (serial root Editor)
+  -> validate strict structure and source scope
+  -> render Podcast Draft / Show Notes
+  -> human final review
   -> complete
 ```
 
 其中 `prepare_sources`、`fan_in` 和状态更新是普通代码；
 `timeline_research`、`theme_research`、`build_interview_scaffold` 和
-`draft_episode` 才调用模型。
+`build_podcast_draft` 才调用模型。
 
 M2.4 将可执行边界推进到 `build_interview_scaffold`：两个 Researcher
 仍以同级 Child Task 并行调用模型，确定性 fan-in 持久化研究 Bundle 后，才
@@ -93,10 +95,20 @@ Resume 保存一份只含引用的 `user_material_submission` Artifact，并在�
 事务中完成 `waiting -> running -> succeeded`。此步没有新增 Task 或
 ModelCall，最终 output 暂时仍是采访脚手架。
 
+M3.2 将新建 Run 升级为 workflow v4。人工检查点以前的执行形状不变；
+第一次合法 Resume 保存 submission 后，将 Run 保持为 `running`，并排队
+一个 `parent_task_id=None` 的串行根 `build_podcast_draft` Editor Task。
+Editor 输入由已验证 Scaffold、Scaffold 实际引用的初始 SourceSegment 和本轮
+补充 SourceSegment 组成。Worker 对结构、topic、引用范围及补充材料使用情况
+做严格校验，成功后持久化 `build_podcast_draft_result` 并将其设为 Run 的
+最终 output。一条完整 v4 Run 因而有五个 Task、六个 Artifact 和四次
+ModelCall。
+
 为使升级时已经在途的 Run 仍可恢复，v1 保留原有语义：fan-in 后以
 `episode_research_bundle` 成功结束，不要求新增 `topic`，也不排队
-Interviewer；v2 仍在采访脚手架完成后成功。三个版本分支都复用现有表和
-字段，M3.1 不需要数据库 migration。
+Interviewer；v2 仍在采访脚手架完成后成功；v3 Resume 后仍按 M3.1 语义
+确定性结束，不产生 Editor 调用。四个版本分支都复用现有表和字段，M3.2
+不需要数据库 migration。
 
 ## 5. Subagent 定义
 
@@ -121,6 +133,10 @@ Subagent 是一个受约束的 Child Task，而不是独立微服务：
 
 M2.4 的 Interviewer 同样受 Task/Provider/ModelCall 契约约束，但它是 fan-in
 之后的根 Task，只读取已经校验并合并的研究结果，不扩大一层父子拓扑。
+
+M3.2 的 Editor 也是串行根 Task。它不是动态派生的新 Child 层级，也不会与
+人工输入并发；只有持久化 Resume 成功后才能排队。模型提交候选 Podcast
+Script 和 Show Notes，最终状态、导出和发布权限仍由代码与用户控制。
 
 ## 6. 持久化模型
 
@@ -243,7 +259,7 @@ Worker 循环：
 兄弟状态；耗时的 Provider 调用仍然真实并发。未来多 Worker 需要借助
 PostgreSQL 行锁或等价的数据库协调后再解除这个单进程约束。
 
-M3.1 的 `RunService` 也在单进程内用同一个 mutation lock 串行 Resume 与
+M3 的 `RunService` 在单进程内用同一个 mutation lock 串行 Resume 与
 Cancel，防止两个请求同时从 `waiting_for_user` 穿过状态边界。相同 Resume
 由 Artifact idempotency key 防止重复落库。这个边界不等于多进程
 exactly-once：两个独立 `RunService` 同时写入时，SQLite 唯一约束能阻止
@@ -335,6 +351,24 @@ Researcher 可以完成，第三个 Interviewer 调用会以
 上限。即使 HTTP 200 的内容被截断或 JSON 不可用，只要响应带有可信 usage，
 失败的 `ModelCall` 也必须保存 Token 和预估费用。
 
+M3.2 为 Editor 增加第三种独立输入边界和单独输出上限。默认：
+
+```text
+EPIPHANY_DEEPSEEK_MAX_EDITOR_BUNDLE_CHARS=48000
+EPIPHANY_DEEPSEEK_EDITOR_MAX_TOKENS=6000
+```
+
+Editor 把 Scaffold、topic、初始片段与补充片段都视为不可信数据，并只允许
+原样复制输入白名单中的 SourceReference。Strict validator 要求 title 等于
+topic，Podcast Script 同时使用初始与补充引用，Show Notes 也至少使用一条
+补充引用。未知或越权引用、缺失补充证据和结构漂移都会在 Artifact 提交前
+失败。合法引用仍不是语义蕴含证明，候选稿必须由用户最终审核。
+
+正常 v4 需要四次 Provider 调用。将单 Run 预算设为三时，Editor 调用会在
+进入 Provider 以前以 `model_call_limit_exceeded` 被拒绝。Editor retry、
+timeout、lease、fencing、startup recovery 和 cancel 复用同一 Worker 机制；
+每个重试 attempt 单独记账，但 Artifact 通过稳定 idempotency key 只提交一次。
+
 ## 11. API 和事件
 
 最小 API：
@@ -345,6 +379,8 @@ POST /projects/{id}/sources
 POST /projects/{id}/episode-runs
 GET  /runs/{id}
 GET  /runs/{id}/exports/interview-scaffold.md
+GET  /runs/{id}/exports/podcast-draft.md
+GET  /runs/{id}/exports/show-notes.md
 POST /runs/{id}/resume
 POST /runs/{id}/cancel
 GET  /runs/{id}/events
@@ -354,9 +390,13 @@ GET  /runs/{id}/events/stream
 SSE 用于低成本实时显示。客户端断线后先从数据库按 `sequence` 补事件，
 再连接实时流。SSE 不是状态真相。
 
-导出 endpoint 接受 `waiting_for_user` 或 `succeeded`，但
-`output_artifact_id` 必须指向 `build_interview_scaffold_result`；未就绪、
-类型不符或内容无效时返回冲突错误。这样用户能先读脚手架再补充口述。
+Scaffold 导出接受 `waiting_for_user` 或 `succeeded`，并从该 Run 已完成的
+`build_interview_scaffold_result` Artifact 读取内容；它不依赖最终
+`output_artifact_id`，因此 v4 Editor 成功后仍能导出同一份 Scaffold。
+Podcast Draft 与 Show Notes 只接受最终成功且 `output_artifact_id` 指向合法
+`build_podcast_draft_result` 的 Run。未就绪、类型不符或内容无效时返回
+409。
+
 Markdown 由已验证 JSON 确定性渲染。正文把原始 Source/Segment ID 显示为
 短标签 `[S1]`，文末通过数据库中的 Source 标题与 Segment 位置生成来源索引；
 结构化 Artifact 与数据库仍保留原始 ID，因此追踪能力没有丢失。任何引用
@@ -364,7 +404,7 @@ Markdown 由已验证 JSON 确定性渲染。正文把原始 Source/Segment ID �
 模型文本会转义 Markdown 控制字符和原始 HTML，避免改变文档结构或注入链接、
 标签。运行追踪用的 `_execution` metadata 不会进入导出。
 
-M3.1 的实际 Resume 契约是：
+M3 的 Resume 契约是：
 
 ```text
 POST /sources
@@ -380,7 +420,8 @@ POST /runs/{id}/resume
 Resume 不接受原始正文。正文只存于 `sources` / `source_segments`；
 `user_material_submission` Artifact 和 Events 只保存检查点、Artifact ID、
 Source ID、Segment ID 与计数。相同 submission 和相同 Source 列表重放返回
-已有结果；同一 submission 对应不同 Source 返回 409。
+已有结果；同一 submission 对应不同 Source 返回 409。v4 第一次提交还会
+确定性创建一个 Editor Task；相同请求重放不会再次排队或再次调用模型。
 
 ## 12. 可观测性与调试
 
@@ -426,6 +467,14 @@ M3.1 新增持久事件
 `run.resume.rejected`。它们只记录关联 ID、checkpoint、Source/Segment
 数量、状态和错误码；不记录 submission label、补充口述正文或 SourceSegment
 文本。
+
+M3.2 新增持久事件 `workflow.editor.queued` 和
+`workflow.editor.completed`。最终两个导出产生操作日志
+`run.podcast_draft_markdown.exported` 与
+`run.show_notes_markdown.exported`。字段只包含 Run、Task、Artifact ID、
+引用数量和 Markdown 字符数；不记录节目正文。等待点后的正常 v4 事件顺序
+是 Resume 接收、Editor 排队、Task/ModelCall 执行、Editor 完成和
+`run.succeeded`。
 
 ## 13. 升级触发条件
 

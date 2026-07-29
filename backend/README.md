@@ -1,10 +1,11 @@
 # Epiphany Studio Backend
 
 The backend currently implements a single-user, single-process durable task
-runner through the M3.1 human checkpoint, including parallel research,
-model-call traces, a serial Interviewer, durable `waiting_for_user`, source-ID
-based Resume, and deterministic Markdown export. M2.3b-1 also includes an
-opt-in DeepSeek V4 adapter. The default remains the deterministic
+runner through the M3.2 Editor, including parallel research, model-call traces,
+a serial Interviewer, durable `waiting_for_user`, source-ID based Resume, a
+serial Editor, and deterministic Scaffold / Podcast Draft / Show Notes
+Markdown export. It also includes an opt-in DeepSeek V4 adapter. The default
+remains the deterministic
 `FakeProvider`, which reports zero tokens and zero cost, so setup, Swagger, and
 the default test suite need no API key, network request, or paid model call.
 
@@ -30,7 +31,11 @@ research_manager
   -> waiting_for_user
   -> import already-transcribed user material as a Source
   -> idempotent Resume
-  -> complete the M3.1 checkpoint (no new model call)
+  -> serial build_podcast_draft Editor
+  -> validate strict structure plus initial/supplemental citations
+  -> build_podcast_draft_result
+  -> export Podcast Draft and Show Notes
+  -> human final review
 ```
 
 Each agent-executed step is a persisted Task. The worker claims it with a lease,
@@ -64,7 +69,7 @@ Run tests:
 pytest
 ```
 
-The current full suite passes with 130 tests.
+The current full suite passes with 151 tests.
 
 The default SQLite database is written to `./data/epiphany.db`, which is ignored
 by Git.
@@ -125,7 +130,7 @@ and the existing stable IDs. A new Source returns HTTP 201. The whole normalized
 text stays in local SQLite and is not returned by the API; callers receive the
 ordered segments needed for future citations.
 
-## Current episode-research API (workflow v3)
+## Current episode-research API (workflow v4)
 
 Import a Source as shown above, copy its `source.id`, and start a Run:
 
@@ -144,7 +149,7 @@ curl -i -X POST http://127.0.0.1:8000/runs \
 
 New `episode-research` requests require both a non-blank `topic` and at least
 one `source_id`; missing or blank topics return HTTP 422. New Runs are stamped
-with `workflow_version: "v3"`. The response initially contains a running
+with `workflow_version: "v4"`. The response initially contains a running
 `research_manager` and two queued children with the Manager's ID in
 `parent_task_id`. With the default Worker enabled, poll the returned Run ID:
 
@@ -175,7 +180,7 @@ curl -OJ \
   http://127.0.0.1:8000/runs/run_REPLACE_ME/exports/interview-scaffold.md
 ```
 
-To simulate a spoken follow-up in M3.1, type or paste the **already-transcribed
+To simulate a spoken follow-up, type or paste the **already-transcribed
 text** into a new Source. This does not request microphone permission and does
 not upload or transcribe audio:
 
@@ -204,12 +209,25 @@ curl -i -X POST \
   }'
 ```
 
-The first valid call returns `resumed: true`, finishes the M3.1 checkpoint, and
-adds one `user_material_submission` Artifact containing Source/Segment
-references rather than transcript text. It keeps `model_call_count: 3`, so
-Resume adds no Token or API cost. Repeating the exact request returns
-`idempotent_replay: true` without another Artifact or Event. Reusing the same
-submission ID with different Sources returns HTTP 409.
+The first valid call returns `resumed: true`, adds one
+`user_material_submission` Artifact containing Source/Segment references
+rather than transcript text, and queues one `build_podcast_draft` Editor Task.
+The response may still show the Editor as `queued` or `running`; poll the Run
+until it reaches `succeeded / complete`. The final v4 Run has 5 Tasks,
+6 Artifacts, and 4 ModelCalls. Repeating the exact Resume returns
+`idempotent_replay: true` without another Artifact, Event, Task, or paid call.
+Reusing the same submission ID with different Sources returns HTTP 409.
+
+Export all three documents:
+
+```bash
+curl -OJ \
+  http://127.0.0.1:8000/runs/run_REPLACE_ME/exports/interview-scaffold.md
+curl -OJ \
+  http://127.0.0.1:8000/runs/run_REPLACE_ME/exports/podcast-draft.md
+curl -OJ \
+  http://127.0.0.1:8000/runs/run_REPLACE_ME/exports/show-notes.md
+```
 
 The Fake Provider creates deterministic, source-grounded regression output
 without a paid call. It extracts topic-relevant sentences, dates, themes, and
@@ -217,8 +235,8 @@ quotes from the SourceSegments assigned to each Task; the guarded E2E supplies
 the committed synthetic fixture. The exported Scaffold is therefore readable
 during manual testing. It is still not a model-quality benchmark: its main job is to
 validate bounded parallel research, the sequential Interviewer, strict output,
-citation scope, failure propagation, idempotent transitions, and late-result
-fencing.
+citation scope, supplemental-evidence use, failure propagation, idempotent
+transitions, and late-result fencing.
 
 Focused verification:
 
@@ -226,7 +244,10 @@ Focused verification:
 pytest tests/test_research_schemas.py \
        tests/test_research_workflow.py \
        tests/test_interview_scaffold.py \
-       tests/test_interview_export_api.py -q
+       tests/test_interview_export_api.py \
+       tests/test_editor_core.py \
+       tests/test_editor_workflow.py \
+       tests/test_human_checkpoint_api.py -q
 ```
 
 The failure-injection test returns an out-of-scope Source reference from one
@@ -397,8 +418,8 @@ guarantee. The ignored SQLite trace retains the corresponding Tasks, Events,
 ModelCalls, and Artifact metadata. Enabling CNY for future calls does not alter
 these two USD rows.
 
-M2.4 changed the current harness ceiling from two calls to three; M3.1 keeps
-that ceiling and expects workflow v3 to stop at `waiting_for_user`. M2.4 itself
+M2.4 changed the then-current harness ceiling from two calls to three; M3.1 kept
+that ceiling and expected workflow v3 to stop at `waiting_for_user`. M2.4 itself
 used only the zero-network dry-run; the later M3.1 realistic E2E section records
 the newer paid validation. The two-call, 2,301-token, USD 0.000491 result above
 remains the historical M2.3b trace.
@@ -426,9 +447,10 @@ curl -OJ \
 segment-position appendix, and escapes raw HTML and Markdown control syntax
 from model-produced text. Structured Artifacts and SQLite retain the original
 Source/Segment IDs. It returns HTTP 404 for an unknown Run and HTTP 409 until
-a valid scaffold and all referenced source metadata are available. Current v3
+a valid scaffold and all referenced source metadata are available. v3 and v4
 Runs may export it while `waiting_for_user`; v2 Runs may export it after
-`succeeded`.
+`succeeded`. v4 can still export the Scaffold after the final output changes
+to the Editor Artifact.
 
 Existing in-flight `episode-research` Runs stamped `workflow_version: "v1"`
 retain their original completion semantics: they stop after fan-in with
@@ -487,9 +509,58 @@ catch-and-reread conflict handling before a multi-worker deployment.
 
 No migration was added. `alembic current` remains
 `0003_model_call_trace (head)` and `alembic check` reports no new operations.
-The complete backend suite currently contains 130 tests.
+The M3.1 historical backend suite contained 130 tests.
 
-## M3.1 backend E2E
+## M3.2 Editor and final Markdown
+
+Workflow v4 preserves the same durable waiting point, then continues after
+Resume:
+
+```text
+waiting_for_user / awaiting_interview_response
+  -> POST /sources with an already-transcribed follow-up
+  -> POST /runs/{run_id}/resume
+  -> running / accepting_user_material
+  -> build_podcast_draft queued -> running -> succeeded
+  -> succeeded / complete
+```
+
+The Editor is a serial root Task, not another Researcher child. Its bounded
+input contains the validated Scaffold, the initial SourceSegments actually
+referenced by that Scaffold, and the newly submitted SourceSegments. Topic,
+Scaffold, and Source text are all treated as untrusted data.
+
+The strict output contains a Podcast Script and Show Notes. Every narrative
+paragraph and Show Notes item must cite an allowed SourceSegment. The Podcast
+Script must use both initial and supplemental evidence; Show Notes must use
+supplemental evidence. Wrong topics, unknown references, missing supplemental
+grounding, extra fields, or malformed output fail before an Artifact is
+committed.
+
+Default Editor-specific DeepSeek limits:
+
+```text
+EPIPHANY_DEEPSEEK_MAX_EDITOR_BUNDLE_CHARS=48000
+EPIPHANY_DEEPSEEK_EDITOR_MAX_TOKENS=6000
+```
+
+The final `output_artifact_id` points to `build_podcast_draft_result`.
+`GET /runs/{run_id}/exports/podcast-draft.md` and
+`GET /runs/{run_id}/exports/show-notes.md` render that strict JSON
+deterministically. The Scaffold Artifact remains stored, and its original
+export endpoint continues to work after Editor completion.
+
+Resume replay cannot queue a duplicate Editor. Retry attempts receive separate
+ModelCall rows but commit one idempotent final Artifact. Startup recovery,
+cancel fencing, timeout, and the per-Run budget reuse the existing Worker.
+With a three-call budget, Editor is rejected before the fourth Provider
+request. Workflow v3 Runs keep their historical immediate-completion Resume
+semantics, so deployment does not add a paid call to persisted work.
+
+M3.2 reuses the existing schema; `alembic check` reports no new operations.
+The current full suite contains 151 passing tests.
+
+## M3.2 backend E2E
 
 The guarded E2E command drives the real FastAPI lifespan, Worker,
 Orchestrator, SQLite stores, HTTP routes, checkpoint, Resume replay, logs, and
@@ -508,19 +579,20 @@ python -m epiphany.checkpoint_e2e --provider deepseek --execute
 ```
 
 The default ignored evidence is written to
-`data/checkpoint-e2e.db` and `artifacts/checkpoint-e2e/`. The machine-readable
+`data/editor-e2e.db` and `artifacts/editor-e2e/`. The machine-readable
 report summarizes Run/Task/Artifact/ModelCall state, events, tokens, estimated
-cost, redaction checks, and failures. The exported file is still an Interview
-Scaffold; M3.2 will extend this path to a podcast draft and Show Notes.
+cost, redaction checks, and failures. It exports `interview-scaffold.md`,
+`podcast-draft.md`, and `show-notes.md`.
 
 The current realistic fixture contains three coherent initial Sources plus one
 complete supplemental transcript. Researcher source input is capped at 8,000
 characters; the validated merged research Bundle has a separate 24,000
-character ceiling before the Interviewer. This distinction was added after a
-real run completed both Researchers but rejected the larger Bundle before the
-third network request.
+character ceiling before the Interviewer; the combined Editor input has its
+own 32,000-character E2E ceiling and 6,000-token output limit. The first
+distinction was added after a real run completed both Researchers but rejected
+the larger Bundle before the third network request.
 
-The corrected bounded DeepSeek run
+The historical corrected bounded M3.1 DeepSeek run
 `run_44c9db75a74744ac940efd2d27172107` completed the full M3.1 journey:
 
 - 4 Sources and 21 SourceSegments;
@@ -538,12 +610,35 @@ Interviewer prompt now explicitly preserves plan/draft/wish status, but valid
 citation IDs still do not prove semantic entailment; human review remains part
 of the product boundary.
 
+The M3.2 Fake E2E verifies 4 Tasks / 4 Artifacts / 3 ModelCalls at the waiting
+checkpoint and 5 / 6 / 4 after Editor completion. It requires the Draft and
+Show Notes to use the supplemental Source, checks the exact ten-event delta
+after Resume, proves Resume replay is idempotent, verifies the Scaffold hash
+remains unchanged, and rejects source text or secrets in structured logs.
+
+The explicit 2026-07-29 live DeepSeek run
+`run_88d16bf3e03f45a98edfea2c164e383a` passed all guarded checks:
+
+- 5 succeeded Tasks, 6 Artifacts, and 4 succeeded ModelCalls;
+- 26 Events before Resume and 36 after Editor completion;
+- 16,667 input tokens and 9,468 output tokens;
+- 73,018 ms combined Provider duration;
+- estimated CNY 0.035603;
+- Scaffold, Podcast Draft, Show Notes, idempotency, grounding, and log
+  redaction checks all passed.
+
+The cost is a local configured-price estimate, not the provider invoice. The
+fixture is synthetic, and valid citations still do not replace final human
+content review.
+
 See
 [`docs/learning/m3-1-backend-e2e.zh-CN.md`](../docs/learning/m3-1-backend-e2e.zh-CN.md)
 for repeatable commands, and
 [`docs/learning/m3-1-realistic-e2e-evidence.zh-CN.md`](../docs/learning/m3-1-realistic-e2e-evidence.zh-CN.md)
 for the failure analysis, successful live evidence, cost table, and content
-review.
+review of the historical M3.1 run. The current Editor design, tests, and
+commands are documented in
+[`docs/learning/m3-2-editor-final-markdown.zh-CN.md`](../docs/learning/m3-2-editor-final-markdown.zh-CN.md).
 
 ## Debugging and logs
 

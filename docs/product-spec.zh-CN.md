@@ -2,7 +2,7 @@
 
 状态：Draft
 
-日期：2026-07-28
+日期：2026-07-29
 
 ## 1. 产品命题
 
@@ -51,7 +51,7 @@ MVP 文字来源契约：
 ### 3.2 Human-led
 
 系统生成候选素材、问题和草稿；用户负责确认、修正、补充和最终采用。
-M3.1 中的“补充口述”特指用户已经转成文字后导入的 Source。浏览器不申请
+M3 中的“补充口述”特指用户已经转成文字后导入的 Source。浏览器不申请
 麦克风权限，后端不接收音频，也不执行实时语音转文字。
 
 ### 3.3 Semi-scripted
@@ -191,7 +191,8 @@ Child，也不会与研究调用并发。
 - 单 Run 调用预算设为二时，第三次 Interviewer 调用在进入 Provider 前以
   `model_call_limit_exceeded` 被拒绝，不产生第三条 ModelCall；
 - `GET /runs/{run_id}/exports/interview-scaffold.md` 导出已经就绪的采访
-  脚手架。M2.4 v2 成功态和 M3.1 v3 等待态都允许导出；Markdown 由结构化
+  脚手架。M2.4 v2 成功态以及 M3.1 v3 / M3.2 v4 等待态都允许导出；
+  Markdown 由结构化
   Artifact 确定性生成，正文使用 `[S1]` 等短引用，文末按 Source 标题和
   Segment 位置列出来源索引；原始 Source/Segment ID 仍保留在 Artifact 与
   数据库。引用元数据无法解析时返回 409。模型文本中的 Markdown 控制字符和
@@ -224,14 +225,49 @@ migration。结构化运行日志只记录关联 ID、状态和 section、questi
   成功；多进程协调不在 M3.1 支持范围；
 - M3.1 的 Resume 只验证人工检查点闭环，在同一事务内确定性完成，不新增
   Task、Provider 调用、Token 或费用，`output_artifact_id` 仍指向脚手架；
-- M3.2 Editor 才会读取新增 Source，生成口播稿与 Show Notes。
+- 这是 v3 的历史 Resume 语义；新建的 v4 Run 会由 M3.2 Editor 读取新增
+  Source，生成口播稿与 Show Notes。
 
 M3.1 同样复用现有表，无 migration。操作日志和 Events 不保存补充口述
 正文、Prompt、模型输出、密钥或语音内容。
 
 ### Editor
 
-只使用允许的证据和用户新增素材生成草稿，不得补写未发生的经历。
+M3.2 把 Editor 实现为 Resume 后排队的串行根 Task，而不是一个与
+Researchers 并发的 Child：
+
+- 新建 `episode-research` Run 使用 workflow v4；v1 / v2 / v3 在途 Run
+  保持各自历史完成语义；
+- v4 到人工等待点时仍为四个成功 Task、四个 Artifact 和三次 ModelCall；
+- 第一次合法 Resume 创建 `user_material_submission`，把 Run 恢复为
+  `running`，并排队一个 `parent_task_id=None` 的
+  `build_podcast_draft` Editor Task；
+- Editor 输入只包含已验证 Scaffold、Scaffold 实际引用到的初始
+  SourceSegment、用户本轮补充的 SourceSegment，以及相关 Artifact ID；
+- Scaffold、topic 与 Source 文本都作为不可信数据；输入 JSON 有单独的字符
+  上限，Editor 有独立输出 Token 上限；
+- 输出采用禁止额外字段的 strict schema，包含 Podcast Script 与 Show Notes；
+- title 必须逐字等于 topic，每个口播段落、section、Show Notes summary 和
+  key point 都必须包含允许范围内的 SourceReference；
+- Podcast Script 必须同时使用至少一条初始引用和一条补充引用，Show Notes
+  也必须使用补充引用，避免模型在格式正确的情况下忽略用户的新回答；
+- 引用越权、缺少补充引用、结构不完整或 topic 漂移时，Worker 在 Artifact
+  提交前拒绝结果；
+- 成功 Run 最终为五个 Task、六个 Artifact 和四次 ModelCall，
+  `output_artifact_id` 指向 `build_podcast_draft_result`；
+- `GET /runs/{run_id}/exports/podcast-draft.md` 与
+  `GET /runs/{run_id}/exports/show-notes.md` 从结构化结果确定性渲染安全
+  Markdown。内部 Source/Segment ID 转为 `[S1]` 短引用和来源索引；
+- 原 Interview Scaffold Artifact 保留，原导出 endpoint 在 Editor 成功后
+  仍可读取同一份 Scaffold；
+- Editor 是候选内容生产者，不自动发布。合法引用只证明可追踪，不构成语义
+  蕴含证明，最终事实和表达仍由用户审核。
+
+Resume 重放不能重复排队 Editor 或产生额外费用。Editor 共享既有 Worker 的
+lease、fencing、retry、timeout、cancel、startup recovery 和模型调用预算；
+预算不足时第四次调用会在进入 Provider 前失败。M3.2 复用现有表，不需要
+migration。操作日志和 Events 仍不得保存素材正文、Prompt、模型完整输出或
+API Key。
 
 ## 7. 成功标准
 
@@ -244,6 +280,8 @@ M3.1 同样复用现有表，无 migration。操作日志和 Events 不保存补
 5. 取消父 Run 后，不再接受子任务的迟到写入。
 6. 一次完整运行不超过配置的模型调用上限。
 7. 用户认为生成的脚手架比空白提问更容易触发表达。
+8. 用户补充材料后，系统能生成同时引用初始与补充证据的口播候选稿，并
+   单独导出 Show Notes，最终采用仍由用户决定。
 
 ## 8. 衡量指标
 

@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
 from epiphany.events import append_event
 from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
 from epiphany.models import Artifact, Run, Task
@@ -25,6 +26,7 @@ RESEARCH_CHILDREN = (TIMELINE_RESEARCH, THEME_RESEARCH)
 LEGACY_RESEARCH_WORKFLOW_VERSION = "v1"
 SCAFFOLD_RESEARCH_WORKFLOW_VERSION = "v2"
 INTERVIEW_RESEARCH_WORKFLOW_VERSION = "v3"
+EDITOR_RESEARCH_WORKFLOW_VERSION = "v4"
 
 
 class Orchestrator:
@@ -73,6 +75,51 @@ class Orchestrator:
             )
             return None
         raise ValueError(f"unsupported workflow type: {run.workflow_type}")
+
+    async def enqueue_editor(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        input_json: dict[str, Any],
+    ) -> Task:
+        """Queue the single Editor task after the durable human checkpoint."""
+
+        if (
+            run.workflow_type != "episode-research"
+            or run.workflow_version != EDITOR_RESEARCH_WORKFLOW_VERSION
+            or run.status != RunStatus.RUNNING
+        ):
+            raise ValueError("editor can only be queued for a running v4 episode workflow")
+
+        task = await self._enqueue_task(
+            session,
+            run=run,
+            kind=BUILD_PODCAST_DRAFT,
+            agent_type="editor",
+            parent_task_id=None,
+            input_json=input_json,
+        )
+        await append_event(
+            session,
+            run_id=run.id,
+            task_id=task.id,
+            event_type="workflow.editor.queued",
+            payload={
+                "editor_task_id": task.id,
+                "scaffold_artifact_id": input_json["scaffold_artifact_id"],
+                "submission_artifact_id": input_json["submission_artifact_id"],
+            },
+        )
+        logger.info(
+            "Editor task queued",
+            extra={
+                "event": "workflow.editor.queued",
+                "run_id": run.id,
+                "task_id": task.id,
+            },
+        )
+        return task
 
     async def fail_after_task(
         self,
@@ -265,6 +312,13 @@ class Orchestrator:
         run: Run,
         completed_task: Task,
     ) -> None:
+        if completed_task.kind == BUILD_PODCAST_DRAFT:
+            await self._complete_podcast_draft(
+                session,
+                run=run,
+                completed_task=completed_task,
+            )
+            return
         if completed_task.kind == BUILD_INTERVIEW_SCAFFOLD:
             await self._complete_interview_scaffold(
                 session,
@@ -397,6 +451,7 @@ class Orchestrator:
         if run.workflow_version not in {
             SCAFFOLD_RESEARCH_WORKFLOW_VERSION,
             INTERVIEW_RESEARCH_WORKFLOW_VERSION,
+            EDITOR_RESEARCH_WORKFLOW_VERSION,
         }:
             raise ValueError(
                 f"unsupported episode-research workflow version: {run.workflow_version}"
@@ -490,7 +545,10 @@ class Orchestrator:
                 event_type="run.succeeded",
                 payload={"output_artifact_id": artifact.id},
             )
-        elif run.workflow_version == INTERVIEW_RESEARCH_WORKFLOW_VERSION:
+        elif run.workflow_version in {
+            INTERVIEW_RESEARCH_WORKFLOW_VERSION,
+            EDITOR_RESEARCH_WORKFLOW_VERSION,
+        }:
             validate_run_transition(run.status, RunStatus.WAITING_FOR_USER)
             run.status = RunStatus.WAITING_FOR_USER
             run.current_step = "awaiting_interview_response"
@@ -537,6 +595,55 @@ class Orchestrator:
                 "artifact_id": artifact.id,
                 "section_count": len(sections),
                 "question_count": question_count,
+            },
+        )
+
+    async def _complete_podcast_draft(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        completed_task: Task,
+    ) -> None:
+        if run.workflow_version != EDITOR_RESEARCH_WORKFLOW_VERSION:
+            raise ValueError("editor task is only supported by the v4 episode workflow")
+        if completed_task.parent_task_id is not None:
+            raise ValueError("editor task must be a sequential root task")
+        if completed_task.output_artifact_id is None:
+            raise ValueError("editor task has no output artifact")
+
+        artifact = await session.get(Artifact, completed_task.output_artifact_id)
+        if (
+            artifact is None
+            or artifact.run_id != run.id
+            or artifact.kind != f"{BUILD_PODCAST_DRAFT}_result"
+        ):
+            raise ValueError("editor output artifact is missing or invalid")
+
+        await append_event(
+            session,
+            run_id=run.id,
+            task_id=completed_task.id,
+            event_type="workflow.editor.completed",
+            payload={"artifact_id": artifact.id},
+        )
+        validate_run_transition(run.status, RunStatus.SUCCEEDED)
+        run.status = RunStatus.SUCCEEDED
+        run.current_step = "complete"
+        run.output_artifact_id = artifact.id
+        await append_event(
+            session,
+            run_id=run.id,
+            event_type="run.succeeded",
+            payload={"output_artifact_id": artifact.id},
+        )
+        logger.info(
+            "Editor workflow completed",
+            extra={
+                "event": "workflow.editor.completed",
+                "run_id": run.id,
+                "task_id": completed_task.id,
+                "artifact_id": artifact.id,
             },
         )
 

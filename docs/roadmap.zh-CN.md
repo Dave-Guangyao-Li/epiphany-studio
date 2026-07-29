@@ -1,6 +1,6 @@
 # MVP 路线图
 
-更新时间：2026-07-28
+更新时间：2026-07-29
 
 路线图按可演示的纵向切片推进，不按“先把所有基础设施搭完”推进。
 
@@ -151,8 +151,8 @@ M2 完成标准：以上四个小步全部通过测试和演示后，才进入 M
 - [x] `waiting_for_user`
 - [x] Resume API
 - [x] 用户新增素材
-- [ ] Editor
-- [ ] Markdown/Show Notes 导出
+- [x] Editor
+- [x] Markdown/Show Notes 导出
 
 ### M3.1：持久化人工检查点
 
@@ -172,7 +172,7 @@ ModelCall 仍为三次、不会产生额外 Token 或费用；最终
 同 ID 不同素材返回 409；缺失 Source 返回 404 且继续等待；等待时可以取消，
 取消后不能 Resume；同进程内并发 Resume、并发 Resume/Cancel 均只有一个有效
 状态转换。v1 仍停在研究 Bundle，v2 仍在脚手架后成功。复用既有表结构，无
-新 migration；Fake 全流程 E2E、受限 DeepSeek 真实 E2E 与当前 130 项测试
+新 migration；Fake 全流程 E2E、受限 DeepSeek 真实 E2E 与 M3.1 阶段的 130 项测试
 通过，Alembic 无 schema drift。真实验收使用三份完整初始素材和一份补充
 口述，成功走到 `waiting_for_user -> Resume -> succeeded`：4 个 Source、
 21 个 Segment、4 个成功 Task、3 次模型调用、最终 5 个 Artifact 和 29 个
@@ -189,15 +189,43 @@ Event，本地估算 CNY 0.023386。第一次完整素材 Run 暴露了合并 Bu
 
 ### M3.2：Editor 与最终 Markdown
 
-- [ ] Resume 后排队 Editor Task
-- [ ] 读取 Interview Scaffold 与补充 Source
-- [ ] 生成可审阅的播客口播稿 Markdown
-- [ ] 生成 Show Notes
-- [ ] 保留来源引用、模型调用账本与失败恢复
-- [ ] 将现有 E2E 延伸到最终 Markdown
+- [x] Resume 后排队 Editor Task
+- [x] 读取 Interview Scaffold 与补充 Source
+- [x] 生成可审阅的播客口播稿 Markdown
+- [x] 生成 Show Notes
+- [x] 保留来源引用、模型调用账本与失败恢复
+- [x] 将现有 E2E 延伸到最终 Markdown
 
 演示：同一份合成 fixture 从初始 Source 一路生成包含补充材料的可录口播稿和
 Show Notes。正式 Web UI 仍不阻塞本步；M5 再复用同一 API E2E 做页面操作测试。
+
+验收：新建 `episode-research` Run 使用 workflow v4。人工等待点仍为
+4 Tasks / 4 Artifacts / 3 ModelCalls；第一次合法 Resume 创建一条只含引用的
+`user_material_submission`，并排队一个串行根 `build_podcast_draft` Editor
+Task。Editor 的 strict schema 要求 Podcast Script 同时引用初始与补充素材，
+Show Notes 也必须引用补充素材。成功后最终为 5 Tasks / 6 Artifacts /
+4 ModelCalls，`output_artifact_id` 指向 `build_podcast_draft_result`；原
+Scaffold Artifact 继续保留。
+
+导出：
+
+```text
+GET /runs/{run_id}/exports/interview-scaffold.md
+GET /runs/{run_id}/exports/podcast-draft.md
+GET /runs/{run_id}/exports/show-notes.md
+```
+
+Podcast Draft 与 Show Notes 由严格 JSON 确定性渲染为安全 Markdown，正文
+使用 `[S1]` 短引用并在文末列来源索引。内部 Source/Segment ID 仍保留在
+SQLite 与 Artifact。v1 / v2 / v3 在途 Run 保持原有完成语义；本步复用现有
+表结构，不新增 migration。
+
+可靠性验收覆盖 Resume 重放、Editor retry、重启恢复、等待或运行时取消、
+第四次调用前的预算拒绝、最终导出未就绪和引用越权。完整 151 项测试、Ruff、
+Alembic 和 Fake E2E 通过。2026-07-29 还使用同一合成 fixture 显式完成一次
+`deepseek-v4-flash` 真实 E2E：4 次调用全部成功，合计 16,667 input tokens、
+9,468 output tokens、73,018 ms Provider 耗时，本地估算 CNY 0.035603；
+估算值不是厂商账单，最终内容仍需人工审阅。
 
 ## M4：可靠性与 Trace
 

@@ -65,7 +65,7 @@ async def test_episode_research_fans_out_and_fans_in(
     assert await worker.run_until_idle() == 3
 
     completed = await service.get_run(created.id)
-    assert completed.workflow_version == "v3"
+    assert completed.workflow_version == "v4"
     assert completed.status == "waiting_for_user"
     assert completed.current_step == "awaiting_interview_response"
     assert completed.model_call_count == 3
@@ -484,7 +484,7 @@ async def test_episode_research_api_demo_and_missing_source(tmp_path: Path) -> N
 
         assert await app.state.worker.run_until_idle() == 3
         completed = await client.get(f"/runs/{run_id}")
-        assert completed.json()["workflow_version"] == "v3"
+        assert completed.json()["workflow_version"] == "v4"
         assert completed.json()["status"] == "waiting_for_user"
         assert completed.json()["current_step"] == "awaiting_interview_response"
         assert len(completed.json()["tasks"]) == 4

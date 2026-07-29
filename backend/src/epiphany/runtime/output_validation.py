@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from epiphany.editor_schemas import BUILD_PODCAST_DRAFT, validate_podcast_draft_output
 from epiphany.interview_schemas import (
     BUILD_INTERVIEW_SCAFFOLD,
     validate_interview_scaffold_output,
@@ -31,6 +32,11 @@ def validate_task_output(
 
     if task_kind == BUILD_INTERVIEW_SCAFFOLD:
         return validate_interview_scaffold_output(
+            task_input=task_input,
+            content=content,
+        )
+    if task_kind == BUILD_PODCAST_DRAFT:
+        return validate_podcast_draft_output(
             task_input=task_input,
             content=content,
         )
