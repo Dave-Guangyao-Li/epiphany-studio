@@ -91,7 +91,8 @@ Subagent 对话。
 8. 用户输入新的口述转录或手动补充；明显不足时可以继续多轮补充。
 9. 素材达到门槛后，Editor 按同一份 Creative Brief 生成口播稿和
    Show Notes。
-10. 用户审核、修改并导出 Markdown。
+10. 系统生成可解释的 Draft Quality Report，区分确定性指标与模型建议。
+11. 用户审核、提交独立质量反馈并导出 Markdown。
 
 ## 5. MVP 范围
 
@@ -106,6 +107,7 @@ Subagent 对话。
 - 等待用户与恢复；
 - 运行事件和错误展示；
 - Markdown 导出；
+- Draft Quality Report 与独立用户反馈；
 - 可替换的托管模型 Provider（首个为 DeepSeek）与测试用 Fake Provider。
 
 ### 暂不包含
@@ -306,6 +308,66 @@ synthetic fixture 或 Mock 用户反馈不能冒充真实用户认可。
 M3.3 继续复用 Run input 与 Artifact，不新增数据库表。自动合成 E2E 会关闭
 并重启 App，证明等待状态不会丢失或偷偷继续；合成材料只用于工程验收。
 
+### Draft Quality Report 与用户反馈
+
+M3.4 为带 Creative Brief 且默认启用 Draft Quality 的新 Run 使用 workflow
+v6。调用方可以显式提交 `draft_quality.enabled=false` 保持 v5 的较低费用
+路径；历史 v1–v5 Run 不会被升级后偷偷改变。
+
+Editor 成功后先由普通代码生成 `draft_metrics_report`：
+
+- 按 Creative Brief 保存的字符速度估算实际文字可支持的分钟数；
+- 检查每个口播段落是否带来源引用，并报告 Source/Segment 多样性；
+- 检查规范化后完全重复的段落和重复八字符窗口；
+- 检查 must-include、avoid pattern、固定 filler、模板短语和重复句式；
+- 所有 finding 都包含明确 code、status、location、observed 和 threshold。
+
+10 / 15 / 30 分钟是文字阶段估算，不是实际录音时长。系统默认按每分钟 280
+个非空白字符计算；录制后的真实分钟数只能由用户另行反馈。时长严重不足时，
+产品建议继续补充具体事件、动作、对话和感受，而不是要求 Editor 用同义反复
+或空泛表达凑满目标。
+
+随后排队一个串行根 Quality Reviewer Task。模型只能按固定六维返回建议：
+Creative Brief 匹配、来源忠实、覆盖与具体性、结构连贯、口播自然与声音匹配、
+精炼与非重复。每个 `assessable=true` 的维度必须包含 1–5 分、Draft
+location 和逐字 exact quote；代码验证 quote 确实存在于该位置，并验证引用
+没有越过 Draft 实际引用的 SourceSegment。无法可靠判断的维度必须使用
+`assessable=false` 和 limitation，不得编造证据。
+
+模型不能返回最终 decision。应用代码按以下边界合成报告：
+
+- 确定性 blocker -> `blocked`；
+- Reviewer 不可用或评价不完整 ->
+  `automated_review_incomplete`；
+- 确定性 warning 或低分维度 -> `revision_recommended`；
+- 其余情况 -> `candidate_ready_for_human_review`。
+
+实验性综合分使用有版本号的 60% 确定性指标 + 40% 六维模型平均分，只用于
+同一 profile 下比较候选稿。任何维度不可评价时不生成综合分。报告始终要求
+人工审核。
+
+首版默认可能由与 Editor 相同的模型担任 Reviewer，因此必须明确标记
+`same_model`、self-review 和 advisory。产品不输出“AI 生成概率”。可观察的
+重复、模板、filler 等信号可以报告，但不能据此断言作者身份。合法引用也只
+证明可追踪，不等于已经证明语义完全正确。
+
+Reviewer 是辅助能力。它在 retry 后仍失败、鉴权不可用或预算只够前四次调用
+时，系统保留 Draft、确定性指标和失败原因并让 Run 正常完成。若确定性规则
+已有 blocker，decision 仍为 `blocked`；否则使用
+`automated_review_incomplete`。Run 的最终 output 始终仍是 Editor Draft。
+
+用户评价通过独立 append-only `draft_user_feedback` Artifact 保存，包含
+overall、voice match、recordability、usefulness、tone fit、是否愿意直接录、
+可选实际时长和评论。`feedback_origin=human` 才会被标为
+`human_signal_eligible=true`；自动化 E2E 必须使用 `synthetic_test`，服务端
+强制将其标记为不具备真人信号资格。当前本地 MVP 没有身份认证，所以 origin
+仍是调用方自报的分类，不是“真人身份已验证”。反馈评论不复制到 Event 或
+运行日志，但仍保存在 Artifact 中并可由本地数据接口读取。
+
+M3.4 复用 Run、Task、Artifact、Event 与 ModelCall 表，不新增数据库
+migration。确定性指标、模型原始六维结果、代码合成报告和用户反馈分别保存，
+避免把工程验收、模型自评和真实用户认可混成一个分数。
+
 ## 7. 成功标准
 
 完成 MVP 时，应能演示：
@@ -319,6 +381,8 @@ M3.3 继续复用 Run input 与 Artifact，不新增数据库表。自动合成 
 7. 用户认为生成的脚手架比空白提问更容易触发表达。
 8. 用户补充材料后，系统能生成同时引用初始与补充证据的口播候选稿，并
    单独导出 Show Notes，最终采用仍由用户决定。
+9. 用户能看到有证据的质量建议，并能单独记录“是否像我、是否可录”的真人
+   评价；合成反馈不能被计为真实用户信号。
 
 ## 8. 衡量指标
 
@@ -330,3 +394,6 @@ M3.3 继续复用 Run input 与 Artifact，不新增数据库表。自动合成 
 - 每 Run 模型调用数、tokens、延迟和估算费用；
 - 失败恢复次数；
 - 用户对脚手架“是否帮助想起新内容”的主观评分。
+- Draft 目标时长偏差、引用覆盖、重复和模板模式；
+- 用户对 voice match、recordability、usefulness 与 tone fit 的独立评分；
+- `synthetic_test` 与 human feedback 必须分开统计。

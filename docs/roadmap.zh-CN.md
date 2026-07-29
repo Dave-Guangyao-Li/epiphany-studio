@@ -268,18 +268,54 @@ M3.4 合并后用同一 fixture 一次性验证。
 详细学习与本地排查步骤见
 `docs/learning/m3-3-creative-brief-material-readiness.zh-CN.md`。
 
-### M3.4：Draft Quality Report 与用户反馈（下一步）
+### M3.4：Draft Quality Report 与用户反馈
 
-- [ ] 确定性时长、重复、引用与模板化表达检查
-- [ ] 严格 Schema 的独立模型评价 Task
-- [ ] 每项评价提供 Draft 位置和逐字证据
-- [ ] 代码计算最终 decision，模型不能覆盖硬性 blocker
-- [ ] 模型评价与真实用户反馈分开保存
+- [x] 确定性时长、重复、引用与模板化表达检查
+- [x] 严格 Schema 的独立模型评价 Task
+- [x] 每项评价提供 Draft 位置和逐字证据
+- [x] 代码计算最终 decision，模型不能覆盖硬性 blocker
+- [x] 模型评价与真实用户反馈分开保存
+- [x] Reviewer 失败时保留 Draft 并生成降级报告
+- [x] JSON / Markdown 报告与 append-only feedback API
+- [x] 完成一次受限 DeepSeek 生成 + 自评 E2E 并记录最终数字
 
-模型自评属于 M3.4，不进入 M3.3 的素材充足度门槛。首版即使使用与 Editor
-相同的模型，也必须明确标记为 self-review 和 advisory；它不能冒充人工评价，
-也不能输出一个不可解释的“AI 概率”。自动 E2E 可以提交
-`synthetic_test` 反馈验证接口，但产品指标不得把它计为真实用户认可。
+带 Creative Brief 的新 Run 默认进入 workflow v6；显式
+`draft_quality.enabled=false` 时保留 v5。Editor 后先由普通代码保存
+`draft_metrics_report`，检查目标时长、引用覆盖、来源多样性、重复、Brief
+约束、filler 和模板表达，再排队一个串行 Quality Reviewer。
+
+模型自评不进入 M3.3 的素材充足度门槛。首版即使使用与 Editor 相同的模型，
+也明确标记为 self-review 和 advisory；它不能冒充人工评价，也不输出一个
+不可解释的“AI 概率”。每个可评价维度都必须提供 Draft location 和逐字
+quote，引用范围由代码验证，最终 decision 由代码计算。
+
+Reviewer 在 retry 后仍失败或模型预算不足时，系统保留已通过来源合同的
+Draft、确定性指标和错误码并完成 Run。已有确定性 blocker 时仍为
+`blocked`，否则为 `automated_review_incomplete`。自动 E2E 可以提交
+`synthetic_test` 反馈验证接口，但产品指标不得把它计为真实用户认可；当前
+无鉴权 API 的 origin 只是调用方声明。
+M3.4 继续复用现有表，无 migration。2026-07-29 验证快照为 Ruff、71 文件
+format check、205/205 pytest、Alembic upgrade/check、M3.3 Fake 回归 E2E 和
+M3.4 Fake E2E 全部通过；205 是阶段快照，不是永久测试总数。
+
+2026-07-29 的真实 DeepSeek v6 Run
+`run_276a3bce22394eb8a56edd6af8760012` 完成 5/5 次调用、6 个成功 Task、
+11 个流程 Artifact，提交一份幂等 `synthetic_test` 反馈后为 12 个
+Artifact。合计 26,618 input tokens、11,239 output tokens、61,669 ms 模型
+耗时，本地估算 CNY 0.049096。三阶段 App 重启、持久 Reviewer 队列、补充
+来源引用、反馈重放和 85 行无正文 JSON 日志均通过。
+
+质量 decision 为 `revision_recommended`：确定性 72 分发现 10 分钟目标只有
+1,429 个非空白字符、估算 5.1 分钟；引用覆盖 100%，使用 4 个 Source /
+10 个 Segment，没有完全重复段落，但有 1 次 filler 和 4 次“不是……而是……”。
+同一个 DeepSeek 模型的六维自评却全部为 5/5，实验综合分 83.2。这种差异正好
+说明 same-model review 只能 advisory；正确动作是补充素材，不是灌水凑时长。
+
+前一次付费尝试在 Editor 被严格合同
+`podcast_draft_missing_supplemental_source_reference` 拒绝。增强输出末尾
+引用自检后，本次成功。前一次本地估算约 CNY 0.039696，属于单独的开发调试
+费用，不能并入成功 Run 的 CNY 0.049096。两者都是本地价格表估算；官方账单
+可能因计费口径、缓存处理或用量同步延迟而不同。
 
 ## M4：可靠性与 Trace
 

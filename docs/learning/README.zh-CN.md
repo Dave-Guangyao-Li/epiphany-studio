@@ -50,7 +50,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 14. [M3.1 realistic E2E：运行证据与内容复核](m3-1-realistic-e2e-evidence.zh-CN.md)
 15. [M3.2：Editor 与最终 Markdown](m3-2-editor-final-markdown.zh-CN.md)
 16. [M3.3：Creative Brief、目标时长与素材充足度](m3-3-creative-brief-material-readiness.zh-CN.md)
-17. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+17. [M3.4：Draft Quality Report、模型自评与用户反馈](m3-4-draft-quality-report.zh-CN.md)
+18. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -72,6 +73,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M3.1 E2E | 用完整合成素材跑通 Source、Checkpoint、Resume、日志、数据库与 Markdown | Fake + DeepSeek 全流程通过 | 本次 focused commit |
 | M3.2 | Resume 后运行 grounded Editor，导出口播稿和 Show Notes | Fake + DeepSeek E2E 已验证 | 本次 focused commit |
 | M3.3 | 保存创作目标，素材明显不足时持久等待，补足后才运行 Editor | 178 tests + Fake E2E 已验证 | 本次 focused commit |
+| M3.4 | 用可解释规则、证据化模型自评和独立用户反馈审阅 Draft | 205 tests + Fake/DeepSeek E2E 已验证 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -95,7 +97,11 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
   -> 达到目标时长下限后才自动排队 Editor Task
   -> 严格校验初始来源与补充来源引用
   -> 导出口播稿和 Show Notes Markdown
+  -> 计算时长、引用、重复和模板表达指标
+  -> 独立 Reviewer 按六维给出带逐字证据的建议
+  -> 代码生成 Draft Quality Report
   -> 用户最终审稿
+  -> 用户单独提交声音匹配与可录性反馈
   -> 从 Run、Task、Artifact、Event 和日志中复盘全过程
 ```
 
@@ -142,14 +148,57 @@ Brief 支持 10 / 15 / 30 分钟、可调字符速度、场景、听众、沟通
 所有已接受补充材料与同一 Brief。正常一轮补充的 v5 最终为 5 Tasks /
 8 Artifacts / 4 ModelCalls。
 
+M3.4 为 Creative Brief 默认启用 Draft Quality，并把新 Run 升级为 v6。
+Editor 后先用普通代码生成 `draft_metrics_report`，再排队一个串行
+`review_podcast_draft` Task。正常一轮补充的 v6 最终为 6 Tasks /
+11 Artifacts / 5 ModelCalls；最终 output 仍是 Editor Draft，不是质量报告。
+显式 `draft_quality.enabled=false` 可继续走 v5。
+
+Reviewer 固定检查 Brief 匹配、来源忠实、覆盖与具体性、结构、口播自然度和
+非重复性。每个可评价维度必须带 Draft location 与逐字 quote，代码会验证
+证据。默认同模型结果明确标记 self-review / advisory，最终 decision 由代码
+合成，不能覆盖确定性 blocker。Reviewer 失败时，已有 blocker 仍保持
+`blocked`，否则降级为 `automated_review_incomplete`；两种情况都不会隐藏
+已经生成的 Draft。
+
+用户反馈与自动报告分开保存。自动 E2E 使用的 `synthetic_test` 永远是
+`human_signal_eligible=false`。当前无鉴权 MVP 的 origin 是调用方自报标签，
+不是已验证真人身份。详细原理、Swagger 和测试命令见
+[M3.4 学习章节](m3-4-draft-quality-report.zh-CN.md)。
+
 这里的 `voice_note_transcript` 是“已经转成文字的口述”这一 Source 分类，
 不是麦克风或语音识别功能。当前可以在 Swagger 中直接输入或粘贴文字。
 
 不打开 Swagger 也可以通过
 `python -m epiphany.quality_contract_e2e --provider fake --execute`
-一条命令复现整条 v5 链路，包括真正关闭 App 后从 SQLite 恢复。当前 M3.3
-Fake E2E、完整 178 项测试均通过；真实 DeepSeek 验证留到 M3.4 加入模型
-自评后一次完成，避免重复费用。M3.2 的 2026-07-29 合成素材 live
+一条命令复现整条 v5 链路，包括真正关闭 App 后从 SQLite 恢复。M3.3 的
+Fake E2E 与当时的完整 178 项测试均通过。
+
+M3.4 的 v6 链路使用：
+
+```bash
+python -m epiphany.draft_quality_e2e --provider fake --execute
+```
+
+2026-07-29 的受限真实 DeepSeek Run
+`run_276a3bce22394eb8a56edd6af8760012` 完成 5/5 次调用和 6 个 Task，
+提交 synthetic feedback 前后分别为 11 / 12 个 Artifact。合计 26,618 input
+tokens、11,239 output tokens、61,669 ms 模型耗时，本地估算 CNY 0.049096。
+三阶段重启、Reviewer 持久队列、补充引用、反馈幂等和 85 行无正文 JSON 日志
+均通过。
+
+报告没有为了展示而“报喜”：10 分钟目标的正文只有 1,429 个非空白字符，
+估算 5.1 分钟，因此确定性 72 分、decision 为 `revision_recommended`。
+引用覆盖 100%，来自 4 个 Source / 10 个 Segment，完全重复段落为 0，但有
+1 次 filler 和 4 次“不是……而是……”。同模型 Reviewer 六维全部 5/5，
+实验综合分 83.2；这恰好说明自评只能 advisory，应补充真实素材而不是灌水。
+
+前一次真实尝试被 Editor 严格合同
+`podcast_draft_missing_supplemental_source_reference` 拒绝，增强末尾引用自检
+后本次通过。前一次约 CNY 0.039696 是单独的开发调试估算费用，不并入成功
+Run。官方账单可能因计费口径、缓存和同步延迟与本地估算不同。
+
+M3.2 的 2026-07-29 合成素材 live
 Run 使用 16,667 input tokens、9,468 output tokens、73,018 ms Provider
 耗时，本地估算 CNY 0.035603；估算不是厂商账单，内容仍需人工审核。
 上一阶段的真实验收
@@ -162,8 +211,8 @@ Run 使用 16,667 input tokens、9,468 output tokens、73,018 ms Provider
 
 - DeepSeek 真实 API 已用完整合成素材评价脚手架质量，但尚未使用个人隐私素材；
 - 已能生成带引用的播客候选稿，但仍需本人审核事实、语气和取舍；
-- 已能请求目标时长并检测明显素材短缺，但尚未生成 Draft Quality Report；
-- 尚未加入模型自评打分；这属于 M3.4，且只能作为 advisory；
+- 已能生成 Draft Quality Report，但它仍是辅助审稿，不代表真实录制反馈；
+- 已加入证据化模型自评，但默认可能是同模型 self-review，只能作为 advisory；
 - 尚未提供可视化采访脚手架和播客稿 editor；
 - M3.2 的 Editor 已通过合成素材真实调用，但尚未使用个人隐私素材验收；
 - 尚未提供麦克风录音、音频上传、STT 或语音克隆；

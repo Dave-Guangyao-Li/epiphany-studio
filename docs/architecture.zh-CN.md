@@ -74,13 +74,17 @@ create_run
   -> build_podcast_draft (serial root Editor)
   -> validate strict structure and source scope
   -> render Podcast Draft / Show Notes
+  -> evaluate deterministic Draft metrics
+  -> review_podcast_draft (serial root Quality Reviewer)
+  -> validate location + verbatim quote evidence
+  -> synthesize code-owned Draft Quality Report
   -> human final review
   -> complete
 ```
 
 其中 `prepare_sources`、`fan_in` 和状态更新是普通代码；
-`timeline_research`、`theme_research`、`build_interview_scaffold` 和
-`build_podcast_draft` 才调用模型。
+`timeline_research`、`theme_research`、`build_interview_scaffold`、
+`build_podcast_draft` 和 `review_podcast_draft` 才调用模型。
 `assess_material_readiness` 不调用模型。
 
 M2.4 将可执行边界推进到 `build_interview_scaffold`：两个 Researcher
@@ -122,11 +126,33 @@ Editor。正常一轮补充后的 v5 Run 在等待时为四个 Task、五个 Art
 重复提交初始或历史 Source 会在持久化前拒绝，累计补充上限为 500 个
 SourceSegment。Editor 输入另受 Provider 的 48,000 字符上限保护。
 
+M3.4 为带 Creative Brief 且没有显式关闭 `draft_quality` 的新 Run 使用
+workflow v6。Editor 成功后，普通代码先保存一份
+`draft_metrics_report`，计算目标/估算时长、段落引用覆盖、来源多样性、重复、
+Brief 文字约束、固定 filler 与模板表达。随后排队一个
+`parent_task_id=None` 的串行根 `review_podcast_draft` Task。它固定评价六个
+维度，每个可评价维度必须提供 Draft 字段路径和逐字 quote；代码再验证 quote
+确实存在、引用未越权，并合成 `draft_quality_report`。
+
+正常一轮补充的 v6 Run 完成时为六个 Task、十一个 Artifact 和五次
+ModelCall。三个新增质量 Artifact 分别是确定性指标、Reviewer 严格结果和最终
+质量报告。Run 的 `output_artifact_id` 仍指向 Editor Draft，而不是报告。
+显式提交 `draft_quality.enabled=false` 会保持 v5 的四次调用路径。
+
+Reviewer 只是 advisory。若它与 Editor 使用相同 Provider/model，报告标记
+`reviewer_relation=same_model`；它不能自称独立人工评价，也不能覆盖确定性
+blocker。Reviewer 最终失败或预算不足时，系统保留失败原因：已有确定性
+blocker 时 decision 仍为 `blocked`，否则为
+`automated_review_incomplete`。Run 正常完成，使已经通过来源合同的 Draft
+仍可导出。用户反馈通过独立 append-only Artifact 保存；当前 origin 是
+调用方自报的分类，E2E 的 `synthetic_test` 会明确标记为非真人信号。
+
 为使升级时已经在途的 Run 仍可恢复，v1 保留原有语义：fan-in 后以
 `episode_research_bundle` 成功结束，不要求新增 `topic`，也不排队
 Interviewer；v2 仍在采访脚手架完成后成功；v3 Resume 后仍按 M3.1 语义
-确定性结束，不产生 Editor 调用；没有 Creative Brief 的请求仍走 v4。
-五个版本分支都复用现有表和字段，M3.3 不需要数据库 migration。
+确定性结束，不产生 Editor 调用；没有 Creative Brief 的请求仍走 v4；
+显式关闭质量审阅的 Brief 请求走 v5。六个版本分支都复用现有表和字段，
+M3.4 不需要数据库 migration。
 
 ## 5. Subagent 定义
 
@@ -161,6 +187,13 @@ M3.3 的 Readiness 不是 Agent 或 Task，而是确定性业务规则。它不�
 gap code、限制说明和带 SourceReference 的追问。
 计数先按稳定 SourceSegment 引用去重，再按移除空白后的正文内容去重；来源
 多样性只统计真正贡献了新内容的 Source，不能靠复制同一段文字跨过门槛。
+
+M3.4 的 Quality Reviewer 是一个独立串行 Task，但在默认配置下可能复用
+Editor 的同一个模型。它只读取 Draft 实际引用到的 SourceSegment，并通过
+strict schema 返回六张证据卡。`assessable=true` 时必须带 1–5 分、稳定
+location 和存在于该 block 中的 exact quote；无法可靠评价时必须使用
+`assessable=false` 并说明 limitation，不能编造证据。最终 decision 和
+60/40 实验性分数由普通代码计算，且无论结果如何都要求人工审稿。
 
 ## 6. 持久化模型
 
@@ -380,6 +413,8 @@ M3.2 为 Editor 增加第三种独立输入边界和单独输出上限。默认�
 ```text
 EPIPHANY_DEEPSEEK_MAX_EDITOR_BUNDLE_CHARS=48000
 EPIPHANY_DEEPSEEK_EDITOR_MAX_TOKENS=20000
+EPIPHANY_DEEPSEEK_MAX_QUALITY_BUNDLE_CHARS=80000
+EPIPHANY_DEEPSEEK_QUALITY_REVIEW_MAX_TOKENS=6000
 ```
 
 Editor 把 Scaffold、topic、初始片段与补充片段都视为不可信数据，并只允许
@@ -388,10 +423,18 @@ topic，Podcast Script 同时使用初始与补充引用，Show Notes 也至少�
 补充引用。未知或越权引用、缺失补充证据和结构漂移都会在 Artifact 提交前
 失败。合法引用仍不是语义蕴含证明，候选稿必须由用户最终审核。
 
-正常 v4/v5 都需要四次 Provider 调用。将单 Run 预算设为三时，Editor 调用会在
+Quality Reviewer 的输入由结构化 Draft、Creative Brief、质量 profile 和
+Draft 实际引用的 SourceSegment 组成。Prompt 中的正文一律按不可信数据
+处理。Strict validator 固定六个 dimension，逐一验证 assessable 状态、
+1–5 分、location、exact quote 和引用范围；模型不能返回最终 decision。
+本阶段不尝试判断文本的作者身份，也不生成“AI 概率”。
+
+正常 v4/v5 都需要四次 Provider 调用，正常 v6 需要五次。将单 Run 预算设为三时，Editor 调用会在
 进入 Provider 以前以 `model_call_limit_exceeded` 被拒绝。Editor retry、
 timeout、lease、fencing、startup recovery 和 cancel 复用同一 Worker 机制；
 每个重试 attempt 单独记账，但 Artifact 通过稳定 idempotency key 只提交一次。
+若 v6 预算只够四次，Reviewer 会以 `model_call_limit_exceeded` 失败并触发
+质量报告降级；已经生成的 Draft 不会因此变成失败产物。
 
 ## 11. API 和事件
 
@@ -405,6 +448,10 @@ GET  /runs/{id}
 GET  /runs/{id}/exports/interview-scaffold.md
 GET  /runs/{id}/exports/podcast-draft.md
 GET  /runs/{id}/exports/show-notes.md
+GET  /runs/{id}/quality-report
+GET  /runs/{id}/exports/quality-report.md
+POST /runs/{id}/quality-feedback
+GET  /runs/{id}/quality-feedback
 POST /runs/{id}/resume
 POST /runs/{id}/cancel
 GET  /runs/{id}/events
@@ -424,6 +471,13 @@ Podcast Draft 与 Show Notes 只接受最终成功且 `output_artifact_id` 指�
 Readiness 首版不增加单独 endpoint；`GET /runs/{id}` 的 Artifact 列表会返回
 所有 `material_readiness_report`，按创建时间可以看到初始判断和每轮补充后的
 变化。未来 UI 直接消费这一结构，无需解析运行日志。
+
+Draft Quality Report 有单独 JSON 与 Markdown endpoint。它不替换
+`output_artifact_id`；Run 成功后，最终 output 仍是
+`build_podcast_draft_result`。用户反馈只能提交给已经成功且确实输出 Podcast
+Draft 的 Run。反馈采用稳定 `submission_id` 幂等追加，同 ID 不同内容返回
+409；`human_signal_eligible` 由服务端依据 `feedback_origin` 计算，调用方
+不能自行指定。
 
 Markdown 由已验证 JSON 确定性渲染。正文把原始 Source/Segment ID 显示为
 短标签 `[S1]`，文末通过数据库中的 Source 标题与 Segment 位置生成来源索引；
@@ -509,6 +563,16 @@ M3.3 新增 `workflow.material_readiness.evaluated`，只记录报告 Artifact I
 状态、目标分钟、素材/片段计数和缺少字符数，不记录原文或追问全文。正常 v5
 顺序是 Interviewer 完成、Readiness 不足、持久等待、Resume 接收、Readiness
 就绪、Editor 排队和最终成功。App 重启时不会自动跨过等待点。
+
+M3.4 新增 `workflow.draft_metrics.evaluated`、
+`workflow.draft_self_review.queued`、
+`workflow.draft_self_review.completed`、
+`workflow.draft_self_review.unavailable`、
+`workflow.draft_quality.completed` 与
+`workflow.draft_quality.feedback_recorded`。事件只记录 Artifact ID、分数、
+decision、blocker/warning 数量、错误码和反馈摘要，不记录 Draft、Source、
+模型 assessment 或用户 comment 正文。反馈网络重放只写操作日志，不重复写
+持久 Event。
 
 ## 13. 升级触发条件
 

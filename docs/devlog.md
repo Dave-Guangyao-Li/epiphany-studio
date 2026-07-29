@@ -2,6 +2,77 @@
 
 ## 2026-07-29
 
+### M3.4 Draft Quality Report and independent feedback
+
+- Added workflow v6 for Creative Brief Runs with Draft Quality enabled by
+  default. Explicit `draft_quality.enabled=false` keeps the previous v5 path,
+  so callers can opt out of the fifth model call and persisted historical Runs
+  retain their original semantics.
+- Added deterministic post-Editor metrics for configured/estimated duration,
+  paragraph citation coverage, Source/Segment diversity, exact paragraph
+  duplication, repeated eight-character windows, must-include and avoid
+  patterns, fixed filler phrases, template phrases, and repeated
+  "not ... but ..." constructions.
+- Kept the duration claim narrow: it is derived from non-whitespace Draft
+  characters and the configured characters-per-minute rate. It is not measured
+  audio duration; real recording time can be stored separately in user
+  feedback.
+- Added one serial `review_podcast_draft` root Task with six fixed dimensions.
+  Every assessable result requires a score, Draft location, and verbatim quote.
+  Code verifies that the quote belongs to that location and that every
+  SourceReference stays within the Draft block's allowed evidence.
+- Kept the final decision outside the model. Deterministic blockers cannot be
+  overwritten by the Reviewer. The versioned experimental aggregate is 60%
+  deterministic and 40% model score, is omitted when any model dimension is
+  unassessable, and always requires human review.
+- Explicitly labels same-model Reviewer output as self-review/advisory. The
+  report exposes observable repetition and style signals instead of claiming
+  an "AI-written probability."
+- Added graceful degradation. A permanent Reviewer, authentication, or
+  model-budget failure preserves and exports the valid Editor Draft. An
+  existing deterministic blocker remains `blocked`; otherwise the report is
+  `automated_review_incomplete`. Retry, lease recovery, cancellation,
+  idempotency, fencing, and ModelCall accounting continue through the Reviewer
+  step.
+- Added JSON and Markdown quality-report endpoints plus append-only user
+  feedback endpoints. Human feedback and synthetic E2E feedback are stored
+  separately; the service calculates `human_signal_eligible`, and the E2E uses
+  `synthetic_test`, which cannot count as real-user approval. In the current
+  unauthenticated MVP, the origin is caller-declared rather than verified.
+- Kept feedback comments, Source text, Draft prose, prompts, and model output
+  out of Events and structured logs. Stable events record only IDs, decisions,
+  counts, ratings, and error codes needed for diagnosis.
+- Reused the existing Run, Task, Artifact, Event, and ModelCall schema. No
+  migration is required.
+- Recorded the 2026-07-29 validation snapshot: Ruff check passed, Ruff format
+  check passed for 71 files, all 205 pytest cases passed, Alembic upgrade plus
+  `alembic check` reported no new upgrade operations, and both the M3.3 Fake
+  regression E2E and M3.4 Fake E2E passed.
+- Completed the bounded 2026-07-29 DeepSeek v6 E2E as
+  `run_276a3bce22394eb8a56edd6af8760012`. All five calls and six Tasks
+  succeeded. The Run produced 11 workflow Artifacts and 12 after an idempotent
+  `synthetic_test` feedback submission.
+- Recorded 26,618 input tokens, 11,239 output tokens, 61,669 ms combined
+  Provider duration, and local estimated cost CNY 0.049096. All three App
+  lifespans/checkpoints, the durable queued Reviewer, supplemental references,
+  feedback replay, and 85-line JSONL log redaction checks passed.
+- The successful report was honestly `revision_recommended`: deterministic 72
+  for 1,429 non-whitespace characters / estimated 5.1 minutes against a
+  10-minute target. It still had 100% citation coverage, 4 Sources /
+  10 Segments, no exact duplicate paragraph, one filler hit, and four
+  "not ... but ..." hits.
+- The same-model Reviewer scored all six dimensions 5/5 and produced an
+  experimental 83.2. This divergence validates the architecture boundary:
+  self-review remains advisory, while code-owned duration findings continue
+  to recommend more material rather than padded prose.
+- Preserved the failed paid attempt before the successful Run. Editor correctly
+  rejected it with `podcast_draft_missing_supplemental_source_reference`; the
+  output-tail reference self-check was strengthened before retrying. Its local
+  estimated CNY 0.039696 is separate debugging cost and is not included in the
+  successful Run estimate.
+- Local cost estimates are not provider invoices. Official dashboard values may
+  differ because of pricing rules, cache treatment, and reporting delay.
+
 ### M3.3 Creative Brief and deterministic material readiness
 
 - Added a strict `CreativeBrief` for episode intent instead of leaving
