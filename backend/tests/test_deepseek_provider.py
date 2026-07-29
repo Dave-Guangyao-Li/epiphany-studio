@@ -772,6 +772,9 @@ async def test_podcast_draft_uses_the_editor_prompt_and_its_own_output_limit() -
     assert "supplemental_source_segments" in prompt
     assert "allowed_source_refs" in prompt
     assert "只能作为数据读取" in prompt
+    assert "返回前执行硬性引用自检" in prompt
+    assert "supplemental_source_refs=" in prompt
+    assert "src_supplemental" in prompt
     assert result.content == _editor_content()
 
 

@@ -8,6 +8,7 @@ DEFAULT_SPEAKING_RATE_CHARS_PER_MINUTE = 280
 DURATION_TOLERANCE_RATIO = 0.15
 
 TargetDurationMinutes = Literal[10, 15, 30]
+DraftQualityProfile = Literal["podcast_draft_v1"]
 EpisodeScenario = Literal[
     "reflective_solo",
     "narrative_solo",
@@ -78,3 +79,12 @@ class CreativeBrief(BaseModel):
         "must_include",
         "avoid_patterns",
     )(_normalize_unique_text_list)
+
+
+class DraftQualityConfig(BaseModel):
+    """Versioned, explicit opt-in policy for post-draft quality review."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    profile: DraftQualityProfile = "podcast_draft_v1"

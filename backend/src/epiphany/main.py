@@ -43,6 +43,8 @@ def build_provider(settings: Settings) -> ModelProvider:
         max_source_chars=settings.deepseek_max_source_chars,
         max_interview_bundle_chars=settings.deepseek_max_interview_bundle_chars,
         max_editor_bundle_chars=settings.deepseek_max_editor_bundle_chars,
+        quality_review_max_tokens=settings.deepseek_quality_review_max_tokens,
+        max_quality_bundle_chars=settings.deepseek_max_quality_bundle_chars,
         # The Worker owns the total deadline. Give httpx a slightly larger
         # timeout so both layers do not race at the same millisecond.
         request_timeout_seconds=settings.task_timeout_seconds + 5,

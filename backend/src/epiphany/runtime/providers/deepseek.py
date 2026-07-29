@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from epiphany.draft_quality_schemas import REVIEW_PODCAST_DRAFT
 from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
 from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
 from epiphany.runtime.editor_prompts import build_editor_prompt
@@ -29,6 +30,7 @@ from epiphany.runtime.providers.base import (
     ProviderTimeoutError,
     TaskInvocation,
 )
+from epiphany.runtime.quality_prompts import build_quality_review_prompt
 from epiphany.runtime.research_prompts import build_research_prompt
 
 logger = logging.getLogger("epiphany.provider.deepseek")
@@ -81,9 +83,11 @@ class DeepSeekProvider:
         base_url: str = DEFAULT_BASE_URL,
         max_tokens: int = 2_000,
         editor_max_tokens: int = 20_000,
+        quality_review_max_tokens: int = 6_000,
         max_source_chars: int = 24_000,
         max_interview_bundle_chars: int | None = None,
         max_editor_bundle_chars: int = 48_000,
+        max_quality_bundle_chars: int = 80_000,
         request_timeout_seconds: float = 30,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -101,6 +105,8 @@ class DeepSeekProvider:
             raise ValueError("DeepSeek max_tokens must be positive")
         if editor_max_tokens < 1:
             raise ValueError("DeepSeek editor_max_tokens must be positive")
+        if quality_review_max_tokens < 1:
+            raise ValueError("DeepSeek quality_review_max_tokens must be positive")
         if max_source_chars < 1:
             raise ValueError("DeepSeek max_source_chars must be positive")
         resolved_interview_bundle_chars = (
@@ -110,6 +116,8 @@ class DeepSeekProvider:
             raise ValueError("DeepSeek max_interview_bundle_chars must be positive")
         if max_editor_bundle_chars < 1:
             raise ValueError("DeepSeek max_editor_bundle_chars must be positive")
+        if max_quality_bundle_chars < 1:
+            raise ValueError("DeepSeek max_quality_bundle_chars must be positive")
         if request_timeout_seconds <= 0:
             raise ValueError("DeepSeek request timeout must be positive")
 
@@ -119,25 +127,36 @@ class DeepSeekProvider:
         self.base_url = _validated_base_url(base_url)
         self.max_tokens = max_tokens
         self.editor_max_tokens = editor_max_tokens
+        self.quality_review_max_tokens = quality_review_max_tokens
         self.max_source_chars = max_source_chars
         self.max_interview_bundle_chars = resolved_interview_bundle_chars
         self.max_editor_bundle_chars = max_editor_bundle_chars
+        self.max_quality_bundle_chars = max_quality_bundle_chars
         self.request_timeout_seconds = request_timeout_seconds
         self._client = client
 
     async def generate(self, invocation: TaskInvocation) -> ProviderResult:
-        if invocation.kind == BUILD_PODCAST_DRAFT:
+        if invocation.kind == REVIEW_PODCAST_DRAFT:
+            prompt = build_quality_review_prompt(
+                task_input=invocation.input_json,
+                max_bundle_chars=self.max_quality_bundle_chars,
+            )
+            max_tokens = self.quality_review_max_tokens
+            temperature = 0.0
+        elif invocation.kind == BUILD_PODCAST_DRAFT:
             prompt = build_editor_prompt(
                 task_input=invocation.input_json,
                 max_bundle_chars=self.max_editor_bundle_chars,
             )
             max_tokens = self.editor_max_tokens
+            temperature = 0.2
         elif invocation.kind == BUILD_INTERVIEW_SCAFFOLD:
             prompt = build_interview_prompt(
                 task_input=invocation.input_json,
                 max_bundle_chars=self.max_interview_bundle_chars,
             )
             max_tokens = self.max_tokens
+            temperature = 0.2
         else:
             prompt = build_research_prompt(
                 task_kind=invocation.kind,
@@ -145,6 +164,7 @@ class DeepSeekProvider:
                 max_source_chars=self.max_source_chars,
             )
             max_tokens = self.max_tokens
+            temperature = 0.2
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": prompt.messages,
@@ -152,7 +172,7 @@ class DeepSeekProvider:
             "thinking": {"type": "disabled"},
             "max_tokens": max_tokens,
             "stream": False,
-            "temperature": 0.2,
+            "temperature": temperature,
             "user_id": invocation.run_id,
         }
         logger.info(

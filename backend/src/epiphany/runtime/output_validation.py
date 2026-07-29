@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from epiphany.draft_quality_schemas import (
+    REVIEW_PODCAST_DRAFT,
+    validate_model_self_review_output,
+)
 from epiphany.editor_schemas import BUILD_PODCAST_DRAFT, validate_podcast_draft_output
 from epiphany.interview_schemas import (
     BUILD_INTERVIEW_SCAFFOLD,
@@ -37,6 +41,11 @@ def validate_task_output(
         )
     if task_kind == BUILD_PODCAST_DRAFT:
         return validate_podcast_draft_output(
+            task_input=task_input,
+            content=content,
+        )
+    if task_kind == REVIEW_PODCAST_DRAFT:
+        return validate_model_self_review_output(
             task_input=task_input,
             content=content,
         )

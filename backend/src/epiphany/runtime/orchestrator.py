@@ -7,7 +7,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
+from epiphany.draft_quality import (
+    analyze_podcast_draft,
+    build_draft_quality_report,
+)
+from epiphany.draft_quality_schemas import (
+    REVIEW_PODCAST_DRAFT,
+    DeterministicDraftQualityResult,
+    ModelSelfReviewOutput,
+    ModelSelfReviewTaskInput,
+)
+from epiphany.editor_schemas import BUILD_PODCAST_DRAFT, editor_output_reference_keys
 from epiphany.events import append_event
 from epiphany.interview_markdown import interview_scaffold_reference_keys
 from epiphany.interview_schemas import (
@@ -38,6 +48,7 @@ SCAFFOLD_RESEARCH_WORKFLOW_VERSION = "v2"
 INTERVIEW_RESEARCH_WORKFLOW_VERSION = "v3"
 EDITOR_RESEARCH_WORKFLOW_VERSION = "v4"
 MATERIAL_READINESS_WORKFLOW_VERSION = "v5"
+QUALITY_REVIEW_WORKFLOW_VERSION = "v6"
 
 
 class Orchestrator:
@@ -102,10 +113,11 @@ class Orchestrator:
             not in {
                 EDITOR_RESEARCH_WORKFLOW_VERSION,
                 MATERIAL_READINESS_WORKFLOW_VERSION,
+                QUALITY_REVIEW_WORKFLOW_VERSION,
             }
             or run.status != RunStatus.RUNNING
         ):
-            raise ValueError("editor can only be queued for a running v4/v5 episode workflow")
+            raise ValueError("editor can only be queued for a running v4/v5/v6 episode workflow")
 
         task = await self._enqueue_task(
             session,
@@ -145,6 +157,18 @@ class Orchestrator:
         run: Run,
         failed_task: Task,
     ) -> None:
+        if (
+            run.workflow_type == "episode-research"
+            and run.workflow_version == QUALITY_REVIEW_WORKFLOW_VERSION
+            and failed_task.kind == REVIEW_PODCAST_DRAFT
+        ):
+            await self._complete_quality_review_unavailable(
+                session,
+                run=run,
+                failed_task=failed_task,
+            )
+            return
+
         if failed_task.parent_task_id is not None:
             parent = await session.get(Task, failed_task.parent_task_id)
             if parent is not None and parent.status == TaskStatus.RUNNING:
@@ -329,6 +353,13 @@ class Orchestrator:
         run: Run,
         completed_task: Task,
     ) -> None:
+        if completed_task.kind == REVIEW_PODCAST_DRAFT:
+            await self._complete_draft_quality_review(
+                session,
+                run=run,
+                completed_task=completed_task,
+            )
+            return
         if completed_task.kind == BUILD_PODCAST_DRAFT:
             await self._complete_podcast_draft(
                 session,
@@ -470,6 +501,7 @@ class Orchestrator:
             INTERVIEW_RESEARCH_WORKFLOW_VERSION,
             EDITOR_RESEARCH_WORKFLOW_VERSION,
             MATERIAL_READINESS_WORKFLOW_VERSION,
+            QUALITY_REVIEW_WORKFLOW_VERSION,
         }:
             raise ValueError(
                 f"unsupported episode-research workflow version: {run.workflow_version}"
@@ -600,7 +632,10 @@ class Orchestrator:
                     "question_count": question_count,
                 },
             )
-        elif run.workflow_version == MATERIAL_READINESS_WORKFLOW_VERSION:
+        elif run.workflow_version in {
+            MATERIAL_READINESS_WORKFLOW_VERSION,
+            QUALITY_REVIEW_WORKFLOW_VERSION,
+        }:
             await self._pause_for_material_readiness(
                 session,
                 run=run,
@@ -633,8 +668,9 @@ class Orchestrator:
         if run.workflow_version not in {
             EDITOR_RESEARCH_WORKFLOW_VERSION,
             MATERIAL_READINESS_WORKFLOW_VERSION,
+            QUALITY_REVIEW_WORKFLOW_VERSION,
         }:
-            raise ValueError("editor task is only supported by the v4/v5 episode workflow")
+            raise ValueError("editor task is only supported by the v4/v5/v6 episode workflow")
         if completed_task.parent_task_id is not None:
             raise ValueError("editor task must be a sequential root task")
         if completed_task.output_artifact_id is None:
@@ -655,23 +691,416 @@ class Orchestrator:
             event_type="workflow.editor.completed",
             payload={"artifact_id": artifact.id},
         )
+        logger.info(
+            "Editor workflow step completed",
+            extra={
+                "event": "workflow.editor.completed",
+                "run_id": run.id,
+                "task_id": completed_task.id,
+                "artifact_id": artifact.id,
+            },
+        )
+        run.output_artifact_id = artifact.id
+        if run.workflow_version == QUALITY_REVIEW_WORKFLOW_VERSION:
+            await self._enqueue_draft_quality_review(
+                session,
+                run=run,
+                editor_task=completed_task,
+                draft_artifact=artifact,
+            )
+            return
+
         validate_run_transition(run.status, RunStatus.SUCCEEDED)
         run.status = RunStatus.SUCCEEDED
         run.current_step = "complete"
-        run.output_artifact_id = artifact.id
         await append_event(
             session,
             run_id=run.id,
             event_type="run.succeeded",
             payload={"output_artifact_id": artifact.id},
         )
+
+    async def _enqueue_draft_quality_review(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        editor_task: Task,
+        draft_artifact: Artifact,
+    ) -> None:
+        """Persist code-owned metrics before scheduling one advisory Reviewer."""
+
+        draft_content = _without_execution(draft_artifact.content_json)
+        deterministic = analyze_podcast_draft(
+            draft=draft_content,
+            creative_brief=run.input_json["creative_brief"],
+            config=run.input_json["draft_quality"],
+        )
+        metrics_key = f"draft-metrics:{run.id}:{draft_artifact.id}:v1"
+        metrics_artifact = (
+            await session.execute(select(Artifact).where(Artifact.idempotency_key == metrics_key))
+        ).scalar_one_or_none()
+        if metrics_artifact is None:
+            metrics_artifact = Artifact(
+                run_id=run.id,
+                task_id=editor_task.id,
+                kind="draft_metrics_report",
+                content_json=deterministic.model_dump(mode="json"),
+                idempotency_key=metrics_key,
+            )
+            session.add(metrics_artifact)
+            await session.flush()
+            await append_event(
+                session,
+                run_id=run.id,
+                task_id=editor_task.id,
+                event_type="workflow.draft_metrics.evaluated",
+                payload={
+                    "draft_artifact_id": draft_artifact.id,
+                    "metrics_artifact_id": metrics_artifact.id,
+                    "deterministic_score": deterministic.deterministic_score,
+                    "hard_blocker_count": sum(
+                        finding.status == "blocker" for finding in deterministic.findings
+                    ),
+                    "warning_count": sum(
+                        finding.status == "warning" for finding in deterministic.findings
+                    ),
+                    "estimated_duration_minutes": (
+                        deterministic.metrics.estimated_duration_minutes
+                    ),
+                },
+            )
+            logger.info(
+                "Draft deterministic metrics evaluated",
+                extra={
+                    "event": "workflow.draft_metrics.evaluated",
+                    "run_id": run.id,
+                    "task_id": editor_task.id,
+                    "artifact_id": metrics_artifact.id,
+                    "draft_artifact_id": draft_artifact.id,
+                    "deterministic_score": deterministic.deterministic_score,
+                    "estimated_duration_minutes": (
+                        deterministic.metrics.estimated_duration_minutes
+                    ),
+                },
+            )
+
+        allowed_keys = set(editor_output_reference_keys(draft_content))
+        segment_candidates = [
+            *editor_task.input_json.get("initial_source_segments", []),
+            *editor_task.input_json.get("supplemental_source_segments", []),
+        ]
+        segments_by_key = {
+            (
+                str(segment["source_id"]),
+                str(segment["source_segment_id"]),
+            ): segment
+            for segment in segment_candidates
+        }
+        missing_keys = allowed_keys - set(segments_by_key)
+        if missing_keys:
+            raise ValueError("draft quality review source material is unavailable")
+        sorted_keys = sorted(allowed_keys)
+        review_input = ModelSelfReviewTaskInput.model_validate(
+            {
+                "task_kind": REVIEW_PODCAST_DRAFT,
+                "draft_artifact_id": draft_artifact.id,
+                "creative_brief": run.input_json["creative_brief"],
+                "quality_config": run.input_json["draft_quality"],
+                "podcast_draft": draft_content,
+                "allowed_source_refs": [
+                    {
+                        "source_id": source_id,
+                        "source_segment_id": segment_id,
+                    }
+                    for source_id, segment_id in sorted_keys
+                ],
+                "referenced_source_segments": [
+                    {
+                        "source_id": source_id,
+                        "source_segment_id": segment_id,
+                        "text": str(segments_by_key[(source_id, segment_id)]["text"]),
+                    }
+                    for source_id, segment_id in sorted_keys
+                ],
+            }
+        ).model_dump(mode="json")
+        review_task = await self._enqueue_task(
+            session,
+            run=run,
+            kind=REVIEW_PODCAST_DRAFT,
+            agent_type="quality_reviewer",
+            parent_task_id=None,
+            input_json=review_input,
+        )
+        await append_event(
+            session,
+            run_id=run.id,
+            task_id=review_task.id,
+            event_type="workflow.draft_self_review.queued",
+            payload={
+                "draft_artifact_id": draft_artifact.id,
+                "metrics_artifact_id": metrics_artifact.id,
+                "review_task_id": review_task.id,
+                "source_segment_count": len(sorted_keys),
+            },
+        )
         logger.info(
-            "Editor workflow completed",
+            "Draft quality self-review queued",
             extra={
-                "event": "workflow.editor.completed",
+                "event": "workflow.draft_self_review.queued",
+                "run_id": run.id,
+                "task_id": review_task.id,
+                "draft_artifact_id": draft_artifact.id,
+                "metrics_artifact_id": metrics_artifact.id,
+                "hard_blocker_count": sum(
+                    finding.status == "blocker" for finding in deterministic.findings
+                ),
+                "warning_count": sum(
+                    finding.status == "warning" for finding in deterministic.findings
+                ),
+            },
+        )
+
+    async def _complete_draft_quality_review(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        completed_task: Task,
+    ) -> None:
+        if (
+            run.workflow_version != QUALITY_REVIEW_WORKFLOW_VERSION
+            or completed_task.parent_task_id is not None
+            or completed_task.output_artifact_id is None
+        ):
+            raise ValueError("quality Reviewer is only supported by a sequential v6 workflow")
+
+        review_artifact = await session.get(Artifact, completed_task.output_artifact_id)
+        if (
+            review_artifact is None
+            or review_artifact.run_id != run.id
+            or review_artifact.kind != f"{REVIEW_PODCAST_DRAFT}_result"
+        ):
+            raise ValueError("quality Reviewer output artifact is missing or invalid")
+        draft_artifact_id = str(completed_task.input_json["draft_artifact_id"])
+        draft_artifact = await session.get(Artifact, draft_artifact_id)
+        if (
+            draft_artifact is None
+            or draft_artifact.run_id != run.id
+            or draft_artifact.kind != f"{BUILD_PODCAST_DRAFT}_result"
+        ):
+            raise ValueError("quality Reviewer draft artifact is missing or invalid")
+        deterministic = await self._load_deterministic_quality(
+            session,
+            run=run,
+            draft_artifact_id=draft_artifact.id,
+        )
+        review = ModelSelfReviewOutput.model_validate(
+            _without_execution(review_artifact.content_json)
+        )
+        report_artifact = await self._persist_draft_quality_report(
+            session,
+            run=run,
+            draft_artifact=draft_artifact,
+            deterministic=deterministic,
+            model_self_review=review,
+            reviewer_artifact=review_artifact,
+            reviewer_task_id=completed_task.id,
+        )
+        await append_event(
+            session,
+            run_id=run.id,
+            task_id=completed_task.id,
+            event_type="workflow.draft_self_review.completed",
+            payload={
+                "draft_artifact_id": draft_artifact.id,
+                "review_artifact_id": review_artifact.id,
+                "quality_report_id": report_artifact.id,
+            },
+        )
+        logger.info(
+            "Draft quality self-review completed",
+            extra={
+                "event": "workflow.draft_self_review.completed",
                 "run_id": run.id,
                 "task_id": completed_task.id,
-                "artifact_id": artifact.id,
+                "artifact_id": review_artifact.id,
+                "draft_artifact_id": draft_artifact.id,
+                "quality_report_id": report_artifact.id,
+            },
+        )
+        await self._succeed_after_quality_review(
+            session,
+            run=run,
+            draft_artifact=draft_artifact,
+            report_artifact=report_artifact,
+        )
+
+    async def _complete_quality_review_unavailable(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        failed_task: Task,
+    ) -> None:
+        """Degrade safely: a Reviewer failure must not hide a valid Draft."""
+
+        draft_artifact_id = str(failed_task.input_json.get("draft_artifact_id", ""))
+        draft_artifact = await session.get(Artifact, draft_artifact_id)
+        if (
+            draft_artifact is None
+            or draft_artifact.run_id != run.id
+            or draft_artifact.kind != f"{BUILD_PODCAST_DRAFT}_result"
+        ):
+            raise ValueError("failed quality Reviewer has no valid Draft to preserve")
+        deterministic = await self._load_deterministic_quality(
+            session,
+            run=run,
+            draft_artifact_id=draft_artifact.id,
+        )
+        report_artifact = await self._persist_draft_quality_report(
+            session,
+            run=run,
+            draft_artifact=draft_artifact,
+            deterministic=deterministic,
+            model_self_review=None,
+            reviewer_artifact=None,
+            reviewer_task_id=failed_task.id,
+            unavailable_reason=failed_task.error_code or "model_self_review_unavailable",
+        )
+        await append_event(
+            session,
+            run_id=run.id,
+            task_id=failed_task.id,
+            event_type="workflow.draft_self_review.unavailable",
+            payload={
+                "draft_artifact_id": draft_artifact.id,
+                "quality_report_id": report_artifact.id,
+                "error_code": failed_task.error_code,
+            },
+        )
+        await self._succeed_after_quality_review(
+            session,
+            run=run,
+            draft_artifact=draft_artifact,
+            report_artifact=report_artifact,
+        )
+
+    async def _load_deterministic_quality(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        draft_artifact_id: str,
+    ) -> DeterministicDraftQualityResult:
+        metrics_artifact = (
+            await session.execute(
+                select(Artifact).where(
+                    Artifact.idempotency_key == f"draft-metrics:{run.id}:{draft_artifact_id}:v1"
+                )
+            )
+        ).scalar_one_or_none()
+        if metrics_artifact is None or metrics_artifact.kind != "draft_metrics_report":
+            raise ValueError("deterministic Draft metrics are missing")
+        return DeterministicDraftQualityResult.model_validate(metrics_artifact.content_json)
+
+    async def _persist_draft_quality_report(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        draft_artifact: Artifact,
+        deterministic: DeterministicDraftQualityResult,
+        model_self_review: ModelSelfReviewOutput | None,
+        reviewer_artifact: Artifact | None,
+        reviewer_task_id: str,
+        unavailable_reason: str | None = None,
+    ) -> Artifact:
+        report_key = f"draft-quality:{run.id}:{draft_artifact.id}:v1"
+        existing = (
+            await session.execute(select(Artifact).where(Artifact.idempotency_key == report_key))
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing
+
+        editor_execution = draft_artifact.content_json.get("_execution", {})
+        reviewer_execution = (
+            reviewer_artifact.content_json.get("_execution", {})
+            if reviewer_artifact is not None
+            else {}
+        )
+        report = build_draft_quality_report(
+            deterministic=deterministic,
+            model_self_review=model_self_review,
+            editor_provider=editor_execution.get("provider"),
+            editor_model=editor_execution.get("model"),
+            reviewer_provider=reviewer_execution.get("provider"),
+            reviewer_model=reviewer_execution.get("model"),
+            unavailable_reason=unavailable_reason,
+        )
+        artifact = Artifact(
+            run_id=run.id,
+            task_id=reviewer_task_id,
+            kind="draft_quality_report",
+            content_json=report.model_dump(mode="json"),
+            idempotency_key=report_key,
+        )
+        session.add(artifact)
+        await session.flush()
+        await append_event(
+            session,
+            run_id=run.id,
+            task_id=reviewer_task_id,
+            event_type="workflow.draft_quality.completed",
+            payload={
+                "draft_artifact_id": draft_artifact.id,
+                "quality_report_id": artifact.id,
+                "quality_decision": report.decision,
+                "experimental_overall_score": report.experimental_overall_score,
+                "hard_blocker_count": sum(
+                    finding.status == "blocker" for finding in deterministic.findings
+                ),
+                "warning_count": sum(
+                    finding.status == "warning" for finding in deterministic.findings
+                ),
+                "requires_human_review": report.requires_human_review,
+            },
+        )
+        return artifact
+
+    async def _succeed_after_quality_review(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        draft_artifact: Artifact,
+        report_artifact: Artifact,
+    ) -> None:
+        validate_run_transition(run.status, RunStatus.SUCCEEDED)
+        run.status = RunStatus.SUCCEEDED
+        run.current_step = "complete"
+        run.output_artifact_id = draft_artifact.id
+        await append_event(
+            session,
+            run_id=run.id,
+            event_type="run.succeeded",
+            payload={
+                "output_artifact_id": draft_artifact.id,
+                "quality_report_id": report_artifact.id,
+            },
+        )
+        logger.info(
+            "Draft quality workflow completed",
+            extra={
+                "event": "workflow.draft_quality.completed",
+                "run_id": run.id,
+                "artifact_id": draft_artifact.id,
+                "quality_report_id": report_artifact.id,
+                "quality_decision": report_artifact.content_json["decision"],
+                "experimental_overall_score": report_artifact.content_json.get(
+                    "experimental_overall_score"
+                ),
             },
         )
 

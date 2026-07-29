@@ -10,6 +10,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from epiphany.db import Database
+from epiphany.draft_feedback_schemas import (
+    DraftUserFeedback,
+    DraftUserFeedbackRecord,
+    DraftUserFeedbackRequest,
+    DraftUserFeedbackResponse,
+)
+from epiphany.draft_quality_markdown import render_draft_quality_markdown
+from epiphany.draft_quality_schemas import (
+    DraftQualityReport,
+    DraftQualityReportRecord,
+)
 from epiphany.editor_schemas import (
     BUILD_PODCAST_DRAFT,
     MAX_EDITOR_SUPPLEMENTAL_SEGMENTS,
@@ -45,6 +56,7 @@ from epiphany.runtime.orchestrator import (
     EDITOR_RESEARCH_WORKFLOW_VERSION,
     INTERVIEW_RESEARCH_WORKFLOW_VERSION,
     MATERIAL_READINESS_WORKFLOW_VERSION,
+    QUALITY_REVIEW_WORKFLOW_VERSION,
     Orchestrator,
 )
 from epiphany.schemas import (
@@ -94,6 +106,18 @@ class RunResumeNotAllowed(ValueError):
 
 
 class RunResumeConflict(ValueError):
+    pass
+
+
+class DraftFeedbackNotAllowed(ValueError):
+    pass
+
+
+class DraftFeedbackConflict(ValueError):
+    pass
+
+
+class DraftQualityReportNotReady(ValueError):
     pass
 
 
@@ -161,7 +185,12 @@ class RunService:
             )
             workflow_version = (
                 (
-                    MATERIAL_READINESS_WORKFLOW_VERSION
+                    (
+                        QUALITY_REVIEW_WORKFLOW_VERSION
+                        if research_payload.draft_quality is not None
+                        and research_payload.draft_quality.enabled
+                        else MATERIAL_READINESS_WORKFLOW_VERSION
+                    )
                     if research_payload.creative_brief is not None
                     else EDITOR_RESEARCH_WORKFLOW_VERSION
                 )
@@ -253,6 +282,204 @@ class RunService:
             )
             events = (await session.execute(statement)).scalars().all()
             return [EventView.model_validate(event) for event in events]
+
+    async def submit_draft_feedback(
+        self,
+        run_id: str,
+        *,
+        feedback: DraftUserFeedbackRequest,
+    ) -> DraftUserFeedbackResponse:
+        """Append one idempotent user assessment without changing the Run."""
+
+        async with self._run_mutation_lock:
+            async with self.database.sessions() as session, session.begin():
+                run = await session.get(Run, run_id)
+                if run is None:
+                    raise RunNotFound(run_id)
+                if run.status != RunStatus.SUCCEEDED or run.output_artifact_id is None:
+                    raise DraftFeedbackNotAllowed(
+                        "draft feedback requires a succeeded Run with a podcast draft"
+                    )
+
+                draft = await session.get(Artifact, run.output_artifact_id)
+                if (
+                    draft is None
+                    or draft.run_id != run.id
+                    or draft.kind != f"{BUILD_PODCAST_DRAFT}_result"
+                ):
+                    raise DraftFeedbackNotAllowed(
+                        "draft feedback requires a succeeded Run with a podcast draft"
+                    )
+
+                content = DraftUserFeedback(
+                    submission_id=feedback.submission_id,
+                    draft_artifact_id=draft.id,
+                    feedback_origin=feedback.feedback_origin,
+                    human_signal_eligible=feedback.feedback_origin == "human",
+                    decision=feedback.decision,
+                    overall_rating=feedback.overall_rating,
+                    voice_match_rating=feedback.voice_match_rating,
+                    recordability_rating=feedback.recordability_rating,
+                    usefulness_rating=feedback.usefulness_rating,
+                    tone_fit_rating=feedback.tone_fit_rating,
+                    would_record_as_is=feedback.would_record_as_is,
+                    observed_duration_minutes=feedback.observed_duration_minutes,
+                    comment=feedback.comment,
+                )
+                content_json = content.model_dump(mode="json")
+                feedback_key = stable_id(
+                    "feedback",
+                    f"{run.id}:{feedback.submission_id}",
+                )
+                idempotency_key = f"draft-feedback:{feedback_key}"
+                artifact = (
+                    await session.execute(
+                        select(Artifact).where(Artifact.idempotency_key == idempotency_key)
+                    )
+                ).scalar_one_or_none()
+                idempotent_replay = artifact is not None
+                if artifact is not None:
+                    try:
+                        existing = DraftUserFeedback.model_validate(artifact.content_json)
+                    except ValidationError as error:
+                        raise DraftFeedbackConflict(
+                            "existing feedback artifact is invalid"
+                        ) from error
+                    if existing.model_dump(mode="json") != content_json:
+                        raise DraftFeedbackConflict(
+                            "submission_id was already used with different feedback"
+                        )
+                else:
+                    artifact = Artifact(
+                        run_id=run.id,
+                        task_id=None,
+                        kind="draft_user_feedback",
+                        content_json=content_json,
+                        idempotency_key=idempotency_key,
+                    )
+                    session.add(artifact)
+                    await session.flush()
+                    await append_event(
+                        session,
+                        run_id=run.id,
+                        event_type="workflow.draft_quality.feedback_recorded",
+                        payload={
+                            "feedback_artifact_id": artifact.id,
+                            "feedback_origin": content.feedback_origin,
+                            "human_signal_eligible": content.human_signal_eligible,
+                            "overall_rating": content.overall_rating,
+                            "feedback_decision": content.decision,
+                            "would_record_as_is": content.would_record_as_is,
+                        },
+                    )
+                artifact_view = ArtifactView.model_validate(artifact)
+
+        logger.info(
+            (
+                "Draft feedback replay returned existing artifact"
+                if idempotent_replay
+                else "Draft feedback recorded"
+            ),
+            extra={
+                "event": (
+                    "workflow.draft_quality.feedback_replayed"
+                    if idempotent_replay
+                    else "workflow.draft_quality.feedback_recorded"
+                ),
+                "run_id": run_id,
+                "artifact_id": artifact_view.id,
+                "feedback_origin": content.feedback_origin,
+                "feedback_rating": content.overall_rating,
+                "feedback_decision": content.decision,
+                "human_signal_eligible": content.human_signal_eligible,
+            },
+        )
+        return DraftUserFeedbackResponse(
+            idempotent_replay=idempotent_replay,
+            feedback=content,
+            artifact=artifact_view,
+        )
+
+    async def list_draft_feedback(
+        self,
+        run_id: str,
+    ) -> list[DraftUserFeedbackRecord]:
+        async with self.database.sessions() as session:
+            if await session.get(Run, run_id) is None:
+                raise RunNotFound(run_id)
+            artifacts = (
+                (
+                    await session.execute(
+                        select(Artifact)
+                        .where(
+                            Artifact.run_id == run_id,
+                            Artifact.kind == "draft_user_feedback",
+                        )
+                        .order_by(Artifact.created_at, Artifact.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            try:
+                return [
+                    DraftUserFeedbackRecord(
+                        feedback=DraftUserFeedback.model_validate(artifact.content_json),
+                        artifact=ArtifactView.model_validate(artifact),
+                    )
+                    for artifact in artifacts
+                ]
+            except ValidationError as error:
+                raise DraftFeedbackConflict("persisted feedback artifact is invalid") from error
+
+    async def get_draft_quality_report(
+        self,
+        run_id: str,
+    ) -> DraftQualityReportRecord:
+        async with self.database.sessions() as session:
+            if await session.get(Run, run_id) is None:
+                raise RunNotFound(run_id)
+            artifact = (
+                await session.execute(
+                    select(Artifact)
+                    .where(
+                        Artifact.run_id == run_id,
+                        Artifact.kind == "draft_quality_report",
+                    )
+                    .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if artifact is None:
+                raise DraftQualityReportNotReady("draft quality report is not ready")
+            try:
+                return DraftQualityReportRecord(
+                    report=DraftQualityReport.model_validate(artifact.content_json),
+                    artifact=ArtifactView.model_validate(artifact),
+                )
+            except ValidationError as error:
+                raise DraftQualityReportNotReady(
+                    "persisted draft quality report is invalid"
+                ) from error
+
+    async def export_draft_quality_markdown(self, run_id: str) -> str:
+        record = await self.get_draft_quality_report(run_id)
+        try:
+            markdown = render_draft_quality_markdown(record.report.model_dump(mode="json"))
+        except (ValidationError, ValueError, TypeError) as error:
+            raise DraftQualityReportNotReady("draft quality report cannot be exported") from error
+        logger.info(
+            "Draft quality Markdown exported",
+            extra={
+                "event": "run.draft_quality_markdown.exported",
+                "run_id": run_id,
+                "artifact_id": record.artifact.id,
+                "quality_report_id": record.artifact.id,
+                "quality_decision": record.report.decision,
+                "markdown_char_count": len(markdown),
+            },
+        )
+        return markdown
 
     async def export_interview_scaffold_markdown(self, run_id: str) -> str:
         async with self.database.sessions() as session:
@@ -428,7 +655,10 @@ class RunService:
             versioned_run = await version_session.get(Run, run_id)
             if versioned_run is None:
                 raise RunNotFound(run_id)
-            if versioned_run.workflow_version == MATERIAL_READINESS_WORKFLOW_VERSION:
+            if versioned_run.workflow_version in {
+                MATERIAL_READINESS_WORKFLOW_VERSION,
+                QUALITY_REVIEW_WORKFLOW_VERSION,
+            }:
                 return await self._resume_material_readiness_run(
                     run_id,
                     checkpoint=checkpoint,
@@ -787,7 +1017,11 @@ class RunService:
                 else:
                     if (
                         run.workflow_type != "episode-research"
-                        or run.workflow_version != MATERIAL_READINESS_WORKFLOW_VERSION
+                        or run.workflow_version
+                        not in {
+                            MATERIAL_READINESS_WORKFLOW_VERSION,
+                            QUALITY_REVIEW_WORKFLOW_VERSION,
+                        }
                         or run.status != RunStatus.WAITING_FOR_USER
                         or run.current_step != "awaiting_more_material"
                     ):

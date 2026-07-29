@@ -72,6 +72,7 @@ async def test_v5_keeps_waiting_across_insufficient_rounds_then_queues_one_edito
                 "must_include": ["重新开始"],
                 "avoid_patterns": ["空泛排比", "强行金句"],
             },
+            "draft_quality": {"enabled": False},
         },
     )
 

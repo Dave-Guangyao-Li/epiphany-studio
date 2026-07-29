@@ -4,9 +4,18 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
+from epiphany.draft_feedback_schemas import (
+    DraftUserFeedbackRecord,
+    DraftUserFeedbackRequest,
+    DraftUserFeedbackResponse,
+)
+from epiphany.draft_quality_schemas import DraftQualityReportRecord
 from epiphany.human_input_schemas import ResumeRunRequest
 from epiphany.schemas import CreateRunRequest, EventView, ResumeRunResponse, RunView
 from epiphany.services import (
+    DraftFeedbackConflict,
+    DraftFeedbackNotAllowed,
+    DraftQualityReportNotReady,
     InterviewScaffoldExportNotReady,
     InvalidRunPayload,
     PodcastDraftExportNotReady,
@@ -127,6 +136,43 @@ async def export_show_notes_markdown(
     )
 
 
+@router.get(
+    "/runs/{run_id}/quality-report",
+    response_model=DraftQualityReportRecord,
+)
+async def get_draft_quality_report(
+    run_id: str,
+    service: RunServiceDependency,
+) -> DraftQualityReportRecord:
+    try:
+        return await service.get_draft_quality_report(run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except DraftQualityReportNotReady as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.get(
+    "/runs/{run_id}/exports/quality-report.md",
+    response_class=Response,
+)
+async def export_draft_quality_markdown(
+    run_id: str,
+    service: RunServiceDependency,
+) -> Response:
+    try:
+        markdown = await service.export_draft_quality_markdown(run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except DraftQualityReportNotReady as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="quality-report-{run_id}.md"'},
+    )
+
+
 @router.get("/runs/{run_id}/events", response_model=list[EventView])
 async def get_events(
     run_id: str,
@@ -137,6 +183,39 @@ async def get_events(
         return await service.list_events(run_id, after=after)
     except RunNotFound as error:
         raise HTTPException(status_code=404, detail="run not found") from error
+
+
+@router.post(
+    "/runs/{run_id}/quality-feedback",
+    response_model=DraftUserFeedbackResponse,
+)
+async def submit_draft_feedback(
+    run_id: str,
+    body: DraftUserFeedbackRequest,
+    service: RunServiceDependency,
+) -> DraftUserFeedbackResponse:
+    try:
+        return await service.submit_draft_feedback(run_id, feedback=body)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except (DraftFeedbackNotAllowed, DraftFeedbackConflict) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.get(
+    "/runs/{run_id}/quality-feedback",
+    response_model=list[DraftUserFeedbackRecord],
+)
+async def list_draft_feedback(
+    run_id: str,
+    service: RunServiceDependency,
+) -> list[DraftUserFeedbackRecord]:
+    try:
+        return await service.list_draft_feedback(run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except DraftFeedbackConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.post("/runs/{run_id}/resume", response_model=ResumeRunResponse)
