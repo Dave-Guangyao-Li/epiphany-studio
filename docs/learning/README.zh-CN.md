@@ -49,7 +49,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 13. [M3.1：一次接近真实用户的 DeepSeek 全流程验收](m3-1-realistic-e2e.zh-CN.md)
 14. [M3.1 realistic E2E：运行证据与内容复核](m3-1-realistic-e2e-evidence.zh-CN.md)
 15. [M3.2：Editor 与最终 Markdown](m3-2-editor-final-markdown.zh-CN.md)
-16. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+16. [M3.3：Creative Brief、目标时长与素材充足度](m3-3-creative-brief-material-readiness.zh-CN.md)
+17. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -70,6 +71,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M3.1 | 生成脚手架后持久化等待用户，并用补充 Source 幂等恢复 | 完成 | 本次 focused commit |
 | M3.1 E2E | 用完整合成素材跑通 Source、Checkpoint、Resume、日志、数据库与 Markdown | Fake + DeepSeek 全流程通过 | 本次 focused commit |
 | M3.2 | Resume 后运行 grounded Editor，导出口播稿和 Show Notes | Fake + DeepSeek E2E 已验证 | 本次 focused commit |
+| M3.3 | 保存创作目标，素材明显不足时持久等待，补足后才运行 Editor | 178 tests + Fake E2E 已验证 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -78,18 +80,19 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 ```text
 导入一段测试文字
   -> 保存 Source 和 SourceSegment
-  -> 用 topic 和 source_ids 创建 episode-research v4 Run
+  -> 用 topic、source_ids 和 creative_brief 创建 episode-research v5 Run
   -> Manager 分发两个 Child Task
   -> Timeline / Theme Fake Researcher 并行执行
   -> 严格校验结构和来源引用
   -> 合并为 episode_research_bundle
   -> 串行 Interviewer 生成 build_interview_scaffold_result
   -> 严格校验脚手架内每一处来源引用
-  -> 持久化停在 waiting_for_user
+  -> 确定性生成 MaterialReadinessReport
+  -> 素材不足时持久化停在 awaiting_more_material
   -> 通过 API 安全导出带引用的 Markdown
   -> 用户把补充口述文字导入为新 Source
-  -> 用 Source ID 幂等 Resume
-  -> 自动排队 Editor Task
+  -> 用 Source ID 幂等 Resume 并累计多轮材料
+  -> 达到目标时长下限后才自动排队 Editor Task
   -> 严格校验初始来源与补充来源引用
   -> 导出口播稿和 Show Notes Markdown
   -> 用户最终审稿
@@ -131,12 +134,22 @@ GET /runs/{run_id}/exports/show-notes.md
 v1 / v2 / v3 在途 Run 继续保持各自历史语义。M3.2 也复用已有表，没有新增
 migration。
 
+M3.3 为带 `creative_brief` 的新请求使用 v5；不带 Brief 时继续使用 v4。
+Brief 支持 10 / 15 / 30 分钟、可调字符速度、场景、听众、沟通目标、语气和
+表达约束。Readiness 只读取 Scaffold 引用的初始片段，并用普通代码计算，
+不花模型调用；初始不足或任一补充轮次
+仍不足时都可靠停在 `awaiting_more_material`。达到门槛后，Editor 会收到
+所有已接受补充材料与同一 Brief。正常一轮补充的 v5 最终为 5 Tasks /
+8 Artifacts / 4 ModelCalls。
+
 这里的 `voice_note_transcript` 是“已经转成文字的口述”这一 Source 分类，
 不是麦克风或语音识别功能。当前可以在 Swagger 中直接输入或粘贴文字。
 
-不打开 Swagger 也可以通过 `python -m epiphany.checkpoint_e2e --provider
-fake --execute` 一条命令复现整条 v4 链路。当前 M3.2 Fake E2E、完整
-151 项测试和显式 DeepSeek 四调用 E2E 均通过。2026-07-29 的合成素材 live
+不打开 Swagger 也可以通过
+`python -m epiphany.quality_contract_e2e --provider fake --execute`
+一条命令复现整条 v5 链路，包括真正关闭 App 后从 SQLite 恢复。当前 M3.3
+Fake E2E、完整 178 项测试均通过；真实 DeepSeek 验证留到 M3.4 加入模型
+自评后一次完成，避免重复费用。M3.2 的 2026-07-29 合成素材 live
 Run 使用 16,667 input tokens、9,468 output tokens、73,018 ms Provider
 耗时，本地估算 CNY 0.035603；估算不是厂商账单，内容仍需人工审核。
 上一阶段的真实验收
@@ -149,6 +162,8 @@ Run 使用 16,667 input tokens、9,468 output tokens、73,018 ms Provider
 
 - DeepSeek 真实 API 已用完整合成素材评价脚手架质量，但尚未使用个人隐私素材；
 - 已能生成带引用的播客候选稿，但仍需本人审核事实、语气和取舍；
+- 已能请求目标时长并检测明显素材短缺，但尚未生成 Draft Quality Report；
+- 尚未加入模型自评打分；这属于 M3.4，且只能作为 advisory；
 - 尚未提供可视化采访脚手架和播客稿 editor；
 - M3.2 的 Editor 已通过合成素材真实调用，但尚未使用个人隐私素材验收；
 - 尚未提供麦克风录音、音频上传、STT 或语音克隆；

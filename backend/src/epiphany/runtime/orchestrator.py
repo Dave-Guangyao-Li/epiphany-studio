@@ -5,11 +5,21 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
 from epiphany.events import append_event
-from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
-from epiphany.models import Artifact, Run, Task
+from epiphany.interview_markdown import interview_scaffold_reference_keys
+from epiphany.interview_schemas import (
+    BUILD_INTERVIEW_SCAFFOLD,
+    InterviewScaffoldOutput,
+)
+from epiphany.material_readiness import (
+    MaterialReadinessReport,
+    ReadinessFollowUpQuestion,
+    assess_material_readiness,
+)
+from epiphany.models import Artifact, Run, Source, Task
 from epiphany.research_schemas import THEME_RESEARCH, TIMELINE_RESEARCH
 from epiphany.state_machine import (
     RunStatus,
@@ -27,6 +37,7 @@ LEGACY_RESEARCH_WORKFLOW_VERSION = "v1"
 SCAFFOLD_RESEARCH_WORKFLOW_VERSION = "v2"
 INTERVIEW_RESEARCH_WORKFLOW_VERSION = "v3"
 EDITOR_RESEARCH_WORKFLOW_VERSION = "v4"
+MATERIAL_READINESS_WORKFLOW_VERSION = "v5"
 
 
 class Orchestrator:
@@ -87,10 +98,14 @@ class Orchestrator:
 
         if (
             run.workflow_type != "episode-research"
-            or run.workflow_version != EDITOR_RESEARCH_WORKFLOW_VERSION
+            or run.workflow_version
+            not in {
+                EDITOR_RESEARCH_WORKFLOW_VERSION,
+                MATERIAL_READINESS_WORKFLOW_VERSION,
+            }
             or run.status != RunStatus.RUNNING
         ):
-            raise ValueError("editor can only be queued for a running v4 episode workflow")
+            raise ValueError("editor can only be queued for a running v4/v5 episode workflow")
 
         task = await self._enqueue_task(
             session,
@@ -109,6 +124,8 @@ class Orchestrator:
                 "editor_task_id": task.id,
                 "scaffold_artifact_id": input_json["scaffold_artifact_id"],
                 "submission_artifact_id": input_json["submission_artifact_id"],
+                "submission_artifact_count": len(input_json.get("submission_artifact_ids", []))
+                or 1,
             },
         )
         logger.info(
@@ -452,6 +469,7 @@ class Orchestrator:
             SCAFFOLD_RESEARCH_WORKFLOW_VERSION,
             INTERVIEW_RESEARCH_WORKFLOW_VERSION,
             EDITOR_RESEARCH_WORKFLOW_VERSION,
+            MATERIAL_READINESS_WORKFLOW_VERSION,
         }:
             raise ValueError(
                 f"unsupported episode-research workflow version: {run.workflow_version}"
@@ -582,6 +600,13 @@ class Orchestrator:
                     "question_count": question_count,
                 },
             )
+        elif run.workflow_version == MATERIAL_READINESS_WORKFLOW_VERSION:
+            await self._pause_for_material_readiness(
+                session,
+                run=run,
+                completed_task=completed_task,
+                scaffold=artifact,
+            )
         else:
             raise ValueError(
                 f"unsupported episode-research workflow version: {run.workflow_version}"
@@ -605,8 +630,11 @@ class Orchestrator:
         run: Run,
         completed_task: Task,
     ) -> None:
-        if run.workflow_version != EDITOR_RESEARCH_WORKFLOW_VERSION:
-            raise ValueError("editor task is only supported by the v4 episode workflow")
+        if run.workflow_version not in {
+            EDITOR_RESEARCH_WORKFLOW_VERSION,
+            MATERIAL_READINESS_WORKFLOW_VERSION,
+        }:
+            raise ValueError("editor task is only supported by the v4/v5 episode workflow")
         if completed_task.parent_task_id is not None:
             raise ValueError("editor task must be a sequential root task")
         if completed_task.output_artifact_id is None:
@@ -644,6 +672,175 @@ class Orchestrator:
                 "run_id": run.id,
                 "task_id": completed_task.id,
                 "artifact_id": artifact.id,
+            },
+        )
+
+    async def persist_material_readiness(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        report: MaterialReadinessReport,
+        round_key: str,
+        task_id: str | None,
+    ) -> Artifact:
+        """Commit a deterministic, text-free readiness report exactly once."""
+
+        idempotency_key = f"material-readiness:{run.id}:{run.workflow_version}:{round_key}"
+        existing = (
+            await session.execute(
+                select(Artifact).where(Artifact.idempotency_key == idempotency_key)
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing
+
+        artifact = Artifact(
+            run_id=run.id,
+            task_id=task_id,
+            kind="material_readiness_report",
+            content_json=report.model_dump(mode="json"),
+            idempotency_key=idempotency_key,
+        )
+        session.add(artifact)
+        await session.flush()
+        await append_event(
+            session,
+            run_id=run.id,
+            task_id=task_id,
+            event_type="workflow.material_readiness.evaluated",
+            payload={
+                "artifact_id": artifact.id,
+                "status": report.status,
+                "target_duration_minutes": report.target_duration_minutes,
+                "available_source_char_count": (report.counts.available_source_char_count),
+                "additional_source_chars_needed": (report.additional_source_chars_needed),
+                "source_count": (
+                    report.counts.initial_source_count + report.counts.supplemental_source_count
+                ),
+                "segment_count": (
+                    report.counts.initial_segment_count + report.counts.supplemental_segment_count
+                ),
+                "method": report.method,
+            },
+        )
+        logger.info(
+            "Material readiness evaluated",
+            extra={
+                "event": "workflow.material_readiness.evaluated",
+                "run_id": run.id,
+                "task_id": task_id,
+                "artifact_id": artifact.id,
+                "readiness_status": report.status,
+                "target_duration_minutes": report.target_duration_minutes,
+                "available_source_char_count": (report.counts.available_source_char_count),
+                "additional_source_chars_needed": (report.additional_source_chars_needed),
+            },
+        )
+        return artifact
+
+    async def _pause_for_material_readiness(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        completed_task: Task,
+        scaffold: Artifact,
+    ) -> None:
+        try:
+            parsed_scaffold = InterviewScaffoldOutput.model_validate(
+                _without_execution(scaffold.content_json)
+            )
+        except (ValueError, TypeError) as error:
+            raise ValueError("interview scaffold cannot seed material readiness") from error
+
+        sources = (
+            (
+                await session.execute(
+                    select(Source)
+                    .where(Source.id.in_(run.input_json["source_ids"]))
+                    .options(selectinload(Source.segments))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        segments_by_key = {
+            (source.id, segment.id): segment for source in sources for segment in source.segments
+        }
+        reference_keys = interview_scaffold_reference_keys(
+            _without_execution(scaffold.content_json)
+        )
+        missing_reference_keys = [key for key in reference_keys if key not in segments_by_key]
+        if missing_reference_keys:
+            raise ValueError("interview scaffold references unavailable initial source material")
+        initial_segments = [
+            {
+                "source_id": source_id,
+                "source_segment_id": segment_id,
+                "text": segments_by_key[(source_id, segment_id)].text,
+            }
+            for source_id, segment_id in reference_keys
+        ]
+        follow_up_questions = [
+            ReadinessFollowUpQuestion(
+                prompt=question.prompt,
+                purpose=question.purpose,
+                source_refs=question.source_refs,
+            )
+            for section in parsed_scaffold.sections
+            for question in section.questions
+        ][:6]
+        report = assess_material_readiness(
+            creative_brief=run.input_json["creative_brief"],
+            initial_source_segments=initial_segments,
+            supplemental_source_segments=[],
+            follow_up_questions=follow_up_questions,
+        )
+        readiness_artifact = await self.persist_material_readiness(
+            session,
+            run=run,
+            report=report,
+            round_key="initial",
+            task_id=completed_task.id,
+        )
+
+        validate_run_transition(run.status, RunStatus.WAITING_FOR_USER)
+        run.status = RunStatus.WAITING_FOR_USER
+        run.current_step = "awaiting_more_material"
+        # The scaffold remains the human-facing checkpoint output. Readiness is
+        # independently addressable through the Artifact list and export API.
+        run.output_artifact_id = scaffold.id
+        checkpoint_payload = {
+            "checkpoint": "material_readiness",
+            "output_artifact_id": scaffold.id,
+            "readiness_artifact_id": readiness_artifact.id,
+            "readiness_status": report.status,
+            "additional_source_chars_needed": report.additional_source_chars_needed,
+        }
+        await append_event(
+            session,
+            run_id=run.id,
+            event_type="workflow.user_input.requested",
+            payload=checkpoint_payload,
+        )
+        await append_event(
+            session,
+            run_id=run.id,
+            event_type="run.waiting_for_user",
+            payload=checkpoint_payload,
+        )
+        logger.info(
+            "Run waiting for supplemental material",
+            extra={
+                "event": "run.waiting_for_user",
+                "run_id": run.id,
+                "task_id": completed_task.id,
+                "artifact_id": scaffold.id,
+                "readiness_artifact_id": readiness_artifact.id,
+                "checkpoint": "material_readiness",
+                "readiness_status": report.status,
+                "additional_source_chars_needed": (report.additional_source_chars_needed),
             },
         )
 

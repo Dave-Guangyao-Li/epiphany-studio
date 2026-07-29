@@ -227,6 +227,60 @@ Alembic 和 Fake E2E 通过。2026-07-29 还使用同一合成 fixture 显式完
 9,468 output tokens、73,018 ms Provider 耗时，本地估算 CNY 0.035603；
 估算值不是厂商账单，最终内容仍需人工审阅。
 
+### M3.3：Creative Brief、目标时长与素材充足度
+
+- [x] Run 创建时保存 Creative Brief
+- [x] 支持 10 / 15 / 30 分钟目标时长与可调口播速度
+- [x] Editor 前生成确定性 `MaterialReadinessReport`
+- [x] 素材明显不足时进入第二个持久检查点
+- [x] 多轮补充 Source、幂等 Resume 与重启恢复
+- [x] 合成 Source / 补充材料的自动 Fake E2E
+
+首版 Readiness 只计算去重后的非空白素材字符、初始与补充材料是否存在、
+来源多样性，以及相对于目标时长的保守字符下限。默认按每分钟 280 个字符、
+上下 15% 容差估算；这些值可以随 Creative Brief 调整，不代表真实录音速度。
+
+素材明显不足时，系统不会要求 Editor 用重复段落凑够时长，而是持久化停在
+`waiting_for_user / awaiting_more_material`。没有新的有效 Resume，就不创建
+Editor Task、不增加该次 ModelCall 或费用。补充材料达到门槛后，才继续沿用
+M3.2 的 grounded Editor 和 Markdown 导出。
+
+验收使用隐私安全的合成初始 Source 与补充口述自动完成，不要求开发者每次
+真人口述。三份初始 Source 原文共有 2,106 个非空白字符；按 Scaffold 引用
+最小披露后，Readiness 实际使用 488 个。补充 2,215 个后合计 2,703 个，
+越过 2,380 门槛并进入 Editor。暂停时为 4 Tasks / 5 Artifacts /
+3 ModelCalls，最终为 5 / 8 / 4。E2E 完全关闭并重启 App，确认等待状态、
+事件、调用与费用没有变化；Resume 重放也没有重复排队。Fake 全流程零
+Token、零费用。Synthetic fixture 只证明工程流程和合同有效，不能算作真实
+用户体验或个人声音验证。
+
+M3.3 还恢复了初始素材最小披露，原子拒绝重复 Source 和累计第 501 个补充
+Segment，移除了隐藏的 20 轮死锁，并把 Editor 默认输出 ceiling 调整为
+20,000 tokens，使 30 分钟 Brief 不再与旧的 4,000/6,000 限制冲突。
+
+Readiness 同时按稳定 Segment 引用和规范化正文去重；把同一段文字复制到
+另一个 Source，既不会增加可用字符，也不会伪造来源多样性。
+
+M3.3 完成时 178 项测试、Ruff、Alembic、diff check 和独立 Fake E2E
+全部通过；没有重复进行一次付费 DeepSeek E2E，真实生成与模型自评将在
+M3.4 合并后用同一 fixture 一次性验证。
+
+详细学习与本地排查步骤见
+`docs/learning/m3-3-creative-brief-material-readiness.zh-CN.md`。
+
+### M3.4：Draft Quality Report 与用户反馈（下一步）
+
+- [ ] 确定性时长、重复、引用与模板化表达检查
+- [ ] 严格 Schema 的独立模型评价 Task
+- [ ] 每项评价提供 Draft 位置和逐字证据
+- [ ] 代码计算最终 decision，模型不能覆盖硬性 blocker
+- [ ] 模型评价与真实用户反馈分开保存
+
+模型自评属于 M3.4，不进入 M3.3 的素材充足度门槛。首版即使使用与 Editor
+相同的模型，也必须明确标记为 self-review 和 advisory；它不能冒充人工评价，
+也不能输出一个不可解释的“AI 概率”。自动 E2E 可以提交
+`synthetic_test` 反馈验证接口，但产品指标不得把它计为真实用户认可。
+
 ## M4：可靠性与 Trace
 
 - [ ] timeout / bounded retry

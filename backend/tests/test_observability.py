@@ -29,6 +29,9 @@ def test_json_log_contains_request_and_domain_context() -> None:
         record.model_call_id = "mcall_test"
         record.provider = "deepseek"
         record.model = "deepseek-v4-flash"
+        record.readiness_status = "needs_more_material"
+        record.additional_source_chars_needed = 274
+        record.editor_queued = False
         RequestContextFilter().filter(record)
         payload = json.loads(JsonFormatter().format(record))
     finally:
@@ -42,3 +45,6 @@ def test_json_log_contains_request_and_domain_context() -> None:
     assert payload["model_call_id"] == "mcall_test"
     assert payload["provider"] == "deepseek"
     assert payload["model"] == "deepseek-v4-flash"
+    assert payload["readiness_status"] == "needs_more_material"
+    assert payload["additional_source_chars_needed"] == 274
+    assert payload["editor_queued"] is False

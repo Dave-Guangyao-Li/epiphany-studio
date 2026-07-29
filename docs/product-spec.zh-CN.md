@@ -80,15 +80,17 @@ Subagent 对话。
 1. 用户创建一个 Episode Project。
 2. 导入 Markdown 或纯文本素材。
 3. 系统切分内容并保留来源信息。
-4. 用户选择主题并启动 `EpisodeRun`。
+4. 用户选择主题、目标时长、听众和语气，并启动 `EpisodeRun`。
 5. 两个只读 Subagent 并行工作：
    - Timeline Researcher：事件、阶段、时间线；
    - Theme Researcher：主题、认知变化、原话和细节。
 6. Manager 确定性合并研究结果，随后由一个串行根 Interviewer 生成素材缺口
    和采访脚手架。
-7. Workflow 进入 `waiting_for_user`。
-8. 用户输入新的口述转录或手动补充。
-9. Editor 生成口播稿和 Show Notes。
+7. 系统用确定性规则估算现有素材能否支撑目标时长，Workflow 进入
+   `waiting_for_user`。
+8. 用户输入新的口述转录或手动补充；明显不足时可以继续多轮补充。
+9. 素材达到门槛后，Editor 按同一份 Creative Brief 生成口播稿和
+   Show Notes。
 10. 用户审核、修改并导出 Markdown。
 
 ## 5. MVP 范围
@@ -268,6 +270,41 @@ lease、fencing、retry、timeout、cancel、startup recovery 和模型调用预
 预算不足时第四次调用会在进入 Provider 前失败。M3.2 复用现有表，不需要
 migration。操作日志和 Events 仍不得保存素材正文、Prompt、模型完整输出或
 API Key。
+
+### Creative Brief 与素材充足度
+
+M3.3 为选择提供 Creative Brief 的新 Run 使用 workflow v5；没有 Brief 的
+请求仍创建 v4，以保留既有 API 与持久 Run 语义。
+
+- Brief 严格保存 `target_duration_minutes=10|15|30`、可调口播字符速度、
+  场景、目标听众、沟通目标、最多三个语气词、必须涵盖内容和避免模式；
+- 默认以每分钟 280 个非空白中文字符和上下 15% 作为可解释的首版估算，
+  这不是实际录音测速；
+- Interviewer 完成后，确定性代码只读取 Scaffold 实际引用的初始
+  SourceSegment，写入一份不复制原文的 `material_readiness_report`；
+- `ready` 要求存在初始与补充素材、至少两个独立 Source，且去重后的素材
+  字符达到目标区间下限；
+- 去重同时检查稳定 Segment 引用和去除空白后的正文内容；复制同一段文字到
+  新 Source 不能增加字符量或伪造来源多样性；
+- 未达到门槛时，Run 持久停在
+  `waiting_for_user / awaiting_more_material`，不创建 Editor Task，也不
+  产生那次 ModelCall 或费用；
+- `checkpoint=material_readiness` 的每次合法 Resume 都把补充 Source 引用
+  幂等保存。仍不足时再次等待；达到门槛后，把所有已接受轮次一起交给唯一
+  Editor；
+- 初始 Source 或历史补充 Source 不能换一个 submission ID 重复计数；累计
+  补充材料最多 500 个 Segment，超限请求整批拒绝且不留下部分 Artifact/Event；
+- Editor Prompt 使用同一 Brief 约束目标时长、听众和语气，但来源事实仍有
+  更高优先级。素材不足时宁可短，不得通过重复、空话或虚构凑长度。默认
+  Editor 输出 ceiling 为 20,000 tokens，以容纳 30 分钟目标；实际费用仍按
+  返回 Token 计算，模型是否达到目标由 M3.4 的 Draft Quality Report 检查。
+
+Readiness 只判断“是否明显短缺”，不评价叙事、具体性、自然口语或个人声音。
+这些属于 M3.4 的 Draft Quality Report。模型自评必须标记为 advisory，
+synthetic fixture 或 Mock 用户反馈不能冒充真实用户认可。
+
+M3.3 继续复用 Run input 与 Artifact，不新增数据库表。自动合成 E2E 会关闭
+并重启 App，证明等待状态不会丢失或偷偷继续；合成材料只用于工程验收。
 
 ## 7. 成功标准
 

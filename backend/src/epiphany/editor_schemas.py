@@ -13,10 +13,12 @@ from pydantic import (
 )
 
 from epiphany.interview_schemas import InterviewScaffoldOutput
+from epiphany.quality_contract_schemas import CreativeBrief
 from epiphany.research_schemas import ResearchSourceSegment
 from epiphany.schemas import SourceReference
 
 BUILD_PODCAST_DRAFT = "build_podcast_draft"
+MAX_EDITOR_SUPPLEMENTAL_SEGMENTS = 500
 SourceReferenceKey = tuple[str, str]
 
 
@@ -92,14 +94,15 @@ class PodcastDraftTaskInput(BaseModel):
     topic: str = Field(min_length=1, max_length=200)
     scaffold_artifact_id: str = Field(min_length=1, max_length=200)
     submission_artifact_id: str = Field(min_length=1, max_length=200)
+    submission_artifact_ids: list[str] = Field(default_factory=list)
+    creative_brief: CreativeBrief | None = None
     interview_scaffold: InterviewScaffoldOutput
     initial_source_segments: list[ResearchSourceSegment] = Field(
         min_length=1,
-        max_length=500,
     )
     supplemental_source_segments: list[ResearchSourceSegment] = Field(
         min_length=1,
-        max_length=500,
+        max_length=MAX_EDITOR_SUPPLEMENTAL_SEGMENTS,
     )
 
     @field_validator("topic")
@@ -114,6 +117,13 @@ class PodcastDraftTaskInput(BaseModel):
     def source_segments_must_be_unique_and_cover_scaffold(
         self,
     ) -> PodcastDraftTaskInput:
+        if self.submission_artifact_ids:
+            if len(self.submission_artifact_ids) != len(set(self.submission_artifact_ids)):
+                raise ValueError("submission_artifact_ids must be unique")
+            if self.submission_artifact_id not in self.submission_artifact_ids:
+                raise ValueError(
+                    "submission_artifact_id must be included in submission_artifact_ids"
+                )
         initial_keys = [_segment_key(segment) for segment in self.initial_source_segments]
         supplemental_keys = [_segment_key(segment) for segment in self.supplemental_source_segments]
         if len(initial_keys) != len(set(initial_keys)):

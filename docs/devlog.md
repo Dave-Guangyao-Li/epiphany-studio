@@ -2,6 +2,70 @@
 
 ## 2026-07-29
 
+### M3.3 Creative Brief and deterministic material readiness
+
+- Added a strict `CreativeBrief` for episode intent instead of leaving
+  duration and audience only inside an Editor Prompt. The first contract
+  supports 10, 15, or 30 minutes, an adjustable characters-per-minute estimate,
+  scenario, audience, communication goal, tone, required content, and patterns
+  to avoid.
+- Added a deterministic `MaterialReadinessReport`. It counts unique
+  non-whitespace Source characters, initial and supplemental Sources,
+  SourceSegments, source diversity, and duplicate/overlapping segments. It
+  reports the configured target range, estimated supported range, missing
+  character count, stable gap codes, and bounded follow-up questions.
+- Kept Source text out of the persistable readiness report. The calculator may
+  read SourceSegments in memory, but the report contains only aggregate counts,
+  limitations, and SourceReferences attached to follow-up questions.
+- Added workflow v5 and a second durable checkpoint:
+  `waiting_for_user / awaiting_more_material`. Obvious shortage is a normal,
+  recoverable product state, not a Provider failure. The workflow does not
+  queue Editor or spend its model call until another idempotent Source
+  submission passes the same deterministic gate.
+- Chose a transparent v1 estimate of 280 non-whitespace characters per minute
+  with a 15% tolerance. Both values are explicit assumptions and must not be
+  described as measured recording speed or a semantic content-quality score.
+- Added cumulative multi-round supplemental Source handling. An insufficient
+  submission is persisted and returns to the same checkpoint; later rounds
+  include all accepted material. Replaying one submission is idempotent, and
+  only the first ready round queues the single Editor.
+- Restored minimum disclosure for v5: readiness and Editor receive only the
+  initial SourceSegments actually referenced by the validated Scaffold, not
+  every paragraph from every initial Source. Duplicate initial/prior Sources
+  are rejected before persistence.
+- Deduplicate evidence both by stable SourceSegment reference and by normalized
+  text content, so copied text under another Source cannot inflate evidence
+  volume or source diversity.
+- Made the cumulative supplemental boundary explicit and atomic: 500 segments
+  are accepted, the 501st is rejected without a submission Artifact, Event, or
+  Run-state change. Removed the hidden 20-round submission-history limit.
+- Removed the obsolete 4,000-token Prompt constraint and raised the default
+  DeepSeek Editor output ceiling from 6,000 to 20,000 tokens so a 30-minute
+  Brief is not internally contradictory. Billing remains based on actual
+  returned tokens.
+- Added a privacy-safe synthetic E2E that imports three initial Sources,
+  reaches the checkpoint, fully restarts the App against the same SQLite
+  database, imports a synthetic supplemental transcript, replays Resume, and
+  completes Editor plus all Markdown exports. The raw initial Sources contain
+  2,106 non-whitespace characters, but the Scaffold-grounded minimum-disclosure
+  set contains 488 against a 2,380 lower bound; after a 2,215-character
+  supplement it measures 2,703 and becomes ready.
+- The accepted E2E shape is 4 Tasks / 5 Artifacts / 3 ModelCalls while waiting
+  and 5 / 8 / 4 after Editor. Every check passed with Fake Provider, zero
+  tokens and zero cost. The test also verifies structured-log redaction and no
+  task, event, model-call, or cost changes across restart.
+- Synthetic fixtures verify engineering behavior; they are not counted as real
+  user validation.
+- Deferred draft scoring and model self-review to M3.4. A future evaluator must
+  use strict evidence-bearing output, remain separate from deterministic
+  blockers, and never present Mock feedback or a same-model self-review as
+  human approval.
+- This slice uses Run input plus Artifacts and requires no database migration.
+  All 178 tests, Ruff lint/format, Alembic upgrade/check, diff whitespace
+  validation, and the independent Fake E2E pass. A second paid DeepSeek run
+  was intentionally deferred until M3.4 can validate generation and self-review
+  together.
+
 ### M3.2 grounded Editor and final Markdown
 
 - Versioned new `episode-research` Runs as v4 while preserving persisted v1,
