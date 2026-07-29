@@ -6,11 +6,12 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from epiphany.config import Settings
 from epiphany.db import Database
 from epiphany.main import create_app
-from epiphany.models import Run
+from epiphany.models import Run, Task
 from epiphany.runtime.providers import FakeProvider, ProviderResult, TaskInvocation
 from epiphany.runtime.worker import Worker
 from epiphany.services import RunService
@@ -31,7 +32,9 @@ async def _import_source(database: Database) -> str:
 
 async def test_episode_research_fans_out_and_fans_in(
     runtime: tuple[Database, RunService, Worker],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="epiphany.orchestrator")
     database, service, worker = runtime
     source_id = await _import_source(database)
 
@@ -53,12 +56,18 @@ async def test_episode_research_fans_out_and_fans_in(
         "theme_research",
     }
     assert all(task.status == "queued" for task in children)
+    async with database.sessions() as session:
+        child_rows = (
+            await session.execute(select(Task).where(Task.id.in_([task.id for task in children])))
+        ).scalars()
+        assert all(task.input_json["topic"] == "五年后重新开始录播客" for task in child_rows)
 
     assert await worker.run_until_idle() == 3
 
     completed = await service.get_run(created.id)
-    assert completed.status == "succeeded"
-    assert completed.current_step == "complete"
+    assert completed.workflow_version == "v3"
+    assert completed.status == "waiting_for_user"
+    assert completed.current_step == "awaiting_interview_response"
     assert completed.model_call_count == 3
     assert len(completed.tasks) == 4
     assert len(completed.artifacts) == 4
@@ -77,6 +86,7 @@ async def test_episode_research_fans_out_and_fans_in(
     )
     assert scaffold_task.parent_task_id is None
     assert scaffold_task.status == "succeeded"
+    assert all(task.status not in {"queued", "running"} for task in completed.tasks)
     assert completed.output_artifact_id == next(
         artifact.id
         for artifact in completed.artifacts
@@ -96,7 +106,28 @@ async def test_episode_research_fans_out_and_fans_in(
     assert event_types.index("workflow.interview_scaffold.queued") < event_types.index(
         "workflow.interview_scaffold.completed"
     )
-    assert event_types[-1] == "run.succeeded"
+    assert event_types.index("workflow.interview_scaffold.completed") < event_types.index(
+        "workflow.user_input.requested"
+    )
+    assert event_types.index("workflow.user_input.requested") < event_types.index(
+        "run.waiting_for_user"
+    )
+    assert "run.succeeded" not in event_types
+    assert event_types[-1] == "run.waiting_for_user"
+
+    waiting_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "run.waiting_for_user"
+    ]
+    assert len(waiting_records) == 1
+    waiting_record = waiting_records[0]
+    assert waiting_record.run_id == completed.id
+    assert waiting_record.task_id == scaffold_task.id
+    assert waiting_record.artifact_id == completed.output_artifact_id
+    assert waiting_record.checkpoint == "interview_scaffold"
+    assert waiting_record.section_count == 3
+    assert waiting_record.question_count == 6
 
 
 async def test_in_flight_v1_research_run_finishes_without_new_topic_or_scaffold(
@@ -136,6 +167,47 @@ async def test_in_flight_v1_research_run_finishes_without_new_topic_or_scaffold(
     assert all(task.kind != "build_interview_scaffold" for task in completed.tasks)
 
 
+async def test_in_flight_v2_research_run_finishes_at_interview_scaffold(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    source_id = await _import_source(database)
+    created = await service.create_run(
+        workflow_type="episode-research",
+        payload={
+            "topic": "五年后重新开始录播客",
+            "source_ids": [source_id],
+        },
+    )
+    async with database.sessions() as session, session.begin():
+        run = await session.get(Run, created.id)
+        assert run is not None
+        run.workflow_version = "v2"
+
+    assert await worker.run_until_idle() == 3
+    completed = await service.get_run(created.id)
+
+    assert completed.workflow_version == "v2"
+    assert completed.status == "succeeded"
+    assert completed.current_step == "complete"
+    assert completed.model_call_count == 3
+    assert len(completed.tasks) == 4
+    assert len(completed.artifacts) == 4
+    assert completed.output_artifact_id == next(
+        artifact.id
+        for artifact in completed.artifacts
+        if artifact.kind == "build_interview_scaffold_result"
+    )
+    assert all(task.status not in {"queued", "running"} for task in completed.tasks)
+
+    events = await service.list_events(created.id)
+    event_types = [event.type for event in events]
+    assert "workflow.interview_scaffold.completed" in event_types
+    assert "workflow.user_input.requested" not in event_types
+    assert "run.waiting_for_user" not in event_types
+    assert event_types[-1] == "run.succeeded"
+
+
 class ConcurrencyProbeProvider(FakeProvider):
     def __init__(self) -> None:
         self.active = 0
@@ -170,7 +242,7 @@ async def test_research_children_execute_concurrently(
         },
     )
     assert await worker.run_until_idle() == 3
-    assert (await service.get_run(created.id)).status == "succeeded"
+    assert (await service.get_run(created.id)).status == "waiting_for_user"
     assert probe.max_active == 2
     scaffold_start = probe.execution_order.index(("start", "build_interview_scaffold"))
     assert probe.execution_order.index(("finish", "timeline_research")) < scaffold_start
@@ -412,7 +484,9 @@ async def test_episode_research_api_demo_and_missing_source(tmp_path: Path) -> N
 
         assert await app.state.worker.run_until_idle() == 3
         completed = await client.get(f"/runs/{run_id}")
-        assert completed.json()["status"] == "succeeded"
+        assert completed.json()["workflow_version"] == "v3"
+        assert completed.json()["status"] == "waiting_for_user"
+        assert completed.json()["current_step"] == "awaiting_interview_response"
         assert len(completed.json()["tasks"]) == 4
         assert len(completed.json()["artifacts"]) == 4
         assert completed.json()["model_call_count"] == 3

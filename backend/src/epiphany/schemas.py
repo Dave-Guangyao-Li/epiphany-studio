@@ -76,6 +76,13 @@ class RunView(BaseModel):
     model_calls: list[ModelCallView]
 
 
+class ResumeRunResponse(BaseModel):
+    resumed: bool
+    idempotent_replay: bool
+    submission_artifact_id: str
+    run: RunView
+
+
 class EventView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

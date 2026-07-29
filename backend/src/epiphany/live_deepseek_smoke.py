@@ -177,7 +177,8 @@ def build_sanitized_summary(
         for currency, micros in sorted(cost_micros_by_currency.items())
     }
     passed = (
-        run.status == "succeeded"
+        run.status == "waiting_for_user"
+        and run.current_step == "awaiting_interview_response"
         and processed_tasks == MAX_MODEL_CALLS
         and run.model_call_count == MAX_MODEL_CALLS
         and len(run.model_calls) == MAX_MODEL_CALLS

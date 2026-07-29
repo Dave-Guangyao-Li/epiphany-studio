@@ -33,6 +33,9 @@ _SYSTEM_PROMPT = """
 只返回一个合法 JSON object，不要 Markdown 代码块，不要解释。不得新增素材没有支持
 的人生事实。所有 known_context、transition、question 和 material_gap 都必须引用
 allowed_source_refs 中真实存在的 source_id 与 source_segment_id。
+必须保留素材对事件状态的限定：计划、草稿、愿望、准备或尝试不得改写成“已完成”
+“已发布”或其他已经发生的事实。合法 source_refs 只证明来源可追踪，不代表允许
+扩写来源的语义。
 """.strip()
 
 _INTERVIEW_INSTRUCTIONS = """
@@ -40,13 +43,20 @@ _INTERVIEW_INSTRUCTIONS = """
 而不是替用户直接写完整文章。
 
 要求：
-1. 生成 2 到 6 个有叙事顺序的 section。
+1. 生成恰好 3 个有叙事顺序的 section。每个 section 只保留 1 条 known_context、
+   2 个 question；每个 question 只给 2 个 keywords。
 2. title 必须逐字等于输入 topic。episode_intent、opening、closing、section title、
    known_context 和 transition 都要带 allowed_source_refs；transition 要像口播时可以
    自然说出的过渡。
 3. question 要具体、能唤起细节或认知变化；每题提供 purpose、1 到 8 个 keywords。
 4. material_gaps 只指出现有证据尚未回答的缺口，不得把猜测写成事实。
 5. 所有 source_refs 只能原样复制 allowed_source_refs 中的对象。
+6. 严格保留素材中的事实状态和时间：计划、草稿、愿望、尝试或尚未确定的事情，
+   不得改写成已经完成、发布、实现或确认的事实。known_context 的每个事实必须能被
+   所引用的原文直接推出；证据不足时改成 question 或 material_gap。
+7. 保持精简：每个 source_refs 列表只选最直接的 1 到 2 个引用，不要复制全部引用；
+   material_gaps 最多 2 条；所有自然语言字段尽量不超过 80 个汉字。整个 JSON 必须
+   能在 3000 tokens 内完整返回。
 
 JSON 格式：
 {
@@ -117,7 +127,7 @@ JSON 格式：
 def build_interview_prompt(
     *,
     task_input: dict[str, Any],
-    max_source_chars: int,
+    max_bundle_chars: int,
 ) -> InterviewPrompt:
     try:
         parsed = InterviewScaffoldTaskInput.model_validate(task_input)
@@ -143,9 +153,9 @@ def build_interview_prompt(
         separators=(",", ":"),
     )
     source_char_count = len(serialized_payload)
-    if source_char_count > max_source_chars:
+    if source_char_count > max_bundle_chars:
         raise ProviderInputTooLargeError(
-            f"interview research bundle exceeds the configured {max_source_chars} character limit"
+            f"interview research bundle exceeds the configured {max_bundle_chars} character limit"
         )
 
     user_content = (

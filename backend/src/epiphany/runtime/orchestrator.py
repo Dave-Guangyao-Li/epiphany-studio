@@ -23,7 +23,8 @@ FAKE_WORKFLOW_STEPS = ("prepare_sources", "fake_research", "assemble_artifact")
 RESEARCH_MANAGER = "research_manager"
 RESEARCH_CHILDREN = (TIMELINE_RESEARCH, THEME_RESEARCH)
 LEGACY_RESEARCH_WORKFLOW_VERSION = "v1"
-INTERVIEW_RESEARCH_WORKFLOW_VERSION = "v2"
+SCAFFOLD_RESEARCH_WORKFLOW_VERSION = "v2"
+INTERVIEW_RESEARCH_WORKFLOW_VERSION = "v3"
 
 
 class Orchestrator:
@@ -239,6 +240,7 @@ class Orchestrator:
                 parent_task_id=manager.id,
                 input_json={
                     "task_kind": kind,
+                    "topic": run.input_json["topic"],
                     "source_segments": source_segments,
                 },
             )
@@ -392,7 +394,10 @@ class Orchestrator:
                 },
             )
             return
-        if run.workflow_version != INTERVIEW_RESEARCH_WORKFLOW_VERSION:
+        if run.workflow_version not in {
+            SCAFFOLD_RESEARCH_WORKFLOW_VERSION,
+            INTERVIEW_RESEARCH_WORKFLOW_VERSION,
+        }:
             raise ValueError(
                 f"unsupported episode-research workflow version: {run.workflow_version}"
             )
@@ -474,16 +479,55 @@ class Orchestrator:
                 "question_count": question_count,
             },
         )
-        validate_run_transition(run.status, RunStatus.SUCCEEDED)
-        run.status = RunStatus.SUCCEEDED
-        run.current_step = "complete"
         run.output_artifact_id = artifact.id
-        await append_event(
-            session,
-            run_id=run.id,
-            event_type="run.succeeded",
-            payload={"output_artifact_id": artifact.id},
-        )
+        if run.workflow_version == SCAFFOLD_RESEARCH_WORKFLOW_VERSION:
+            validate_run_transition(run.status, RunStatus.SUCCEEDED)
+            run.status = RunStatus.SUCCEEDED
+            run.current_step = "complete"
+            await append_event(
+                session,
+                run_id=run.id,
+                event_type="run.succeeded",
+                payload={"output_artifact_id": artifact.id},
+            )
+        elif run.workflow_version == INTERVIEW_RESEARCH_WORKFLOW_VERSION:
+            validate_run_transition(run.status, RunStatus.WAITING_FOR_USER)
+            run.status = RunStatus.WAITING_FOR_USER
+            run.current_step = "awaiting_interview_response"
+            await append_event(
+                session,
+                run_id=run.id,
+                event_type="workflow.user_input.requested",
+                payload={
+                    "checkpoint": "interview_scaffold",
+                    "output_artifact_id": artifact.id,
+                },
+            )
+            await append_event(
+                session,
+                run_id=run.id,
+                event_type="run.waiting_for_user",
+                payload={
+                    "checkpoint": "interview_scaffold",
+                    "output_artifact_id": artifact.id,
+                },
+            )
+            logger.info(
+                "Run waiting for user input",
+                extra={
+                    "event": "run.waiting_for_user",
+                    "run_id": run.id,
+                    "task_id": completed_task.id,
+                    "artifact_id": artifact.id,
+                    "checkpoint": "interview_scaffold",
+                    "section_count": len(sections),
+                    "question_count": question_count,
+                },
+            )
+        else:
+            raise ValueError(
+                f"unsupported episode-research workflow version: {run.workflow_version}"
+            )
         logger.info(
             "Interview scaffold completed",
             extra={

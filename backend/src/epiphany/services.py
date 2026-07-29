@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 
@@ -9,11 +10,24 @@ from sqlalchemy.orm import selectinload
 
 from epiphany.db import Database
 from epiphany.events import append_event
-from epiphany.interview_markdown import render_interview_scaffold_markdown
+from epiphany.human_input_schemas import INTERVIEW_SCAFFOLD_CHECKPOINT
+from epiphany.ids import stable_id
+from epiphany.interview_markdown import (
+    SourceCitation,
+    interview_scaffold_reference_keys,
+    render_interview_scaffold_markdown,
+)
 from epiphany.models import Artifact, Event, Run, Source, Task
 from epiphany.research_schemas import EpisodeResearchPayload
 from epiphany.runtime.orchestrator import INTERVIEW_RESEARCH_WORKFLOW_VERSION, Orchestrator
-from epiphany.schemas import ArtifactView, EventView, ModelCallView, RunView, TaskView
+from epiphany.schemas import (
+    ArtifactView,
+    EventView,
+    ModelCallView,
+    ResumeRunResponse,
+    RunView,
+    TaskView,
+)
 from epiphany.state_machine import (
     RunStatus,
     TaskStatus,
@@ -44,10 +58,24 @@ class InterviewScaffoldExportNotReady(ValueError):
     pass
 
 
+class RunResumeNotAllowed(ValueError):
+    pass
+
+
+class RunResumeConflict(ValueError):
+    pass
+
+
 class RunService:
     def __init__(self, database: Database, orchestrator: Orchestrator) -> None:
         self.database = database
         self.orchestrator = orchestrator
+        # The MVP is explicitly single-process. Every Run mutation that can
+        # compete at a human checkpoint shares this lock, so Resume and Cancel
+        # cannot both cross the same waiting-state boundary. The Artifact
+        # unique key remains the durable duplicate-data guard for Resume in
+        # SQLite. Cross-process replay semantics are a later deployment concern.
+        self._run_mutation_lock = asyncio.Lock()
 
     async def create_run(
         self,
@@ -192,7 +220,10 @@ class RunService:
             run = await session.get(Run, run_id)
             if run is None:
                 raise RunNotFound(run_id)
-            if run.status != RunStatus.SUCCEEDED or run.output_artifact_id is None:
+            if (
+                run.status not in {RunStatus.WAITING_FOR_USER, RunStatus.SUCCEEDED}
+                or run.output_artifact_id is None
+            ):
                 raise InterviewScaffoldExportNotReady("interview scaffold is not ready for export")
 
             artifact = await session.get(Artifact, run.output_artifact_id)
@@ -209,10 +240,42 @@ class RunService:
                 key: value for key, value in artifact.content_json.items() if key != "_execution"
             }
             try:
-                markdown = render_interview_scaffold_markdown(content)
+                reference_keys = interview_scaffold_reference_keys(content)
             except (ValueError, TypeError) as error:
                 raise InterviewScaffoldExportNotReady(
                     "interview scaffold output is invalid"
+                ) from error
+
+            referenced_source_ids = sorted({source_id for source_id, _ in reference_keys})
+            sources = (
+                (
+                    await session.execute(
+                        select(Source)
+                        .where(Source.id.in_(referenced_source_ids))
+                        .options(selectinload(Source.segments))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            required_keys = set(reference_keys)
+            source_citations = {
+                (source.id, segment.id): SourceCitation(
+                    title=source.title,
+                    segment_position=segment.position,
+                )
+                for source in sources
+                for segment in source.segments
+                if (source.id, segment.id) in required_keys
+            }
+            try:
+                markdown = render_interview_scaffold_markdown(
+                    content,
+                    source_citations=source_citations,
+                )
+            except (ValueError, TypeError) as error:
+                raise InterviewScaffoldExportNotReady(
+                    "interview scaffold source metadata is unavailable"
                 ) from error
 
         logger.info(
@@ -222,59 +285,269 @@ class RunService:
                 "run_id": run_id,
                 "artifact_id": artifact.id,
                 "markdown_char_count": len(markdown),
+                "source_citation_count": len(reference_keys),
             },
         )
         return markdown
 
-    async def cancel_run(self, run_id: str) -> RunView:
-        async with self.database.sessions() as session, session.begin():
-            run = await session.get(Run, run_id)
-            if run is None:
-                raise RunNotFound(run_id)
-            if run.status in {
-                RunStatus.SUCCEEDED,
-                RunStatus.FAILED,
-                RunStatus.CANCELLED,
-            }:
-                raise RunAlreadyTerminal(run.status)
+    async def resume_run(
+        self,
+        run_id: str,
+        *,
+        checkpoint: str,
+        submission_id: str,
+        source_ids: list[str],
+    ) -> ResumeRunResponse:
+        async with self._run_mutation_lock:
+            resumed = False
+            idempotent_replay = False
+            source_count = len(source_ids)
+            segment_count = 0
+            submission_artifact_id: str
+            idempotency_key = stable_id(
+                "human_input",
+                "\x00".join([run_id, checkpoint, submission_id]),
+            )
 
-            validate_run_transition(run.status, RunStatus.CANCELLED)
-            run.status = RunStatus.CANCELLED
-            run.cancel_requested_at = datetime.now(UTC)
+            async with self.database.sessions() as session, session.begin():
+                run = await session.get(Run, run_id)
+                if run is None:
+                    raise RunNotFound(run_id)
 
-            tasks = (
-                await session.execute(
-                    select(Task).where(
-                        Task.run_id == run_id,
-                        Task.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]),
+                existing = (
+                    await session.execute(
+                        select(Artifact).where(
+                            Artifact.run_id == run.id,
+                            Artifact.idempotency_key == idempotency_key,
+                        )
                     )
-                )
-            ).scalars()
-            for task in tasks:
-                validate_task_transition(task.status, TaskStatus.CANCELLED)
-                task.status = TaskStatus.CANCELLED
-                task.lease_token = None
-                task.lease_expires_at = None
+                ).scalar_one_or_none()
+                if existing is not None:
+                    existing_content = existing.content_json
+                    if (
+                        existing.kind != "user_material_submission"
+                        or existing_content.get("checkpoint") != checkpoint
+                        or existing_content.get("submission_id") != submission_id
+                        or existing_content.get("source_ids") != source_ids
+                    ):
+                        logger.warning(
+                            "Resume submission conflicted with an existing idempotency key",
+                            extra={
+                                "event": "run.resume.rejected",
+                                "run_id": run.id,
+                                "checkpoint": checkpoint,
+                                "source_count": source_count,
+                                "error_code": "resume_submission_conflict",
+                            },
+                        )
+                        raise RunResumeConflict(
+                            "submission_id was already used with different material"
+                        )
+                    submission_artifact_id = existing.id
+                    segment_count = len(existing_content.get("source_refs", []))
+                    idempotent_replay = True
+                else:
+                    if (
+                        run.workflow_type != "episode-research"
+                        or run.workflow_version != INTERVIEW_RESEARCH_WORKFLOW_VERSION
+                        or run.status != RunStatus.WAITING_FOR_USER
+                        or run.current_step != "awaiting_interview_response"
+                    ):
+                        logger.warning(
+                            "Run rejected Resume outside the interview checkpoint",
+                            extra={
+                                "event": "run.resume.rejected",
+                                "run_id": run.id,
+                                "checkpoint": checkpoint,
+                                "source_count": source_count,
+                                "status": run.status,
+                                "error_code": "run_resume_not_allowed",
+                            },
+                        )
+                        raise RunResumeNotAllowed(
+                            "run is not waiting for interview scaffold material"
+                        )
+                    if checkpoint != INTERVIEW_SCAFFOLD_CHECKPOINT:
+                        raise RunResumeNotAllowed("run is not waiting at this checkpoint")
+
+                    scaffold = (
+                        await session.get(Artifact, run.output_artifact_id)
+                        if run.output_artifact_id is not None
+                        else None
+                    )
+                    if (
+                        scaffold is None
+                        or scaffold.run_id != run.id
+                        or scaffold.kind != "build_interview_scaffold_result"
+                    ):
+                        raise RunResumeNotAllowed(
+                            "run does not have a valid interview scaffold checkpoint"
+                        )
+
+                    sources = (
+                        (
+                            await session.execute(
+                                select(Source)
+                                .where(Source.id.in_(source_ids))
+                                .options(selectinload(Source.segments))
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    sources_by_id = {source.id: source for source in sources}
+                    missing_source_ids = [
+                        source_id for source_id in source_ids if source_id not in sources_by_id
+                    ]
+                    if missing_source_ids:
+                        raise RunSourceNotFound(missing_source_ids[0])
+
+                    source_refs = [
+                        {
+                            "source_id": source.id,
+                            "source_segment_id": segment.id,
+                        }
+                        for source_id in source_ids
+                        for source in [sources_by_id[source_id]]
+                        for segment in sorted(source.segments, key=lambda item: item.position)
+                    ]
+                    segment_count = len(source_refs)
+                    submission = Artifact(
+                        run_id=run.id,
+                        task_id=None,
+                        kind="user_material_submission",
+                        content_json={
+                            "checkpoint": checkpoint,
+                            "submission_id": submission_id,
+                            "scaffold_artifact_id": scaffold.id,
+                            "source_ids": source_ids,
+                            "source_refs": source_refs,
+                        },
+                        idempotency_key=idempotency_key,
+                    )
+                    session.add(submission)
+                    await session.flush()
+                    submission_artifact_id = submission.id
+
+                    validate_run_transition(run.status, RunStatus.RUNNING)
+                    run.status = RunStatus.RUNNING
+                    run.current_step = "accepting_user_material"
+                    await append_event(
+                        session,
+                        run_id=run.id,
+                        event_type="run.resumed",
+                        payload={
+                            "checkpoint": checkpoint,
+                            "submission_artifact_id": submission.id,
+                        },
+                    )
+                    await append_event(
+                        session,
+                        run_id=run.id,
+                        event_type="workflow.user_material.accepted",
+                        payload={
+                            "checkpoint": checkpoint,
+                            "submission_artifact_id": submission.id,
+                            "source_count": source_count,
+                            "segment_count": segment_count,
+                        },
+                    )
+
+                    # M3.1 deliberately stops after proving the durable human
+                    # checkpoint. M3.2 will replace this deterministic terminal
+                    # step with an Editor Task.
+                    validate_run_transition(run.status, RunStatus.SUCCEEDED)
+                    run.status = RunStatus.SUCCEEDED
+                    run.current_step = "complete"
+                    await append_event(
+                        session,
+                        run_id=run.id,
+                        event_type="run.succeeded",
+                        payload={
+                            "output_artifact_id": scaffold.id,
+                            "checkpoint": checkpoint,
+                        },
+                    )
+                    resumed = True
+
+            run_view = await self.get_run(run_id)
+            logger.info(
+                (
+                    "Resume replay returned the existing user material"
+                    if idempotent_replay
+                    else "Run accepted user material and resumed"
+                ),
+                extra={
+                    "event": (
+                        "run.resume.idempotent_replay"
+                        if idempotent_replay
+                        else "run.resume.accepted"
+                    ),
+                    "run_id": run_id,
+                    "artifact_id": submission_artifact_id,
+                    "checkpoint": checkpoint,
+                    "source_count": source_count,
+                    "segment_count": segment_count,
+                    "idempotent_replay": idempotent_replay,
+                },
+            )
+            return ResumeRunResponse(
+                resumed=resumed,
+                idempotent_replay=idempotent_replay,
+                submission_artifact_id=submission_artifact_id,
+                run=run_view,
+            )
+
+    async def cancel_run(self, run_id: str) -> RunView:
+        async with self._run_mutation_lock:
+            async with self.database.sessions() as session, session.begin():
+                run = await session.get(Run, run_id)
+                if run is None:
+                    raise RunNotFound(run_id)
+                if run.status in {
+                    RunStatus.SUCCEEDED,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
+                }:
+                    raise RunAlreadyTerminal(run.status)
+
+                validate_run_transition(run.status, RunStatus.CANCELLED)
+                run.status = RunStatus.CANCELLED
+                run.cancel_requested_at = datetime.now(UTC)
+
+                tasks = (
+                    await session.execute(
+                        select(Task).where(
+                            Task.run_id == run_id,
+                            Task.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]),
+                        )
+                    )
+                ).scalars()
+                for task in tasks:
+                    validate_task_transition(task.status, TaskStatus.CANCELLED)
+                    task.status = TaskStatus.CANCELLED
+                    task.lease_token = None
+                    task.lease_expires_at = None
+                    await append_event(
+                        session,
+                        run_id=run.id,
+                        task_id=task.id,
+                        event_type="task.cancelled",
+                        payload={"kind": task.kind},
+                    )
+
                 await append_event(
                     session,
                     run_id=run.id,
-                    task_id=task.id,
-                    event_type="task.cancelled",
-                    payload={"kind": task.kind},
+                    event_type="run.cancelled",
+                    payload={},
                 )
 
-            await append_event(
-                session,
-                run_id=run.id,
-                event_type="run.cancelled",
-                payload={},
+            logger.info(
+                "Run cancelled",
+                extra={
+                    "event": "run.cancelled",
+                    "run_id": run_id,
+                },
             )
-
-        logger.info(
-            "Run cancelled",
-            extra={
-                "event": "run.cancelled",
-                "run_id": run_id,
-            },
-        )
-        return await self.get_run(run_id)
+            return await self.get_run(run_id)

@@ -4,12 +4,15 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
-from epiphany.schemas import CreateRunRequest, EventView, RunView
+from epiphany.human_input_schemas import ResumeRunRequest
+from epiphany.schemas import CreateRunRequest, EventView, ResumeRunResponse, RunView
 from epiphany.services import (
     InterviewScaffoldExportNotReady,
     InvalidRunPayload,
     RunAlreadyTerminal,
     RunNotFound,
+    RunResumeConflict,
+    RunResumeNotAllowed,
     RunService,
     RunSourceNotFound,
 )
@@ -89,6 +92,27 @@ async def get_events(
         return await service.list_events(run_id, after=after)
     except RunNotFound as error:
         raise HTTPException(status_code=404, detail="run not found") from error
+
+
+@router.post("/runs/{run_id}/resume", response_model=ResumeRunResponse)
+async def resume_run(
+    run_id: str,
+    body: ResumeRunRequest,
+    service: RunServiceDependency,
+) -> ResumeRunResponse:
+    try:
+        return await service.resume_run(
+            run_id,
+            checkpoint=body.checkpoint,
+            submission_id=body.submission_id,
+            source_ids=body.source_ids,
+        )
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except RunSourceNotFound as error:
+        raise HTTPException(status_code=404, detail=f"source not found: {error}") from error
+    except (RunResumeNotAllowed, RunResumeConflict) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.post("/runs/{run_id}/cancel", response_model=RunView)

@@ -126,6 +126,8 @@ async def test_smoke_harness_is_bounded_and_summary_hides_content(
 
     assert summary["passed"] is True
     assert processed_tasks == MAX_MODEL_CALLS
+    assert summary["run"]["status"] == "waiting_for_user"
+    assert summary["run"]["current_step"] == "awaiting_interview_response"
     assert summary["run"]["model_call_count"] == MAX_MODEL_CALLS
     assert len(summary["model_calls"]) == MAX_MODEL_CALLS
     assert SYNTHETIC_SOURCE not in serialized

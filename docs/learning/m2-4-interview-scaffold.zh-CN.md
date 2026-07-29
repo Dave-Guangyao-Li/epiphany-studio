@@ -111,8 +111,10 @@ Artifact。标题还必须与请求中的 `topic` 完全一致；额外字段、
 
 导出器会先按严格 Schema 重新验证最终 Artifact，移除仅供运行时追踪的
 `_execution` 元数据，再转义 HTML 和 Markdown 控制字符。文档结构由程序
-固定生成，来源以 ``source_id#source_segment_id`` 显示。因此相同输入得到
-相同输出，模型文字不能偷偷创造新结构或远程图片。
+固定生成。正文来源显示为 `[S1]` 等短标签，文末再按“《Source 标题》片段
+N”列出索引；原始 `source_id/source_segment_id` 仍保存在 Artifact 和数据库。
+因此相同输入得到相同输出，模型文字不能偷偷创造新结构或远程图片。引用
+无法解析到对应 Source/Segment 元数据时，导出返回 409。
 
 ### 5.3 v2 为什么不能直接改变旧 Run
 
@@ -201,7 +203,8 @@ M2.2 的 28 项、M2.3a 的 32 项、M2.3b 的 83 项是当时的历史基线，
    `workflow.interview_scaffold.completed` 和 `run.succeeded`。
 7. 调用 `GET /runs/{run_id}/exports/interview-scaffold.md`。成功响应应为
    200、`text/markdown; charset=utf-8`，并带有附件文件名；正文包含段落、
-   问题和 ``source_id#segment_id`` 来源标签。
+   问题和 `[S1]` 等来源标签，文末包含 `## 来源索引` 和 Source 标题/片段
+   位置，不直接暴露原始 `src_...#seg_...`。
 
 默认 `EPIPHANY_MODEL_PROVIDER=fake`，所以这三条 ModelCall 会留下真实的
 attempt 与耗时 Trace，但 Token 和费用均为 0。

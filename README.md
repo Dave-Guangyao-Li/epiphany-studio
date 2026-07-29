@@ -95,7 +95,7 @@ usage.
 
 M2.3b-2a adds a separate, bounded live-smoke command. Its default mode is a
 zero-network preflight; `--execute` is required before it can send requests
-using short synthetic material. The current workflow-v2 harness is capped at
+using short synthetic material. The current workflow-v3 harness is capped at
 three calls—two Researchers followed by one serial Interviewer—fixes the model
 to `deepseek-v4-flash`, allows one attempt per model-backed Task, applies
 Alembic to a dedicated ignored SQLite trace database, and prints only IDs,
@@ -196,6 +196,55 @@ The live-smoke harness now has a three-call ceiling for the v2 shape, but M2.4
 was verified only in dry-run mode: no new paid live smoke was performed. The
 full suite passes with 99 tests. The historical M2.3b live result above remains
 the two-call, 2,301-token, USD 0.000491 trace.
+
+M3.1 adds the first durable human checkpoint. New `episode-research` Runs are
+stamped workflow `v3`. After the two parallel Researchers, deterministic
+fan-in, and serial Interviewer finish, the Run pauses at
+`waiting_for_user / awaiting_interview_response` with four Tasks, four
+Artifacts, and three completed ModelCalls. The validated Scaffold can already
+be exported while the Run waits, and restarting the backend does not lose the
+checkpoint.
+
+Supplemental speech is currently **text**, not live audio. The user imports an
+already-transcribed passage through `POST /sources` and passes its Source ID to
+`POST /runs/{run_id}/resume`. Resume persists a source-reference-only
+`user_material_submission`, supports idempotent network replay, and completes
+the M3.1 checkpoint without another Task or model call. It therefore adds no
+Token or API cost, and the output remains the Scaffold until the M3.2 Editor is
+implemented. v1 and v2 in-flight semantics remain compatible.
+
+M3.1 does not request microphone permission and does not implement recording,
+speech-to-text, TTS, voice cloning, a final podcast draft, Show Notes, or a Web
+UI. The supported runtime remains local and single-process; database-level
+multi-process Resume coordination is deferred to deployment hardening. The
+current full suite passes with 130 tests, Ruff lint/format and Alembic
+current/check pass.
+
+A committed synthetic fixture and guarded command now exercise the complete
+M3.1 backend/API journey without waiting for the Web UI:
+
+```bash
+cd backend
+python -m epiphany.checkpoint_e2e --provider fake --execute
+```
+
+It writes an ignored SQLite database, structured JSONL log, machine-readable
+report, and Interview Scaffold Markdown. Fake output now derives deterministic
+topic-relevant sentences from its assigned SourceSegments—the committed
+synthetic fixture in this E2E—instead of English filler.
+Exported Markdown uses `[S1]` labels and a Source-title/segment-position index,
+while raw Source/Segment IDs remain in SQLite and structured Artifacts.
+
+A separate explicit DeepSeek mode is bounded to three calls. A realistic
+three-initial-Source plus one-supplemental-Source run has now completed
+`waiting_for_user -> Resume -> succeeded`: 4 Tasks succeeded, 3 ModelCalls
+used 10,046 input and 6,670 output tokens, and local estimated cost was CNY
+0.023386. The earlier input-bound failure, its 8k/24k fix, full event trace,
+content-quality review, and limitations are recorded in the
+[realistic E2E learning chapter](docs/learning/m3-1-realistic-e2e.zh-CN.md) and
+[evidence chapter](docs/learning/m3-1-realistic-e2e-evidence.zh-CN.md);
+the [E2E runbook](docs/learning/m3-1-backend-e2e.zh-CN.md) keeps the repeatable
+commands.
 
 ## License
 

@@ -2,6 +2,116 @@
 
 ## 2026-07-28
 
+### M3.1 realistic Fake + DeepSeek E2E acceptance
+
+- Replaced the short/filler fixture with three coherent initial Sources and one
+  complete supplemental voice-note transcript. Tests now enforce minimum
+  lengths, paragraph counts, roles, uniqueness, and privacy markers.
+- Made the deterministic Fake Provider extract topic-relevant sentences,
+  dates, themes, and verbatim quotes from the fixture. It remains offline,
+  repeatable, zero-token, and zero-cost, but its exported Scaffold is now
+  readable enough for human regression review.
+- Changed Markdown citations from raw `src_...#seg_...` strings to stable
+  `[S1]` labels plus a Source-title/segment-position index. Raw IDs remain in
+  structured Artifacts and SQLite; missing citation metadata fails export.
+- Forwarded the Run topic into both Researchers and treated topic and Source
+  text as untrusted data. Added a prompt rule that plans, drafts, wishes, and
+  attempts cannot be rewritten as already completed or published facts.
+- The first full-material DeepSeek Run completed both Researchers and fan-in
+  but rejected the Interviewer before network entry with
+  `provider_input_too_large`. It exposed that the validated merged research
+  Bundle had incorrectly reused the raw-source 8,000-character limit.
+- Split the boundaries into 8,000 characters for Researcher source input and
+  24,000 for the Interviewer research Bundle, while retaining a bounded
+  three-call, one-attempt, one-concurrent-request live harness.
+- The corrected DeepSeek Run
+  `run_44c9db75a74744ac940efd2d27172107` passed the complete
+  `waiting_for_user -> Resume -> succeeded` journey with 4 Sources, 21
+  Segments, 4 successful Tasks, 5 final Artifacts, 3 ModelCalls, and 29 Events.
+  It used 10,046 input and 6,670 output tokens, 52,003 ms combined Provider
+  time, and an estimated CNY 0.023386.
+- The failed diagnostic Run used an estimated CNY 0.012172, so the two new
+  realistic attempts total an estimated CNY 0.035558. These are local price
+  table estimates, not provider billing guarantees.
+- Human content review found concrete, multi-source interview questions and
+  readable citations, plus one unsupported tense escalation from “planning an
+  Episode 0” to “already published.” The original evidence remains untouched;
+  the prompt was tightened, while semantic entailment remains a human-review
+  or future verifier concern.
+- All 130 tests pass. Full Ruff, Alembic, diff, and secret checks are completed
+  before the focused commit. The detailed evidence and debugging flow live in
+  `docs/learning/m3-1-realistic-e2e.zh-CN.md`.
+
+### M3.1 guarded backend/API E2E harness and earlier probes
+
+- Added a committed, privacy-safe Chinese fixture with three initial Sources
+  and one supplemental voice-note transcript.
+- Added a CLI that drives the real FastAPI lifespan, Worker, HTTP API,
+  Orchestrator, SQLite stores, Markdown export, Resume, and idempotent replay.
+  Dry-run never creates runtime files; Fake execution is deterministic and
+  free; live DeepSeek execution requires an explicit flag and is limited to
+  three calls, one attempt, and one concurrent request.
+- Wrote ignored evidence to a dedicated database plus structured JSONL,
+  machine-readable report, and Interview Scaffold Markdown.
+- Refused databases containing queued/running work before starting the Worker,
+  preventing a reused live database from causing undeclared extra model calls.
+- Added safe Task error codes, log error-code aggregation, request-ID and
+  Markdown-header assertions, provider/model/currency checks, stronger
+  redaction checks, and forced INFO acceptance evidence.
+- The Fake journey passed at 4 Tasks / 4 Artifacts / 3 ModelCalls while waiting
+  and 4 / 5 / 3 after Resume; replay was idempotent and cost stayed zero.
+- Three isolated DeepSeek attempts were bounded and stopped safely: two
+  reached a truncated Interviewer response and one hit a provider network
+  error. Their combined local CNY price-table estimate is `¥0.035096`; a
+  complete live E2E had not yet passed at that earlier checkpoint. The
+  realistic acceptance section above records the later successful Run.
+- Tightened the live Interviewer prompt to request a concise three-section
+  scaffold within the output budget.
+- At that earlier checkpoint, all 120 tests, Ruff lint/format, Alembic
+  current/check, and `git diff --check` passed. M3.1 still exports a Scaffold;
+  M3.2 will add the Editor, podcast draft, and Show Notes.
+
+### M3.1 durable human checkpoint and idempotent Resume
+
+- Versioned new `episode-research` Runs as v3 while preserving in-flight v1
+  completion at the research Bundle and v2 completion at the Interview
+  Scaffold.
+- Changed v3 so the completed Interviewer leaves the Run durably at
+  `waiting_for_user / awaiting_interview_response`, with all four Tasks
+  terminal, four Artifacts persisted, three ModelCalls completed, and no work
+  left for the Worker to poll.
+- Allowed the validated Interview Scaffold Markdown to be exported while the
+  Run is waiting, so the human can read the questions before supplying more
+  material.
+- Reused `POST /sources` for already-transcribed supplemental speech and added
+  `POST /runs/{run_id}/resume`, whose strict request contains a checkpoint,
+  caller-stable submission ID, and one or more Source IDs.
+- Persisted a `user_material_submission` Artifact containing only the
+  checkpoint, Scaffold ID, Source IDs, and SourceSegment references. Source
+  text remains in `sources` / `source_segments` and is not copied into Events
+  or operational logs.
+- Made identical Resume retries return an idempotent replay without duplicate
+  Artifacts or Events; conflicting material, missing Sources, wrong states,
+  and invalid bodies return bounded HTTP 409/404/422 responses.
+- Serialized Resume and Cancel through one single-process mutation boundary.
+  This fixed a review-discovered race where both terminal actions could
+  previously succeed. Regression tests now prove that only one terminal event
+  wins.
+- Kept M3.1 intentionally deterministic after Resume: it records the human
+  submission and completes the checkpoint without another Task, Provider call,
+  Token, or cost. `output_artifact_id` still points to the Scaffold; the M3.2
+  Editor will consume the new Source and create the draft.
+- Reused the existing runtime schema, so no migration is needed. The full 113
+  test suite, Ruff lint/format, Alembic current/check, and guarded DeepSeek
+  dry-run pass; no live API request or paid usage was made.
+- Recorded the remaining deployment boundary: concurrent Resume across
+  multiple processes is protected from duplicate rows by SQLite's unique
+  constraint, but the losing request is not yet translated to replay/409.
+  The supported M3.1 runtime remains local and single-process.
+- Audio capture, microphone permission, speech-to-text, TTS, and voice cloning
+  remain outside this slice. “Voice note transcript” means text supplied after
+  transcription.
+
 ### M2.4 source-grounded interview scaffold and Markdown export
 
 - Extended `episode-research` after its parallel Timeline/Theme fan-out and

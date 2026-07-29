@@ -148,13 +148,56 @@ M2 完成标准：以上四个小步全部通过测试和演示后，才进入 M
 
 ## M3：Human-in-the-loop
 
-- [ ] `waiting_for_user`
-- [ ] Resume API
-- [ ] 用户新增素材
+- [x] `waiting_for_user`
+- [x] Resume API
+- [x] 用户新增素材
 - [ ] Editor
 - [ ] Markdown/Show Notes 导出
 
-演示：Workflow 暂停，用户补充口述文字后继续生成可录初稿。
+### M3.1：持久化人工检查点
+
+新的 `episode-research` Run 使用 workflow v3。两个 Researcher 和串行
+Interviewer 完成后，Run 不再立即成功，而是停在
+`waiting_for_user / awaiting_interview_response`。此时四个 Task 已全部结束，
+采访脚手架已经可以导出，Worker 没有待领任务，也不会继续调用模型。
+
+用户先通过现有 `POST /sources` 把**已经转成文字**的补充口述导入为新
+Source，再调用 `POST /runs/{run_id}/resume` 提交 Source ID。M3.1 会保存一条
+只含 Source/Segment 引用的 `user_material_submission` Artifact，并确定性完成
+当前检查点。Resume 不复制口述正文、不创建新 Task、不调用 Provider，所以
+ModelCall 仍为三次、不会产生额外 Token 或费用；最终
+`output_artifact_id` 暂时仍指向采访脚手架。
+
+验收：等待状态可导出、重启后仍然等待；相同 submission 重发只保存一次，
+同 ID 不同素材返回 409；缺失 Source 返回 404 且继续等待；等待时可以取消，
+取消后不能 Resume；同进程内并发 Resume、并发 Resume/Cancel 均只有一个有效
+状态转换。v1 仍停在研究 Bundle，v2 仍在脚手架后成功。复用既有表结构，无
+新 migration；Fake 全流程 E2E、受限 DeepSeek 真实 E2E 与当前 130 项测试
+通过，Alembic 无 schema drift。真实验收使用三份完整初始素材和一份补充
+口述，成功走到 `waiting_for_user -> Resume -> succeeded`：4 个 Source、
+21 个 Segment、4 个成功 Task、3 次模型调用、最终 5 个 Artifact 和 29 个
+Event，本地估算 CNY 0.023386。第一次完整素材 Run 暴露了合并 Bundle 错误
+复用 8,000 字原始素材上限的问题；现在分别使用 8,000 / 24,000 字边界。
+失败记录与内容质量复核均保留在学习章节。
+
+边界：本步的“口述”只指文本，不申请麦克风权限，也不处理录音、实时语音
+转文字、TTS 或语音克隆。多进程 Resume 的数据库级 CAS/冲突重读属于部署
+阶段；当前保证的是文档约束下的本机、单进程、单 `RunService` 语义。
+
+演示：Workflow 暂停，用户补充口述文字后可靠 Resume；当前导出物仍是采访
+脚手架。
+
+### M3.2：Editor 与最终 Markdown
+
+- [ ] Resume 后排队 Editor Task
+- [ ] 读取 Interview Scaffold 与补充 Source
+- [ ] 生成可审阅的播客口播稿 Markdown
+- [ ] 生成 Show Notes
+- [ ] 保留来源引用、模型调用账本与失败恢复
+- [ ] 将现有 E2E 延伸到最终 Markdown
+
+演示：同一份合成 fixture 从初始 Source 一路生成包含补充材料的可录口播稿和
+Show Notes。正式 Web UI 仍不阻塞本步；M5 再复用同一 API E2E 做页面操作测试。
 
 ## M4：可靠性与 Trace
 
