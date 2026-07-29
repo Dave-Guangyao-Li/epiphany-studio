@@ -3,15 +3,25 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from epiphany.db import Database
+from epiphany.editor_schemas import (
+    BUILD_PODCAST_DRAFT,
+    PodcastDraftTaskInput,
+    editor_output_reference_keys,
+)
+from epiphany.episode_markdown import (
+    render_podcast_draft_markdown,
+    render_show_notes_markdown,
+)
 from epiphany.events import append_event
 from epiphany.human_input_schemas import INTERVIEW_SCAFFOLD_CHECKPOINT
-from epiphany.ids import stable_id
+from epiphany.ids import new_id, stable_id
 from epiphany.interview_markdown import (
     SourceCitation,
     interview_scaffold_reference_keys,
@@ -19,7 +29,11 @@ from epiphany.interview_markdown import (
 )
 from epiphany.models import Artifact, Event, Run, Source, Task
 from epiphany.research_schemas import EpisodeResearchPayload
-from epiphany.runtime.orchestrator import INTERVIEW_RESEARCH_WORKFLOW_VERSION, Orchestrator
+from epiphany.runtime.orchestrator import (
+    EDITOR_RESEARCH_WORKFLOW_VERSION,
+    INTERVIEW_RESEARCH_WORKFLOW_VERSION,
+    Orchestrator,
+)
 from epiphany.schemas import (
     ArtifactView,
     EventView,
@@ -58,6 +72,10 @@ class InterviewScaffoldExportNotReady(ValueError):
     pass
 
 
+class PodcastDraftExportNotReady(ValueError):
+    pass
+
+
 class RunResumeNotAllowed(ValueError):
     pass
 
@@ -71,10 +89,12 @@ class RunService:
         self.database = database
         self.orchestrator = orchestrator
         # The MVP is explicitly single-process. Every Run mutation that can
-        # compete at a human checkpoint shares this lock, so Resume and Cancel
-        # cannot both cross the same waiting-state boundary. The Artifact
-        # unique key remains the durable duplicate-data guard for Resume in
-        # SQLite. Cross-process replay semantics are a later deployment concern.
+        # compete at a human checkpoint shares this lock. Cancel can validly
+        # follow a successful v4 Resume while the Editor is queued, but the
+        # mutation order is deterministic and no half-written submission can
+        # escape. The Artifact unique key remains the durable duplicate-data
+        # guard for Resume in SQLite. Cross-process replay semantics are a later
+        # deployment concern.
         self._run_mutation_lock = asyncio.Lock()
 
     async def create_run(
@@ -127,7 +147,7 @@ class RunService:
                 "research_fan_out" if workflow_type == "episode-research" else "prepare_sources"
             )
             workflow_version = (
-                INTERVIEW_RESEARCH_WORKFLOW_VERSION if workflow_type == "episode-research" else "v1"
+                EDITOR_RESEARCH_WORKFLOW_VERSION if workflow_type == "episode-research" else "v1"
             )
             run = Run(
                 workflow_type=workflow_type,
@@ -220,19 +240,19 @@ class RunService:
             run = await session.get(Run, run_id)
             if run is None:
                 raise RunNotFound(run_id)
-            if (
-                run.status not in {RunStatus.WAITING_FOR_USER, RunStatus.SUCCEEDED}
-                or run.output_artifact_id is None
-            ):
+            artifact = (
+                await session.execute(
+                    select(Artifact)
+                    .where(
+                        Artifact.run_id == run.id,
+                        Artifact.kind == "build_interview_scaffold_result",
+                    )
+                    .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if artifact is None:
                 raise InterviewScaffoldExportNotReady("interview scaffold is not ready for export")
-
-            artifact = await session.get(Artifact, run.output_artifact_id)
-            if (
-                artifact is None
-                or artifact.run_id != run.id
-                or artifact.kind != "build_interview_scaffold_result"
-            ):
-                raise InterviewScaffoldExportNotReady("run output is not an interview scaffold")
 
             # Worker metadata belongs to runtime tracing, not the strict product
             # artifact rendered for the user.
@@ -282,6 +302,93 @@ class RunService:
             "Interview scaffold Markdown exported",
             extra={
                 "event": "run.interview_scaffold_markdown.exported",
+                "run_id": run_id,
+                "artifact_id": artifact.id,
+                "markdown_char_count": len(markdown),
+                "source_citation_count": len(reference_keys),
+            },
+        )
+        return markdown
+
+    async def export_podcast_draft_markdown(self, run_id: str) -> str:
+        return await self._export_editor_markdown(run_id, export_kind="podcast_draft")
+
+    async def export_show_notes_markdown(self, run_id: str) -> str:
+        return await self._export_editor_markdown(run_id, export_kind="show_notes")
+
+    async def _export_editor_markdown(
+        self,
+        run_id: str,
+        *,
+        export_kind: str,
+    ) -> str:
+        async with self.database.sessions() as session:
+            run = await session.get(Run, run_id)
+            if run is None:
+                raise RunNotFound(run_id)
+            if run.status != RunStatus.SUCCEEDED or run.output_artifact_id is None:
+                raise PodcastDraftExportNotReady("podcast draft is not ready for export")
+
+            artifact = await session.get(Artifact, run.output_artifact_id)
+            if (
+                artifact is None
+                or artifact.run_id != run.id
+                or artifact.kind != f"{BUILD_PODCAST_DRAFT}_result"
+            ):
+                raise PodcastDraftExportNotReady("run output is not a podcast draft")
+
+            content = {
+                key: value for key, value in artifact.content_json.items() if key != "_execution"
+            }
+            try:
+                reference_keys = editor_output_reference_keys(content)
+            except (ValidationError, ValueError, TypeError) as error:
+                raise PodcastDraftExportNotReady("podcast draft output is invalid") from error
+
+            referenced_source_ids = sorted({source_id for source_id, _ in reference_keys})
+            sources = (
+                (
+                    await session.execute(
+                        select(Source)
+                        .where(Source.id.in_(referenced_source_ids))
+                        .options(selectinload(Source.segments))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            required_keys = set(reference_keys)
+            source_citations = {
+                (source.id, segment.id): SourceCitation(
+                    title=source.title,
+                    segment_position=segment.position,
+                )
+                for source in sources
+                for segment in source.segments
+                if (source.id, segment.id) in required_keys
+            }
+            try:
+                if export_kind == "podcast_draft":
+                    markdown = render_podcast_draft_markdown(
+                        content,
+                        source_citations=source_citations,
+                    )
+                elif export_kind == "show_notes":
+                    markdown = render_show_notes_markdown(
+                        content,
+                        source_citations=source_citations,
+                    )
+                else:
+                    raise ValueError(f"unsupported Editor export kind: {export_kind}")
+            except (ValidationError, ValueError, TypeError) as error:
+                raise PodcastDraftExportNotReady(
+                    "podcast draft source metadata is unavailable"
+                ) from error
+
+        logger.info(
+            "Editor Markdown exported",
+            extra={
+                "event": f"run.{export_kind}_markdown.exported",
                 "run_id": run_id,
                 "artifact_id": artifact.id,
                 "markdown_char_count": len(markdown),
@@ -349,7 +456,11 @@ class RunService:
                 else:
                     if (
                         run.workflow_type != "episode-research"
-                        or run.workflow_version != INTERVIEW_RESEARCH_WORKFLOW_VERSION
+                        or run.workflow_version
+                        not in {
+                            INTERVIEW_RESEARCH_WORKFLOW_VERSION,
+                            EDITOR_RESEARCH_WORKFLOW_VERSION,
+                        }
                         or run.status != RunStatus.WAITING_FOR_USER
                         or run.current_step != "awaiting_interview_response"
                     ):
@@ -384,11 +495,31 @@ class RunService:
                             "run does not have a valid interview scaffold checkpoint"
                         )
 
+                    scaffold_content = {
+                        key: value
+                        for key, value in scaffold.content_json.items()
+                        if key != "_execution"
+                    }
+                    try:
+                        scaffold_reference_keys = interview_scaffold_reference_keys(
+                            scaffold_content
+                        )
+                    except (ValueError, TypeError) as error:
+                        raise RunResumeNotAllowed(
+                            "run does not have a valid interview scaffold checkpoint"
+                        ) from error
+
+                    source_ids_to_load = sorted(
+                        {
+                            *source_ids,
+                            *(source_id for source_id, _ in scaffold_reference_keys),
+                        }
+                    )
                     sources = (
                         (
                             await session.execute(
                                 select(Source)
-                                .where(Source.id.in_(source_ids))
+                                .where(Source.id.in_(source_ids_to_load))
                                 .options(selectinload(Source.segments))
                             )
                         )
@@ -412,7 +543,74 @@ class RunService:
                         for segment in sorted(source.segments, key=lambda item: item.position)
                     ]
                     segment_count = len(source_refs)
+                    editor_input_json: dict[str, Any] | None = None
+                    submission_artifact_id = new_id("art")
+
+                    if run.workflow_version == EDITOR_RESEARCH_WORKFLOW_VERSION:
+                        segments_by_key = {
+                            (source.id, segment.id): segment
+                            for source in sources
+                            for segment in source.segments
+                        }
+                        missing_scaffold_references = [
+                            key for key in scaffold_reference_keys if key not in segments_by_key
+                        ]
+                        if missing_scaffold_references:
+                            raise RunResumeNotAllowed(
+                                "interview scaffold source material is unavailable"
+                            )
+
+                        initial_source_segments = [
+                            {
+                                "source_id": source_id,
+                                "source_segment_id": segment_id,
+                                "text": segments_by_key[(source_id, segment_id)].text,
+                            }
+                            for source_id, segment_id in scaffold_reference_keys
+                        ]
+                        supplemental_source_segments = [
+                            {
+                                "source_id": source.id,
+                                "source_segment_id": segment.id,
+                                "text": segment.text,
+                            }
+                            for source_id in source_ids
+                            for source in [sources_by_id[source_id]]
+                            for segment in sorted(
+                                source.segments,
+                                key=lambda item: item.position,
+                            )
+                        ]
+                        try:
+                            editor_input_json = PodcastDraftTaskInput.model_validate(
+                                {
+                                    "task_kind": BUILD_PODCAST_DRAFT,
+                                    "topic": run.input_json["topic"],
+                                    "scaffold_artifact_id": scaffold.id,
+                                    "submission_artifact_id": submission_artifact_id,
+                                    "interview_scaffold": scaffold_content,
+                                    "initial_source_segments": initial_source_segments,
+                                    "supplemental_source_segments": (supplemental_source_segments),
+                                }
+                            ).model_dump(mode="json")
+                        except (ValidationError, ValueError, TypeError) as error:
+                            logger.warning(
+                                "Resume material could not build a valid Editor task",
+                                extra={
+                                    "event": "run.resume.rejected",
+                                    "run_id": run.id,
+                                    "checkpoint": checkpoint,
+                                    "source_count": source_count,
+                                    "segment_count": segment_count,
+                                    "error_code": "invalid_editor_task_input",
+                                },
+                            )
+                            raise RunResumeNotAllowed(
+                                "submitted material cannot build a valid Editor task"
+                            ) from error
+
                     submission = Artifact(
+                        id=submission_artifact_id,
                         run_id=run.id,
                         task_id=None,
                         kind="user_material_submission",
@@ -427,7 +625,6 @@ class RunService:
                     )
                     session.add(submission)
                     await session.flush()
-                    submission_artifact_id = submission.id
 
                     validate_run_transition(run.status, RunStatus.RUNNING)
                     run.status = RunStatus.RUNNING
@@ -453,21 +650,29 @@ class RunService:
                         },
                     )
 
-                    # M3.1 deliberately stops after proving the durable human
-                    # checkpoint. M3.2 will replace this deterministic terminal
-                    # step with an Editor Task.
-                    validate_run_transition(run.status, RunStatus.SUCCEEDED)
-                    run.status = RunStatus.SUCCEEDED
-                    run.current_step = "complete"
-                    await append_event(
-                        session,
-                        run_id=run.id,
-                        event_type="run.succeeded",
-                        payload={
-                            "output_artifact_id": scaffold.id,
-                            "checkpoint": checkpoint,
-                        },
-                    )
+                    if run.workflow_version == EDITOR_RESEARCH_WORKFLOW_VERSION:
+                        if editor_input_json is None:
+                            raise RuntimeError("validated Editor input is missing")
+                        await self.orchestrator.enqueue_editor(
+                            session,
+                            run=run,
+                            input_json=editor_input_json,
+                        )
+                    else:
+                        # Preserve the historical v3 meaning for Runs that were
+                        # already persisted before M3.2 introduced the Editor.
+                        validate_run_transition(run.status, RunStatus.SUCCEEDED)
+                        run.status = RunStatus.SUCCEEDED
+                        run.current_step = "complete"
+                        await append_event(
+                            session,
+                            run_id=run.id,
+                            event_type="run.succeeded",
+                            payload={
+                                "output_artifact_id": scaffold.id,
+                                "checkpoint": checkpoint,
+                            },
+                        )
                     resumed = True
 
             run_view = await self.get_run(run_id)

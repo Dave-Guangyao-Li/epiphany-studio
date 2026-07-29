@@ -9,7 +9,9 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
 from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
+from epiphany.runtime.editor_prompts import build_editor_prompt
 from epiphany.runtime.interview_prompts import build_interview_prompt
 from epiphany.runtime.providers.base import (
     ProviderAuthenticationError,
@@ -78,8 +80,10 @@ class DeepSeekProvider:
         billing_currency: BillingCurrency | str = "USD",
         base_url: str = DEFAULT_BASE_URL,
         max_tokens: int = 2_000,
+        editor_max_tokens: int = 6_000,
         max_source_chars: int = 24_000,
         max_interview_bundle_chars: int | None = None,
+        max_editor_bundle_chars: int = 48_000,
         request_timeout_seconds: float = 30,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -95,6 +99,8 @@ class DeepSeekProvider:
             )
         if max_tokens < 1:
             raise ValueError("DeepSeek max_tokens must be positive")
+        if editor_max_tokens < 1:
+            raise ValueError("DeepSeek editor_max_tokens must be positive")
         if max_source_chars < 1:
             raise ValueError("DeepSeek max_source_chars must be positive")
         resolved_interview_bundle_chars = (
@@ -102,6 +108,8 @@ class DeepSeekProvider:
         )
         if resolved_interview_bundle_chars < 1:
             raise ValueError("DeepSeek max_interview_bundle_chars must be positive")
+        if max_editor_bundle_chars < 1:
+            raise ValueError("DeepSeek max_editor_bundle_chars must be positive")
         if request_timeout_seconds <= 0:
             raise ValueError("DeepSeek request timeout must be positive")
 
@@ -110,29 +118,39 @@ class DeepSeekProvider:
         self.billing_currency = normalized_billing_currency
         self.base_url = _validated_base_url(base_url)
         self.max_tokens = max_tokens
+        self.editor_max_tokens = editor_max_tokens
         self.max_source_chars = max_source_chars
         self.max_interview_bundle_chars = resolved_interview_bundle_chars
+        self.max_editor_bundle_chars = max_editor_bundle_chars
         self.request_timeout_seconds = request_timeout_seconds
         self._client = client
 
     async def generate(self, invocation: TaskInvocation) -> ProviderResult:
-        if invocation.kind == BUILD_INTERVIEW_SCAFFOLD:
+        if invocation.kind == BUILD_PODCAST_DRAFT:
+            prompt = build_editor_prompt(
+                task_input=invocation.input_json,
+                max_bundle_chars=self.max_editor_bundle_chars,
+            )
+            max_tokens = self.editor_max_tokens
+        elif invocation.kind == BUILD_INTERVIEW_SCAFFOLD:
             prompt = build_interview_prompt(
                 task_input=invocation.input_json,
                 max_bundle_chars=self.max_interview_bundle_chars,
             )
+            max_tokens = self.max_tokens
         else:
             prompt = build_research_prompt(
                 task_kind=invocation.kind,
                 task_input=invocation.input_json,
                 max_source_chars=self.max_source_chars,
             )
+            max_tokens = self.max_tokens
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": prompt.messages,
             "response_format": {"type": "json_object"},
             "thinking": {"type": "disabled"},
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens,
             "stream": False,
             "temperature": 0.2,
             "user_id": invocation.run_id,

@@ -265,7 +265,7 @@ async def test_export_returns_409_until_scaffold_is_ready(tmp_path: Path) -> Non
     assert queued.status_code == 409
     assert queued.json() == {"detail": "interview scaffold is not ready for export"}
     assert wrong_output.status_code == 409
-    assert wrong_output.json() == {"detail": "run output is not an interview scaffold"}
+    assert wrong_output.json() == {"detail": "interview scaffold is not ready for export"}
     assert invalid_output.status_code == 409
     assert invalid_output.json() == {"detail": "interview scaffold output is invalid"}
     await app.state.database.close()

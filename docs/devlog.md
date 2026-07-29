@@ -1,5 +1,53 @@
 # Development Log
 
+## 2026-07-29
+
+### M3.2 grounded Editor and final Markdown
+
+- Versioned new `episode-research` Runs as v4 while preserving persisted v1,
+  v2, and v3 completion semantics. The existing four-Task research and
+  Interviewer flow still pauses at
+  `waiting_for_user / awaiting_interview_response`.
+- Changed v4 Resume from deterministic completion to durable continuation:
+  it commits the source-reference-only `user_material_submission`, returns the
+  Run to `running`, and idempotently queues one serial root
+  `build_podcast_draft` Editor Task.
+- Added a strict Editor input/output contract. The bounded input contains the
+  validated Scaffold, initial SourceSegments referenced by it, and the new
+  supplemental SourceSegments. Podcast Script must cite both initial and
+  supplemental evidence; Show Notes must cite supplemental evidence.
+- Added an injection-resistant Editor Prompt plus separate
+  `EPIPHANY_DEEPSEEK_MAX_EDITOR_BUNDLE_CHARS` and
+  `EPIPHANY_DEEPSEEK_EDITOR_MAX_TOKENS` limits.
+- Extended Fake and DeepSeek Providers through the same Editor validation
+  boundary. Fake output is deterministic, readable, grounded in fixture text,
+  zero-token, and zero-cost.
+- Added deterministic, escaped Podcast Draft and Show Notes renderers plus
+  `GET /runs/{run_id}/exports/podcast-draft.md` and
+  `GET /runs/{run_id}/exports/show-notes.md`. The Scaffold remains exportable
+  after the final Run output changes to `build_podcast_draft_result`.
+- Extended retry, startup recovery, cancellation, late-result fencing,
+  ModelCall accounting, call-budget rejection, and Resume idempotency to the
+  Editor. A normal final v4 Run has 5 Tasks, 6 Artifacts, and 4 ModelCalls.
+- Validate the complete Editor input before Resume persists any submission or
+  changes Run state. Overlapping initial/supplemental Sources and oversized
+  supplemental bundles now return 409 while the Run remains recoverably
+  `waiting_for_user`, without creating a paid attempt.
+- Reject any visible `src_...` or `seg_...` pattern in final Markdown, including
+  unknown IDs and Markdown-escaped variants. Concrete Provider exports are
+  lazy-loaded so Editor prompt modules also import correctly in a clean process.
+- Extended the guarded E2E through Editor completion and all three Markdown
+  files. Fake E2E passed all state, count, event-order, citation, supplemental
+  evidence, idempotency, stable-Scaffold, and log-redaction checks.
+- Completed an explicit synthetic `deepseek-v4-flash` E2E with Run
+  `run_88d16bf3e03f45a98edfea2c164e383a`: 4 calls succeeded, using 16,667 input
+  tokens, 9,468 output tokens, and 73,018 ms combined Provider duration, with
+  estimated cost CNY 0.035603. Events grew from 26 at the checkpoint to 36
+  after Editor completion. The estimate is not a provider invoice, and the
+  generated candidate content still requires human review.
+- Reused the current schema with no migration. All 151 tests, Ruff
+  lint/format, Alembic upgrade/current/check, and the focused E2E checks pass.
+
 ## 2026-07-28
 
 ### M3.1 realistic Fake + DeepSeek E2E acceptance
@@ -68,8 +116,8 @@
 - Tightened the live Interviewer prompt to request a concise three-section
   scaffold within the output budget.
 - At that earlier checkpoint, all 120 tests, Ruff lint/format, Alembic
-  current/check, and `git diff --check` passed. M3.1 still exports a Scaffold;
-  M3.2 will add the Editor, podcast draft, and Show Notes.
+  current/check, and `git diff --check` passed. M3.1 exported only a Scaffold;
+  the later M3.2 slice added the Editor, podcast draft, and Show Notes.
 
 ### M3.1 durable human checkpoint and idempotent Resume
 
@@ -99,8 +147,8 @@
   wins.
 - Kept M3.1 intentionally deterministic after Resume: it records the human
   submission and completes the checkpoint without another Task, Provider call,
-  Token, or cost. `output_artifact_id` still points to the Scaffold; the M3.2
-  Editor will consume the new Source and create the draft.
+  Token, or cost. At that stage `output_artifact_id` still pointed to the
+  Scaffold; the later M3.2 Editor consumed the new Source and created the draft.
 - Reused the existing runtime schema, so no migration is needed. The full 113
   test suite, Ruff lint/format, Alembic current/check, and guarded DeepSeek
   dry-run pass; no live API request or paid usage was made.

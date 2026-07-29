@@ -55,9 +55,15 @@ class Settings(BaseSettings):
         ),
     )
     deepseek_max_tokens: int = Field(default=2_000, ge=1, le=20_000)
+    deepseek_editor_max_tokens: int = Field(default=6_000, ge=1, le=20_000)
     deepseek_max_source_chars: int = Field(default=24_000, ge=1, le=1_000_000)
     deepseek_max_interview_bundle_chars: int = Field(
         default=24_000,
+        ge=1,
+        le=1_000_000,
+    )
+    deepseek_max_editor_bundle_chars: int = Field(
+        default=48_000,
         ge=1,
         le=1_000_000,
     )

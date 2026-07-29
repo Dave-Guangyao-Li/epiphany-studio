@@ -10,6 +10,7 @@ import pytest
 from epiphany.config import Settings
 from epiphany.db import Database
 from epiphany.main import create_app
+from epiphany.models import Run
 from epiphany.runtime.worker import Worker
 from epiphany.services import (
     RunAlreadyTerminal,
@@ -97,11 +98,16 @@ async def test_resume_api_accepts_user_source_and_replays_idempotently(
         resumed_body = resumed.json()
         assert resumed_body["resumed"] is True
         assert resumed_body["idempotent_replay"] is False
-        assert resumed_body["run"]["status"] == "succeeded"
-        assert resumed_body["run"]["current_step"] == "complete"
+        assert resumed_body["run"]["status"] == "running"
+        assert resumed_body["run"]["current_step"] == "build_podcast_draft"
         assert resumed_body["run"]["output_artifact_id"] == scaffold_artifact_id
         assert resumed_body["run"]["model_call_count"] == 3
         assert len(resumed_body["run"]["artifacts"]) == 5
+        assert len(resumed_body["run"]["tasks"]) == 5
+        editor_task = next(
+            task for task in resumed_body["run"]["tasks"] if task["kind"] == "build_podcast_draft"
+        )
+        assert editor_task["status"] == "queued"
 
         submission = next(
             artifact
@@ -115,10 +121,11 @@ async def test_resume_api_accepts_user_source_and_replays_idempotently(
 
         resumed_events = await client.get(f"/runs/{run_id}/events")
         resumed_event_types = [event["type"] for event in resumed_events.json()]
-        assert resumed_event_types[-3:] == [
+        assert resumed_event_types[-4:] == [
             "run.resumed",
             "workflow.user_material.accepted",
-            "run.succeeded",
+            "task.queued",
+            "workflow.editor.queued",
         ]
 
         replay = await client.post(f"/runs/{run_id}/resume", json=payload)
@@ -131,16 +138,85 @@ async def test_resume_api_accepts_user_source_and_replays_idempotently(
         assert replay_body["run"]["model_call_count"] == 3
 
         replay_events = await client.get(f"/runs/{run_id}/events")
-        assert len(replay_events.json()) == before_event_count + 3
+        assert len(replay_events.json()) == before_event_count + 4
+
+        assert await app.state.worker.run_until_idle() == 1
+        completed = await client.get(f"/runs/{run_id}")
+        completed_body = completed.json()
+        assert completed_body["status"] == "succeeded"
+        assert completed_body["current_step"] == "complete"
+        assert completed_body["output_artifact_id"] != scaffold_artifact_id
+        assert completed_body["model_call_count"] == 4
+        assert len(completed_body["tasks"]) == 5
+        assert len(completed_body["artifacts"]) == 6
+        assert (
+            next(
+                artifact["kind"]
+                for artifact in completed_body["artifacts"]
+                if artifact["id"] == completed_body["output_artifact_id"]
+            )
+            == "build_podcast_draft_result"
+        )
 
         completed_export = await client.get(f"/runs/{run_id}/exports/interview-scaffold.md")
         assert completed_export.status_code == 200
+        draft_export = await client.get(f"/runs/{run_id}/exports/podcast-draft.md")
+        notes_export = await client.get(f"/runs/{run_id}/exports/show-notes.md")
+        assert draft_export.status_code == 200
+        assert notes_export.status_code == 200
+        assert "[S" in draft_export.text
+        assert transcript in draft_export.text
 
     assert transcript not in caplog.text
     assert "run.resume.accepted" in [getattr(record, "event", None) for record in caplog.records]
     assert "run.resume.idempotent_replay" in [
         getattr(record, "event", None) for record in caplog.records
     ]
+    await app.state.database.close()
+
+
+async def test_final_exports_are_404_for_missing_run_and_409_until_editor_finishes(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        settings=Settings(
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'final-export-state.db'}",
+            create_schema_on_start=False,
+            worker_enabled=False,
+        )
+    )
+    await app.state.database.create_schema()
+    run_id = await _create_waiting_run(app)
+    transport = httpx.ASGITransport(app=app)
+    export_paths = ("podcast-draft.md", "show-notes.md")
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        for export_path in export_paths:
+            missing = await client.get(f"/runs/run_missing/exports/{export_path}")
+            not_ready = await client.get(f"/runs/{run_id}/exports/{export_path}")
+            assert missing.status_code == 404
+            assert not_ready.status_code == 409
+
+        source_id = await _import_supplemental_source(
+            app,
+            text="Editor 还没有运行时，最终导出仍然应该返回未就绪。",
+        )
+        resumed = await client.post(
+            f"/runs/{run_id}/resume",
+            json={
+                "checkpoint": "interview_scaffold",
+                "submission_id": "export-not-ready",
+                "source_ids": [source_id],
+            },
+        )
+        assert resumed.status_code == 200
+        assert resumed.json()["run"]["status"] == "running"
+
+        for export_path in export_paths:
+            queued = await client.get(f"/runs/{run_id}/exports/{export_path}")
+            assert queued.status_code == 409
+            assert queued.json() == {"detail": "podcast draft is not ready for export"}
+
     await app.state.database.close()
 
 
@@ -222,6 +298,105 @@ async def test_resume_api_rejects_missing_source_conflict_and_wrong_state(
     await app.state.database.close()
 
 
+async def test_resume_api_rejects_initial_source_as_supplement_without_mutation(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        settings=Settings(
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'resume-overlap.db'}",
+            create_schema_on_start=False,
+            worker_enabled=False,
+        )
+    )
+    await app.state.database.create_schema()
+    run_id = await _create_waiting_run(app)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        before_run = (await client.get(f"/runs/{run_id}")).json()
+        before_events = (await client.get(f"/runs/{run_id}/events")).json()
+        initial_source_id = before_run["input_json"]["source_ids"][0]
+
+        rejected = await client.post(
+            f"/runs/{run_id}/resume",
+            json={
+                "checkpoint": "interview_scaffold",
+                "submission_id": "initial-source-is-not-a-supplement",
+                "source_ids": [initial_source_id],
+            },
+        )
+
+        assert rejected.status_code == 409
+        assert rejected.json() == {"detail": "submitted material cannot build a valid Editor task"}
+        after_run = (await client.get(f"/runs/{run_id}")).json()
+        after_events = (await client.get(f"/runs/{run_id}/events")).json()
+        assert after_run["status"] == "waiting_for_user"
+        assert after_run["current_step"] == "awaiting_interview_response"
+        assert [item["id"] for item in after_run["artifacts"]] == [
+            item["id"] for item in before_run["artifacts"]
+        ]
+        assert [item["id"] for item in after_run["tasks"]] == [
+            item["id"] for item in before_run["tasks"]
+        ]
+        assert [item["id"] for item in after_run["model_calls"]] == [
+            item["id"] for item in before_run["model_calls"]
+        ]
+        assert [item["id"] for item in after_events] == [item["id"] for item in before_events]
+
+    await app.state.database.close()
+
+
+async def test_resume_service_rejects_more_than_500_supplemental_segments_atomically(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    initial = await SourceService(database).import_text(
+        title="Editor 输入上限初始素材",
+        source_type="podcast_draft",
+        text="这段初始素材用于生成等待补充口述的采访脚手架。",
+        metadata={"test": "editor_input_limit"},
+    )
+    created = await service.create_run(
+        workflow_type="episode-research",
+        payload={
+            "topic": "验证 Editor 输入上限",
+            "source_ids": [initial.source.id],
+        },
+    )
+    assert await worker.run_until_idle() == 3
+    oversized = await SourceService(database).import_text(
+        title="超过 Editor 上限的补充素材",
+        source_type="voice_note_transcript",
+        text="\n\n".join(f"第 {index} 段补充口述。" for index in range(501)),
+        metadata={"test": "editor_input_limit"},
+    )
+    assert oversized.source.segment_count == 501
+    before_run = await service.get_run(created.id)
+    before_events = await service.list_events(created.id)
+
+    with pytest.raises(
+        RunResumeNotAllowed,
+        match="submitted material cannot build a valid Editor task",
+    ):
+        await service.resume_run(
+            created.id,
+            checkpoint="interview_scaffold",
+            submission_id="too-many-supplemental-segments",
+            source_ids=[oversized.source.id],
+        )
+
+    after_run = await service.get_run(created.id)
+    after_events = await service.list_events(created.id)
+    assert after_run.status == "waiting_for_user"
+    assert after_run.current_step == "awaiting_interview_response"
+    assert [item.id for item in after_run.artifacts] == [item.id for item in before_run.artifacts]
+    assert [item.id for item in after_run.tasks] == [item.id for item in before_run.tasks]
+    assert [item.id for item in after_run.model_calls] == [
+        item.id for item in before_run.model_calls
+    ]
+    assert [item.id for item in after_events] == [item.id for item in before_events]
+
+
 async def test_waiting_checkpoint_survives_restart_before_resume(tmp_path: Path) -> None:
     database_path = tmp_path / "resume-restart.db"
     settings = Settings(
@@ -251,9 +426,57 @@ async def test_waiting_checkpoint_survives_restart_before_resume(tmp_path: Path)
         source_ids=[source_id],
     )
     assert result.resumed is True
-    assert result.run.status == "succeeded"
+    assert result.run.status == "running"
     assert result.run.model_call_count == 3
     await restarted_app.state.database.close()
+
+    editor_app = create_app(settings=settings)
+    assert await editor_app.state.worker.run_until_idle() == 1
+    completed = await editor_app.state.run_service.get_run(run_id)
+    assert completed.status == "succeeded"
+    assert completed.model_call_count == 4
+    assert len(completed.artifacts) == 6
+    await editor_app.state.database.close()
+
+
+async def test_persisted_v3_checkpoint_keeps_pre_editor_resume_semantics(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    initial = await SourceService(database).import_text(
+        title="v3 兼容初始素材",
+        source_type="podcast_draft",
+        text="这条 Run 模拟 M3.1 部署期间已经停在人工检查点的数据。",
+        metadata={},
+    )
+    created = await service.create_run(
+        workflow_type="episode-research",
+        payload={"topic": "v3 兼容", "source_ids": [initial.source.id]},
+    )
+    assert await worker.run_until_idle() == 3
+    async with database.sessions() as session, session.begin():
+        run = await session.get(Run, created.id)
+        assert run is not None
+        run.workflow_version = "v3"
+
+    supplemental = await SourceService(database).import_text(
+        title="v3 兼容补充素材",
+        source_type="voice_note_transcript",
+        text="旧版本 Resume 不应因为部署 M3.2 而产生新的付费调用。",
+        metadata={},
+    )
+    resumed = await service.resume_run(
+        created.id,
+        checkpoint="interview_scaffold",
+        submission_id="persisted-v3",
+        source_ids=[supplemental.source.id],
+    )
+
+    assert resumed.run.workflow_version == "v3"
+    assert resumed.run.status == "succeeded"
+    assert resumed.run.model_call_count == 3
+    assert all(task.kind != "build_podcast_draft" for task in resumed.run.tasks)
+    assert await worker.run_until_idle() == 0
 
 
 async def test_concurrent_identical_resume_is_applied_once(
@@ -313,6 +536,8 @@ async def test_concurrent_identical_resume_is_applied_once(
     events = await service.list_events(created.id)
     assert sum(event.type == "run.resumed" for event in events) == 1
     assert sum(event.type == "workflow.user_material.accepted" for event in events) == 1
+    assert sum(event.type == "workflow.editor.queued" for event in events) == 1
+    assert len([task for task in completed.tasks if task.kind == "build_podcast_draft"]) == 1
 
 
 async def test_waiting_run_can_be_cancelled_and_cannot_resume(
@@ -358,7 +583,7 @@ async def test_waiting_run_can_be_cancelled_and_cannot_resume(
     assert all(event.type != "run.resumed" for event in events)
 
 
-async def test_concurrent_resume_and_cancel_have_one_terminal_winner(
+async def test_concurrent_resume_and_cancel_leave_a_single_cancelled_terminal_state(
     runtime: tuple[Database, RunService, Worker],
 ) -> None:
     database, service, worker = runtime
@@ -394,15 +619,20 @@ async def test_concurrent_resume_and_cancel_have_one_terminal_winner(
         return_exceptions=True,
     )
 
-    assert sum(not isinstance(result, Exception) for result in results) == 1
-    assert any(isinstance(result, RunAlreadyTerminal | RunResumeNotAllowed) for result in results)
+    assert sum(not isinstance(result, Exception) for result in results) in {1, 2}
+    assert all(
+        not isinstance(result, Exception)
+        or isinstance(result, RunAlreadyTerminal | RunResumeNotAllowed)
+        for result in results
+    )
 
     final_run = await service.get_run(created.id)
-    assert final_run.status in {"succeeded", "cancelled"}
+    assert final_run.status == "cancelled"
+    assert final_run.model_call_count == 3
+    editor_tasks = [task for task in final_run.tasks if task.kind == "build_podcast_draft"]
+    assert not editor_tasks or editor_tasks[0].status == "cancelled"
     events = await service.list_events(created.id)
     terminal_event_types = [
         event.type for event in events if event.type in {"run.succeeded", "run.cancelled"}
     ]
-    assert terminal_event_types == [
-        "run.succeeded" if final_run.status == "succeeded" else "run.cancelled"
-    ]
+    assert terminal_event_types == ["run.cancelled"]

@@ -58,7 +58,7 @@ uvicorn epiphany.main:app --reload
 
 它是开发调试界面，不是产品最终体验。
 
-## 4. 手动走通 Source、人工暂停与 Resume
+## 4. 手动走通 Source、人工暂停、Editor 与最终导出
 
 这一节使用的是 Swagger 里的文字输入框，不需要麦克风。补充“口述”是指
 已经转成文字的内容；`voice_note_transcript` 只是 Source 分类，不会执行
@@ -107,7 +107,7 @@ uvicorn epiphany.main:app --reload
 
 - Run 状态为 `waiting_for_user`；
 - `current_step` 为 `awaiting_interview_response`；
-- `workflow_version` 为 `v3`；
+- `workflow_version` 为 `v4`；
 - 一个 `research_manager`；
 - 一个 `timeline_research`；
 - 一个 `theme_research`；
@@ -155,7 +155,7 @@ SQLite 中，重启 Uvicorn 后仍可查询，Worker 也不会重复运行这些
 - 文末包含 `## 来源索引`，按“《Source 标题》片段 N”解释每个短标签；
 - 正文不直接显示 `src_...#seg_...`，但数据库和 Artifact 仍保存原始 ID。
 
-`waiting_for_user` 和 Resume 后的 `succeeded` Run 都允许导出。脚手架尚未
+`waiting_for_user` 和 Editor 完成后的 `succeeded` Run 都允许导出。脚手架尚未
 生成或最终 Artifact 不是合法脚手架时会返回 409。导出器会重新校验严格
 Schema，并转义模型文字中的 HTML 与 Markdown 控制字符，避免它偷偷插入
 标题、链接或远程图片。
@@ -193,22 +193,33 @@ Schema，并转义模型文字中的 HTML 与 Markdown 控制字符，避免它�
 }
 ```
 
-第一次成功响应应该包含：
+第一次成功响应一定包含 `resumed = true` 和
+`idempotent_replay = false`。通常还能看到：
 
 ```text
 resumed = true
 idempotent_replay = false
+run.status = running
+run.current_step = build_podcast_draft
+一个 build_podcast_draft Editor Task 处于 queued 或 running
+```
+
+Resume 只负责可靠保存提交并排队长任务，不等待模型完成。因此第一次响应中
+Editor 也可能已经被本机 Worker 很快领取，甚至在读取响应时已经成功。继续调用
+`GET /runs/{run_id}`，直到：
+
+```text
 run.status = succeeded
 run.current_step = complete
 ```
 
-此时：
+最终：
 
-- Task 仍是 4 个；
-- Artifact 从 4 个增加到 5 个；
-- 新 Artifact 类型为 `user_material_submission`；
-- ModelCall 仍是 3 个，没有新调用或费用；
-- `output_artifact_id` 仍指向采访脚手架；
+- Task 从 4 个增加到 5 个，新增 `build_podcast_draft`；
+- Artifact 从 4 个增加到 6 个，新增 `user_material_submission` 和
+  `build_podcast_draft_result`；
+- ModelCall 从 3 个增加到 4 个；
+- `output_artifact_id` 指向 `build_podcast_draft_result`；
 - submission Artifact 只保存 Source / SourceSegment 引用，不复制口述正文。
 
 在 `GET /runs/{run_id}/events` 中，最后应该依次出现：
@@ -216,6 +227,13 @@ run.current_step = complete
 ```text
 run.resumed
 workflow.user_material.accepted
+task.queued
+workflow.editor.queued
+task.started
+model.call.started
+model.call.completed
+task.succeeded
+workflow.editor.completed
 run.succeeded
 ```
 
@@ -232,6 +250,18 @@ submission_artifact_id 与第一次相同
 换成不同 Source，会返回 409；空值、重复 Source ID、未知 checkpoint 或
 额外字段会返回 422；不存在的 Run 或 Source 会返回 404。
 
+最后分别在 Swagger 执行：
+
+```text
+GET /runs/{run_id}/exports/interview-scaffold.md
+GET /runs/{run_id}/exports/podcast-draft.md
+GET /runs/{run_id}/exports/show-notes.md
+```
+
+三个请求都应返回 200。Draft 与 Show Notes 应包含 `[S1]` 等短引用和来源
+索引，并且能在正文与索引中看出补充 Source 被使用。若 Editor 尚未完成，
+后两个 endpoint 返回 409，这是“未就绪”，不是数据丢失。
+
 ## 5. 自动化测试
 
 运行全部测试：
@@ -243,10 +273,10 @@ pytest
 当前全量基线：
 
 ```text
-130 passed
+151 passed
 ```
 
-定向测试研究、采访脚手架、人工检查点和导出：
+定向测试研究、采访脚手架、人工检查点、Editor 和导出：
 
 ```bash
 pytest tests/test_research_schemas.py \
@@ -254,7 +284,10 @@ pytest tests/test_research_schemas.py \
        tests/test_interview_scaffold.py \
        tests/test_interview_export_api.py \
        tests/test_human_input_schemas.py \
-       tests/test_human_checkpoint_api.py -vv
+       tests/test_human_checkpoint_api.py \
+       tests/test_editor_core.py \
+       tests/test_editor_workflow.py \
+       tests/test_checkpoint_e2e.py -vv
 ```
 
 其中包含：
@@ -264,20 +297,26 @@ pytest tests/test_research_schemas.py \
 - 原话必须存在于来源片段的测试；
 - 两个 Child Task 确实同时执行的并发探针；
 - 正常 fan-out/fan-in 后串行 Interviewer 测试；
-- v3 以 4 Tasks、4 Artifacts、3 ModelCalls 进入人工等待；
-- 补充 Source 后以 4 Tasks、5 Artifacts、3 ModelCalls 结束；
-- v3 新流程与已在途 v1 / v2 Run 的兼容测试；
+- v4 以 4 Tasks、4 Artifacts、3 ModelCalls 进入人工等待；
+- 补充 Source 后以 5 Tasks、6 Artifacts、4 ModelCalls 结束；
+- v4 新流程与已在途 v1 / v2 / v3 Run 的兼容测试；
 - Resume 的输入边界、404 / 409 / 422、幂等重放与冲突；
+- 初始/补充 Source 重叠或补充片段超限时，Resume 原子拒绝且继续等待；
 - 等待状态跨重启恢复、并发相同提交只应用一次；
 - 等待中的 Run 可取消，取消后不能 Resume；
 - Resume 与 Cancel 并发时只有一个终态能成功；
 - submission Artifact 与日志不复制补充口述正文；
-- Markdown 确定性、HTML/Markdown 注入转义和 200/404/409 API 测试；
+- Editor strict schema、topic、初始/补充引用与输入上限；
+- Editor retry、调用预算、重启恢复和取消；
+- Draft / Show Notes 确实使用补充 Source；
+- Markdown 确定性、HTML/Markdown 注入转义、未知内部 ID 拒绝和
+  200/404/409 API 测试；
+- Editor Prompt 与公共 Provider 可在干净 Python 进程中独立导入；
 - 一个 Child 失败后的父子失败传播；
 - 完整 HTTP API 集成测试。
 
-这里的 120 是当前基线；M2.2 的 28 项、M2.3a 的 32 项、M2.3b 的 83 项和
-M2.4 的 99 项仍是各阶段当时的历史结果，不应回写修改。
+这里的 151 是当前基线；M2.2 的 28 项、M2.3a 的 32 项、M2.3b 的 83 项、
+M2.4 的 99 项和 M3.1 的 130 项仍是各阶段当时的历史结果，不应回写修改。
 
 检查代码质量：
 
@@ -299,11 +338,11 @@ alembic check
 No new upgrade operations detected.
 ```
 
-M2.4 和 M3.1 都复用已有 Run、Task、Artifact、Event、ModelCall、Source 与
+M2.4、M3.1 和 M3.2 都复用已有 Run、Task、Artifact、Event、ModelCall、Source 与
 SourceSegment 表，没有新增数据库字段，因此 Alembic 仍为
 `0003_model_call_trace (head)`，没有新的 migration。
 
-### 5.1 一条命令跑完整 M3.1 API 链路
+### 5.1 一条命令跑完整 M3.2 API 链路
 
 日常回归优先用不联网、不收费的 Fake Provider：
 
@@ -311,19 +350,22 @@ SourceSegment 表，没有新增数据库字段，因此 Alembic 仍为
 python -m epiphany.checkpoint_e2e --provider fake --execute
 ```
 
-它会自动导入合成 Source、创建 Run、等待采访检查点、导出 Markdown、导入
-补充口述转写、Resume，并原样重放一次 Resume 验证幂等。证据默认写入：
+它会自动导入合成 Source、创建 Run、等待采访检查点、导出 Scaffold、导入
+补充口述转写、Resume、等待 Editor、导出 Draft / Show Notes，并原样重放
+一次 Resume 验证幂等。证据默认写入：
 
 ```text
-data/checkpoint-e2e.db
-artifacts/checkpoint-e2e/runtime.jsonl
-artifacts/checkpoint-e2e/report.json
-artifacts/checkpoint-e2e/interview-scaffold.md
+data/editor-e2e.db
+artifacts/editor-e2e/runtime.jsonl
+artifacts/editor-e2e/report.json
+artifacts/editor-e2e/interview-scaffold.md
+artifacts/editor-e2e/podcast-draft.md
+artifacts/editor-e2e/show-notes.md
 ```
 
 真实 DeepSeek 只能通过额外写明 `--provider deepseek --execute` 显式触发。
-完整说明见
-[M3.1 后端 / API 全流程 E2E](m3-1-backend-e2e.zh-CN.md)。
+默认不带 `--execute` 只打印 preflight，不联网。M3.2 的完整说明见
+[M3.2 Editor 学习章节](m3-2-editor-final-markdown.zh-CN.md)。
 
 ## 6. 日志怎么看
 
@@ -364,6 +406,16 @@ M3.1 再增加：
 这些日志可以包含 checkpoint、Source/Segment 数量和 Artifact ID，但不能包含
 补充口述正文。日志禁止包含素材正文、prompt、模型完整输出和 API Key。
 
+M3.2 再增加：
+
+- `workflow.editor.queued`：Resume 已可靠提交，Editor Task 已排队；
+- `workflow.editor.completed`：严格结果已提交，Run 即将成功；
+- `run.podcast_draft_markdown.exported`：口播稿已确定性渲染；
+- `run.show_notes_markdown.exported`：Show Notes 已确定性渲染。
+
+这些日志只记录 Run / Task / Artifact ID、引用数和 Markdown 字符数，不打印
+稿件正文。
+
 ## 7. 数据库怎样查看
 
 普通本地开发与 Swagger 默认使用：
@@ -372,10 +424,10 @@ M3.1 再增加：
 backend/data/epiphany.db
 ```
 
-真实 DeepSeek smoke 使用独立的：
+当前 Editor E2E 使用独立的：
 
 ```text
-backend/data/deepseek-live-smoke.db
+backend/data/editor-e2e.db
 ```
 
 这些文件都被 `.gitignore` 排除，不能提交到 GitHub。`.db`、`-wal`、`-shm`
@@ -429,20 +481,20 @@ uvicorn epiphany.main:app --reload --port 8001
 文字输入或粘贴，不含浏览器录音、音频上传或 STT。先在项目外完成语音转文字
 也可以，但导入本系统的仍然是 `text`。
 
-### 为什么 Resume 后立刻变成 succeeded
+### 为什么 Resume 后没有立刻拿到最终稿
 
-M3.1 的目标是证明等待点、补充 Source、幂等提交和持久化恢复。它在同一次
-事务中执行：
+这是预期行为。v4 Resume 负责保存提交并排队 Editor，不把较慢的模型调用
+塞进同一个 HTTP 请求：
 
 ```text
-waiting_for_user -> running -> succeeded
+waiting_for_user -> running -> Editor queued/running -> succeeded
 ```
 
-这一步不会创建 Editor Task。通过 `GET /runs/{run_id}/events` 可以看见
-`run.resumed` 和 `workflow.user_material.accepted`。下一阶段才会让 Editor
-读取补充素材并生成新的内容 Artifact。
+继续轮询 `GET /runs/{run_id}`。只有到 `succeeded / complete` 后，Podcast
+Draft 和 Show Notes 导出才会返回 200。部署前已存在的 v3 Run 保留 M3.1
+历史语义，Resume 后会直接结束且不会新增 Editor 调用。
 
-### 为什么还没有调用真实模型
+### 为什么日常测试没有调用真实模型
 
 默认不调用真实模型是安全设计。M2.2 先用 Fake Provider 证明编排、并发、
 引用和失败传播；M2.3a 证明预算、retry、timeout、tokens、延迟和费用记录；
@@ -470,10 +522,10 @@ pytest tests/test_deepseek_provider.py \
 EPIPHANY_MODEL_PROVIDER=fake
 ```
 
-检查显式 smoke 命令但不联网：
+检查当前完整 E2E 但不联网：
 
 ```bash
-python -m epiphany.live_deepseek_smoke
+python -m epiphany.checkpoint_e2e --provider deepseek
 ```
 
 它默认只打印 preflight，不创建数据库，也不会发送请求。真正执行前，把 Key
@@ -486,15 +538,15 @@ EPIPHANY_DEEPSEEK_API_KEY=your-local-key
 然后显式运行：
 
 ```bash
-python -m epiphany.live_deepseek_smoke --execute
+python -m epiphany.checkpoint_e2e --provider deepseek --execute
 ```
 
 这条独立命令不要求修改默认的 `EPIPHANY_MODEL_PROVIDER=fake`，也不需要启动
-Uvicorn 或 Swagger。它只使用短合成素材；当前 v3 harness 最多调用三次，
-覆盖两个 Researcher 和一个串行 Interviewer，每个任务只尝试一次，并在
-`waiting_for_user` 停止，不会自动 Resume。Trace 保存在忽略提交的
-`data/deepseek-live-smoke.db`。M2.3b 已完成的历史 live smoke 仍是两次调用、
-总计 2301 tokens；不要用当前三调用上限反向改写那次记录。也不要把 Key、
+Uvicorn 或 Swagger。它只使用合成素材；当前 v4 harness 最多调用四次，
+覆盖两个 Researcher、一个串行 Interviewer 和一个串行 Editor，每个任务只
+尝试一次，并自动用合成补充 Source Resume。Trace 保存在忽略提交的
+`data/editor-e2e.db`。2026-07-29 的四调用 live E2E 已通过；M2.3b 历史
+live smoke 仍是两次调用、总计 2301 tokens，不应被当前结果覆盖。也不要把 Key、
 个人日记、播客原稿或真实响应复制进命令历史、测试 fixture、日志和 Git。
 
 常见 smoke 排错：

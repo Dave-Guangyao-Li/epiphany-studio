@@ -7,6 +7,7 @@ from pathlib import Path
 
 from epiphany.checkpoint_e2e import (
     DEFAULT_FIXTURE_PATH,
+    _has_readable_citations,
     _read_log_summary,
     _safe_run_summary,
     load_fixture,
@@ -20,6 +21,19 @@ def _runtime_counts(database_path: Path) -> dict[str, int]:
             table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in ("sources", "runs", "tasks", "artifacts", "model_calls", "events")
         }
+
+
+def test_readable_citation_check_rejects_unknown_and_escaped_internal_ids() -> None:
+    valid_markdown = "来源：[S1]\n\n## 来源索引\n\n- [S1] 《测试素材》片段 1\n"
+    assert _has_readable_citations(valid_markdown)
+
+    for leaked_identifier in (
+        "src_unknown_identifier",
+        "seg_unknown_identifier",
+        r"src\_escaped_identifier",
+        r"seg\_escaped_identifier",
+    ):
+        assert not _has_readable_citations(f"{valid_markdown}\n模型误输出 {leaked_identifier}。\n")
 
 
 def test_checkpoint_fixture_is_synthetic_valid_and_unique() -> None:
@@ -77,6 +91,19 @@ def test_checkpoint_e2e_dry_run_creates_no_runtime_files(
     assert preflight["network_enabled"] is False
     assert preflight["paid_api_call_possible"] is False
     assert preflight["api_key_status"] == "present"
+    assert preflight["max_model_calls_per_run"] == 4
+    assert preflight["max_editor_output_tokens"] == 6_000
+    assert preflight["max_editor_bundle_chars"] == 32_000
+    assert "m3_2_boundary" in preflight
+    assert set(preflight["paths"]) == {
+        "fixture",
+        "database",
+        "log",
+        "report",
+        "interview_scaffold",
+        "podcast_draft",
+        "show_notes",
+    }
     assert secret not in captured.out
     assert secret not in captured.err
     assert not database_path.exists()
@@ -104,7 +131,9 @@ def test_checkpoint_e2e_fake_provider_runs_full_http_journey(
 
     captured = capsys.readouterr()
     report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
-    markdown = (output_dir / "interview-scaffold.md").read_text(encoding="utf-8")
+    scaffold = (output_dir / "interview-scaffold.md").read_text(encoding="utf-8")
+    podcast_draft = (output_dir / "podcast-draft.md").read_text(encoding="utf-8")
+    show_notes = (output_dir / "show-notes.md").read_text(encoding="utf-8")
     log_text = (output_dir / "runtime.jsonl").read_text(encoding="utf-8")
     fixture = load_fixture(DEFAULT_FIXTURE_PATH)
 
@@ -121,36 +150,61 @@ def test_checkpoint_e2e_fake_provider_runs_full_http_journey(
     assert report["waiting_run"]["model_calls_recorded"] == 3
     assert report["final_run"]["status"] == "succeeded"
     assert report["final_run"]["current_step"] == "complete"
-    assert report["final_run"]["task_count"] == 4
-    assert report["final_run"]["artifact_count"] == 5
-    assert report["final_run"]["model_calls_recorded"] == 3
+    assert report["final_run"]["workflow_version"] == "v4"
+    assert report["final_run"]["task_count"] == 5
+    assert report["final_run"]["artifact_count"] == 6
+    assert report["final_run"]["model_calls_recorded"] == 4
+    assert report["final_run"]["task_statuses"] == {"succeeded": 5}
+    assert "build_podcast_draft" in report["final_run"]["task_kinds"]
+    assert "build_podcast_draft_result" in report["final_run"]["artifact_kinds"]
     assert report["resume"]["first_applied"] is True
     assert report["resume"]["replay_idempotent"] is True
     assert report["events"]["after_resume"]["count"] == (
-        report["events"]["before_resume"]["count"] + 3
+        report["events"]["before_resume"]["count"] + 10
     )
     assert report["usage"]["input_tokens"] == 0
     assert report["usage"]["output_tokens"] == 0
     assert report["usage"]["estimated_costs"]["USD"]["micros"] == 0
-    assert report["markdown"]["not_yet_final_podcast_draft"] is True
-    assert report["markdown"]["stable_after_resume"] is True
-    assert report["markdown"]["sha256"] == sha256(markdown.encode()).hexdigest()
-    assert markdown.startswith(f"# {fixture['topic']}")
-    assert "## 开场" in markdown
-    assert "### 采访问题" in markdown
-    assert markdown.count("### 采访问题") == 3
-    assert "来源：[S" in markdown
-    assert "## 来源索引" in markdown
-    assert "《合成素材A｜五年时间线与重听旧录音的晚上》" in markdown
-    assert "2026年7月12日" in markdown
-    assert "重新听见过去的自己" in markdown
-    assert "生活习惯" in markdown
-    assert "src_" not in markdown
-    assert "seg_" not in markdown
-    assert "A deterministic" not in markdown
-    assert "Candidate moment" not in markdown
-    assert markdown.count("“") == markdown.count("”")
-    assert markdown.count("《") == markdown.count("》")
+    scaffold_report = report["markdown"]["interview_scaffold"]
+    draft_report = report["markdown"]["podcast_draft"]
+    notes_report = report["markdown"]["show_notes"]
+    assert scaffold_report["stable_after_resume"] is True
+    assert scaffold_report["sha256"] == sha256(scaffold.encode()).hexdigest()
+    assert draft_report["sha256"] == sha256(podcast_draft.encode()).hexdigest()
+    assert notes_report["sha256"] == sha256(show_notes.encode()).hexdigest()
+    assert all(scaffold_report["structure"].values())
+    assert all(draft_report["structure"].values())
+    assert all(notes_report["structure"].values())
+
+    assert scaffold.startswith(f"# {fixture['topic']}")
+    assert "## 开场" in scaffold
+    assert "### 采访问题" in scaffold
+    assert scaffold.count("### 采访问题") == 3
+    assert "来源：[S" in scaffold
+    assert "## 来源索引" in scaffold
+    assert "《合成素材A｜五年时间线与重听旧录音的晚上》" in scaffold
+    assert "2026年7月12日" in scaffold
+    assert "重新听见过去的自己" in scaffold
+    assert "生活习惯" in scaffold
+
+    assert podcast_draft.startswith(f"# {fixture['topic']}")
+    assert "## 开场" in podcast_draft
+    assert "## 收束" in podcast_draft
+    assert "## 来源索引" in podcast_draft
+    assert "《合成补充口述｜重听时刻、停更原因与重新开始的边界》" in podcast_draft
+    assert "房间特别安静" in podcast_draft
+    assert show_notes.startswith(f"# {fixture['topic']}｜Show Notes")
+    assert "## 本期内容" in show_notes
+    assert "## 来源索引" in show_notes
+    assert "《合成补充口述｜重听时刻、停更原因与重新开始的边界》" in show_notes
+    assert "房间特别安静" in show_notes
+    for markdown in (scaffold, podcast_draft, show_notes):
+        assert "src_" not in markdown
+        assert "seg_" not in markdown
+        assert "A deterministic" not in markdown
+        assert "Candidate moment" not in markdown
+        assert markdown.count("“") == markdown.count("”")
+        assert markdown.count("《") == markdown.count("》")
 
     log_rows = [json.loads(line) for line in log_text.splitlines() if line.strip()]
     assert log_rows
@@ -158,6 +212,8 @@ def test_checkpoint_e2e_fake_provider_runs_full_http_journey(
     assert any(row.get("event") == "run.waiting_for_user" for row in log_rows)
     assert any(row.get("event") == "run.resume.accepted" for row in log_rows)
     assert any(row.get("event") == "run.resume.idempotent_replay" for row in log_rows)
+    assert any(row.get("event") == "workflow.editor.queued" for row in log_rows)
+    assert any(row.get("event") == "workflow.editor.completed" for row in log_rows)
     assert any(row.get("request_id") == "req_e2e_create_run" for row in log_rows)
     for source in [*fixture["initial_sources"], fixture["supplemental_source"]]:
         assert source["text"] not in log_text
@@ -166,9 +222,9 @@ def test_checkpoint_e2e_fake_provider_runs_full_http_journey(
     counts = _runtime_counts(database_path)
     assert counts["sources"] == 4
     assert counts["runs"] == 1
-    assert counts["tasks"] == 4
-    assert counts["artifacts"] == 5
-    assert counts["model_calls"] == 3
+    assert counts["tasks"] == 5
+    assert counts["artifacts"] == 6
+    assert counts["model_calls"] == 4
     assert counts["events"] == report["events"]["after_resume"]["count"]
 
 
@@ -237,7 +293,7 @@ def test_checkpoint_e2e_rejects_database_with_active_task_without_new_work(
     assert not (blocked_output_dir / "runtime.jsonl").exists()
     assert _runtime_counts(database_path) == counts_before
     assert counts_before["runs"] == 1
-    assert counts_before["model_calls"] == 3
+    assert counts_before["model_calls"] == 4
     assert "database_has_active_tasks" in captured.err
 
 
@@ -284,7 +340,7 @@ def test_safe_run_summary_keeps_task_error_codes_without_task_payloads() -> None
         {
             "id": "run_test",
             "workflow_type": "episode-research",
-            "workflow_version": "v3",
+            "workflow_version": "v4",
             "status": "failed",
             "current_step": "research",
             "tasks": [
@@ -327,6 +383,8 @@ def test_log_summary_aggregates_error_codes_without_exposing_forbidden_text(
         {"event": "run.waiting_for_user", "level": "INFO"},
         {"event": "run.resume.accepted", "level": "INFO"},
         {"event": "run.resume.idempotent_replay", "level": "INFO"},
+        {"event": "workflow.editor.queued", "level": "INFO"},
+        {"event": "workflow.editor.completed", "level": "INFO"},
         {
             "event": "task.failed",
             "level": "ERROR",

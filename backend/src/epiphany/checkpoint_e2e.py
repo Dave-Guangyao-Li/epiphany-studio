@@ -20,6 +20,7 @@ import httpx
 from pydantic import ValidationError
 
 from epiphany.config import Settings
+from epiphany.episode_markdown import contains_internal_source_identifier
 from epiphany.live_deepseek_smoke import database_url_for_path, migrate_database
 from epiphany.main import create_app
 from epiphany.observability import JsonFormatter, RequestContextFilter
@@ -28,16 +29,19 @@ from epiphany.schemas import CreateSourceRequest
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_FIXTURE_PATH = BACKEND_DIR / "fixtures/e2e/m3-1-episode.zh-CN.json"
-DEFAULT_DATABASE_PATH = BACKEND_DIR / "data/checkpoint-e2e.db"
-DEFAULT_OUTPUT_DIR = BACKEND_DIR / "artifacts/checkpoint-e2e"
+DEFAULT_DATABASE_PATH = BACKEND_DIR / "data/editor-e2e.db"
+DEFAULT_OUTPUT_DIR = BACKEND_DIR / "artifacts/editor-e2e"
 
 LIVE_MODEL = "deepseek-v4-flash"
-MAX_MODEL_CALLS = 3
+PRE_RESUME_MODEL_CALLS = 3
+MAX_MODEL_CALLS = 4
 MAX_TASK_ATTEMPTS = 1
 MAX_CONCURRENCY = 1
 MAX_OUTPUT_TOKENS_PER_CALL = 3_200
+MAX_EDITOR_OUTPUT_TOKENS = 6_000
 MAX_SOURCE_CHARS = 8_000
 MAX_INTERVIEW_BUNDLE_CHARS = 24_000
+MAX_EDITOR_BUNDLE_CHARS = 32_000
 TASK_TIMEOUT_SECONDS = 120
 FLOW_TIMEOUT_SECONDS = 420
 POLL_INTERVAL_SECONDS = 1.0
@@ -46,14 +50,17 @@ EXPECTED_WAITING_STATUS = "waiting_for_user"
 EXPECTED_WAITING_STEP = "awaiting_interview_response"
 EXPECTED_FINAL_STATUS = "succeeded"
 EXPECTED_FINAL_STEP = "complete"
-EXPECTED_WORKFLOW_VERSION = "v3"
+EXPECTED_WORKFLOW_VERSION = "v4"
 EXPECTED_PRE_RESUME_ARTIFACT_KINDS = {
     "timeline_research_result",
     "theme_research_result",
     "episode_research_bundle",
     "build_interview_scaffold_result",
 }
-EXPECTED_FINAL_ARTIFACT_KINDS = EXPECTED_PRE_RESUME_ARTIFACT_KINDS | {"user_material_submission"}
+EXPECTED_FINAL_ARTIFACT_KINDS = EXPECTED_PRE_RESUME_ARTIFACT_KINDS | {
+    "user_material_submission",
+    "build_podcast_draft_result",
+}
 
 
 class E2EFlowError(RuntimeError):
@@ -85,8 +92,16 @@ class E2EPaths:
         return self.output_dir / "report.json"
 
     @property
-    def markdown(self) -> Path:
+    def interview_scaffold(self) -> Path:
         return self.output_dir / "interview-scaffold.md"
+
+    @property
+    def podcast_draft(self) -> Path:
+        return self.output_dir / "podcast-draft.md"
+
+    @property
+    def show_notes(self) -> Path:
+        return self.output_dir / "show-notes.md"
 
 
 def build_preflight(
@@ -116,8 +131,10 @@ def build_preflight(
         "max_attempts_per_task": MAX_TASK_ATTEMPTS,
         "max_concurrency": MAX_CONCURRENCY,
         "max_output_tokens_per_call": (MAX_OUTPUT_TOKENS_PER_CALL if provider == "deepseek" else 0),
+        "max_editor_output_tokens": (MAX_EDITOR_OUTPUT_TOKENS if provider == "deepseek" else 0),
         "max_research_source_chars": MAX_SOURCE_CHARS,
         "max_interview_bundle_chars": MAX_INTERVIEW_BUNDLE_CHARS,
+        "max_editor_bundle_chars": MAX_EDITOR_BUNDLE_CHARS,
         "flow_timeout_seconds": FLOW_TIMEOUT_SECONDS,
         "billing_currency": billing_currency if provider == "deepseek" else "USD",
         "expected_cost": {
@@ -138,11 +155,13 @@ def build_preflight(
             "database": str(paths.database),
             "log": str(paths.log),
             "report": str(paths.report),
-            "markdown": str(paths.markdown),
+            "interview_scaffold": str(paths.interview_scaffold),
+            "podcast_draft": str(paths.podcast_draft),
+            "show_notes": str(paths.show_notes),
         },
-        "m3_1_boundary": (
-            "The exported Markdown is an interview scaffold. "
-            "M3.2 Editor will turn supplemental material into a final podcast draft."
+        "m3_2_boundary": (
+            "The run pauses once for human material, then the Editor produces "
+            "a source-grounded podcast draft and Show Notes. Publication remains manual."
         ),
     }
 
@@ -208,8 +227,10 @@ def build_provider(
         billing_currency=settings.deepseek_billing_currency,
         base_url=settings.deepseek_base_url,
         max_tokens=MAX_OUTPUT_TOKENS_PER_CALL,
+        editor_max_tokens=MAX_EDITOR_OUTPUT_TOKENS,
         max_source_chars=MAX_SOURCE_CHARS,
         max_interview_bundle_chars=MAX_INTERVIEW_BUNDLE_CHARS,
+        max_editor_bundle_chars=MAX_EDITOR_BUNDLE_CHARS,
         request_timeout_seconds=TASK_TIMEOUT_SECONDS + 5,
     )
 
@@ -267,6 +288,7 @@ async def _request_markdown(
     stage: str,
     request_id: str,
     run_id: str,
+    filename_prefix: str,
 ) -> str:
     try:
         response = await client.get(
@@ -295,7 +317,7 @@ async def _request_markdown(
         )
     if not response.headers.get("Content-Type", "").lower().startswith("text/markdown"):
         raise E2EFlowError(stage=stage, code="markdown_content_type_invalid")
-    expected_disposition = f'attachment; filename="interview-scaffold-{run_id}.md"'
+    expected_disposition = f'attachment; filename="{filename_prefix}-{run_id}.md"'
     if response.headers.get("Content-Disposition") != expected_disposition:
         raise E2EFlowError(stage=stage, code="markdown_content_disposition_invalid")
     return response.text
@@ -365,6 +387,26 @@ async def _poll_for_checkpoint(
             return run
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
     raise E2EFlowError(stage="poll_checkpoint", code="flow_timeout")
+
+
+async def _poll_for_terminal(
+    client: httpx.AsyncClient,
+    run_id: str,
+) -> dict[str, Any]:
+    deadline = monotonic() + FLOW_TIMEOUT_SECONDS
+    poll_index = 0
+    while monotonic() < deadline:
+        poll_index += 1
+        run = await _get_run(
+            client,
+            run_id,
+            stage="poll_terminal",
+            request_id=f"req_e2e_terminal_{poll_index:04d}",
+        )
+        if run.get("status") in {"succeeded", "failed", "cancelled"}:
+            return run
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+    raise E2EFlowError(stage="poll_terminal", code="flow_timeout")
 
 
 def _safe_run_summary(run: dict[str, Any]) -> dict[str, Any]:
@@ -517,6 +559,8 @@ def _read_log_summary(
         "run.waiting_for_user",
         "run.resume.accepted",
         "run.resume.idempotent_replay",
+        "workflow.editor.queued",
+        "workflow.editor.completed",
     }
     required_present = required_events.issubset(event_counts)
     deepseek_count_valid = (
@@ -538,17 +582,75 @@ def _read_log_summary(
     return summary, required_present and deepseek_count_valid and redacted
 
 
-def _markdown_checks(markdown: str, *, topic: str) -> dict[str, bool]:
+def _has_readable_citations(markdown: str) -> bool:
+    return (
+        "来源：[S" in markdown
+        and "## 来源索引" in markdown
+        and not contains_internal_source_identifier(markdown)
+    )
+
+
+def _scaffold_markdown_checks(markdown: str, *, topic: str) -> dict[str, bool]:
     numbered_sections = re.findall(r"^## \d+\.", markdown, flags=re.MULTILINE)
     return {
         "title_matches_topic": markdown.splitlines()[0] == f"# {topic}",
         "has_opening": "## 开场" in markdown,
         "has_at_least_two_sections": len(numbered_sections) >= 2,
         "has_interview_questions": "### 采访问题" in markdown,
-        "has_source_labels": (
-            "来源：[S" in markdown
-            and "## 来源索引" in markdown
-            and re.search(r"src_[^\s`]+#seg_[^\s`]+", markdown) is None
+        "has_source_labels": _has_readable_citations(markdown),
+    }
+
+
+def _podcast_draft_markdown_checks(
+    markdown: str,
+    *,
+    topic: str,
+    supplemental_title: str,
+) -> dict[str, bool]:
+    body, _, source_index = markdown.partition("## 来源索引")
+    supplemental_label_match = re.search(
+        rf"- \[(S\d+)\] 《{re.escape(supplemental_title)}》片段 \d+",
+        source_index,
+    )
+    supplemental_label = (
+        supplemental_label_match.group(1) if supplemental_label_match is not None else None
+    )
+    numbered_sections = re.findall(r"^## \d+\.", body, flags=re.MULTILINE)
+    return {
+        "title_matches_topic": markdown.splitlines()[0] == f"# {topic}",
+        "has_opening": "## 开场" in body,
+        "has_at_least_two_sections": len(numbered_sections) >= 2,
+        "has_closing": "## 收束" in body,
+        "has_source_labels": _has_readable_citations(markdown),
+        "supplemental_source_indexed": supplemental_label is not None,
+        "supplemental_evidence_used_in_body": (
+            supplemental_label is not None and f"[{supplemental_label}]" in body
+        ),
+    }
+
+
+def _show_notes_markdown_checks(
+    markdown: str,
+    *,
+    topic: str,
+    supplemental_title: str,
+) -> dict[str, bool]:
+    body, _, source_index = markdown.partition("## 来源索引")
+    supplemental_label_match = re.search(
+        rf"- \[(S\d+)\] 《{re.escape(supplemental_title)}》片段 \d+",
+        source_index,
+    )
+    supplemental_label = (
+        supplemental_label_match.group(1) if supplemental_label_match is not None else None
+    )
+    return {
+        "title_matches_topic": markdown.splitlines()[0] == f"# {topic}｜Show Notes",
+        "has_key_points": "## 本期内容" in body
+        and re.search(r"^- ", body, re.MULTILINE) is not None,
+        "has_source_labels": _has_readable_citations(markdown),
+        "supplemental_source_indexed": supplemental_label is not None,
+        "supplemental_evidence_used_in_body": (
+            supplemental_label is not None and f"[{supplemental_label}]" in body
         ),
     }
 
@@ -689,15 +791,16 @@ async def execute_e2e(
                         code="events_response_invalid",
                     )
 
-                markdown_before = await _request_markdown(
+                scaffold_before = await _request_markdown(
                     client,
                     f"/runs/{run_id}/exports/interview-scaffold.md",
                     stage="export_waiting",
                     request_id="req_e2e_export_waiting",
                     run_id=run_id,
+                    filename_prefix="interview-scaffold",
                 )
-                paths.markdown.write_text(markdown_before, encoding="utf-8")
-                markdown_before_sha = hashlib.sha256(markdown_before.encode("utf-8")).hexdigest()
+                paths.interview_scaffold.write_text(scaffold_before, encoding="utf-8")
+                scaffold_before_sha = hashlib.sha256(scaffold_before.encode("utf-8")).hexdigest()
 
                 supplemental = await _import_source(
                     client,
@@ -732,32 +835,81 @@ async def execute_e2e(
                 if not isinstance(resumed, dict) or not isinstance(replay, dict):
                     raise E2EFlowError(stage="resume", code="resume_response_invalid")
 
+                final_run = await _poll_for_terminal(client, run_id)
+                if final_run.get("status") != EXPECTED_FINAL_STATUS:
+                    failed_events = await _request_json(
+                        client,
+                        "GET",
+                        f"/runs/{run_id}/events",
+                        stage="events_after_editor_failure",
+                        request_id="req_e2e_editor_events_failed",
+                        expected_statuses={200},
+                    )
+                    model_calls = final_run.get("model_calls", [])
+                    raise E2EFlowError(
+                        stage="poll_terminal",
+                        code=f"run_stopped_as_{final_run.get('status', 'unknown')}",
+                        safe_context={
+                            "run": _safe_run_summary(final_run),
+                            "events": (
+                                _event_summary(failed_events)
+                                if isinstance(failed_events, list)
+                                else {}
+                            ),
+                            "usage": {
+                                "input_tokens": sum(
+                                    int(call.get("input_tokens") or 0) for call in model_calls
+                                ),
+                                "output_tokens": sum(
+                                    int(call.get("output_tokens") or 0) for call in model_calls
+                                ),
+                                "duration_ms": sum(
+                                    int(call.get("duration_ms") or 0) for call in model_calls
+                                ),
+                                "estimated_costs": _cost_summary(model_calls),
+                            },
+                        },
+                    )
+
                 events_after = await _request_json(
                     client,
                     "GET",
                     f"/runs/{run_id}/events",
-                    stage="events_after_resume",
+                    stage="events_after_editor",
                     request_id="req_e2e_events_after",
                     expected_statuses={200},
                 )
                 if not isinstance(events_after, list):
                     raise E2EFlowError(
-                        stage="events_after_resume",
+                        stage="events_after_editor",
                         code="events_response_invalid",
                     )
-                final_run = await _get_run(
-                    client,
-                    run_id,
-                    stage="get_final_run",
-                    request_id="req_e2e_final_run",
-                )
-                markdown_after = await _request_markdown(
+                scaffold_after = await _request_markdown(
                     client,
                     f"/runs/{run_id}/exports/interview-scaffold.md",
                     stage="export_final",
                     request_id="req_e2e_export_final",
                     run_id=run_id,
+                    filename_prefix="interview-scaffold",
                 )
+                podcast_draft = await _request_markdown(
+                    client,
+                    f"/runs/{run_id}/exports/podcast-draft.md",
+                    stage="export_podcast_draft",
+                    request_id="req_e2e_export_podcast_draft",
+                    run_id=run_id,
+                    filename_prefix="podcast-draft",
+                )
+                show_notes = await _request_markdown(
+                    client,
+                    f"/runs/{run_id}/exports/show-notes.md",
+                    stage="export_show_notes",
+                    request_id="req_e2e_export_show_notes",
+                    run_id=run_id,
+                    filename_prefix="show-notes",
+                )
+                paths.podcast_draft.write_text(podcast_draft, encoding="utf-8")
+                paths.show_notes.write_text(show_notes, encoding="utf-8")
     finally:
         application_logger.removeHandler(file_handler)
         file_handler.close()
@@ -772,7 +924,9 @@ async def execute_e2e(
         application_logger.setLevel(previous_level)
         application_logger.propagate = previous_propagate
 
-    markdown_after_sha = hashlib.sha256(markdown_after.encode("utf-8")).hexdigest()
+    scaffold_after_sha = hashlib.sha256(scaffold_after.encode("utf-8")).hexdigest()
+    podcast_draft_sha = hashlib.sha256(podcast_draft.encode("utf-8")).hexdigest()
+    show_notes_sha = hashlib.sha256(show_notes.encode("utf-8")).hexdigest()
     waiting_summary = _safe_run_summary(waiting)
     final_summary = _safe_run_summary(final_run)
     model_calls = final_run.get("model_calls", [])
@@ -790,7 +944,21 @@ async def execute_e2e(
     supplemental_text = fixture["supplemental_source"]["text"]
     expected_model = provider.model
     expected_currency = provider.billing_currency.upper()
-    markdown_check_results = _markdown_checks(markdown_before, topic=fixture["topic"])
+    scaffold_check_results = _scaffold_markdown_checks(
+        scaffold_before,
+        topic=fixture["topic"],
+    )
+    supplemental_title = str(fixture["supplemental_source"]["title"])
+    podcast_draft_check_results = _podcast_draft_markdown_checks(
+        podcast_draft,
+        topic=fixture["topic"],
+        supplemental_title=supplemental_title,
+    )
+    show_notes_check_results = _show_notes_markdown_checks(
+        show_notes,
+        topic=fixture["topic"],
+        supplemental_title=supplemental_title,
+    )
     events_before_types = [event.get("type") for event in events_before]
     events_after_types = [event.get("type") for event in events_after]
     imported_source_rows = [
@@ -816,8 +984,8 @@ async def execute_e2e(
         "waiting_runtime_counts": (
             len(waiting.get("tasks", [])) == 4
             and len(waiting.get("artifacts", [])) == 4
-            and len(waiting.get("model_calls", [])) == MAX_MODEL_CALLS
-            and waiting.get("model_call_count") == MAX_MODEL_CALLS
+            and len(waiting.get("model_calls", [])) == PRE_RESUME_MODEL_CALLS
+            and waiting.get("model_call_count") == PRE_RESUME_MODEL_CALLS
         ),
         "waiting_tasks_succeeded": all(
             task.get("status") == "succeeded" for task in waiting.get("tasks", [])
@@ -844,7 +1012,7 @@ async def execute_e2e(
         "waiting_event_present": (
             events_before_types and events_before_types[-1] == "run.waiting_for_user"
         ),
-        "markdown_structure_valid": all(markdown_check_results.values()),
+        "scaffold_markdown_structure_valid": all(scaffold_check_results.values()),
         "supplemental_source_imported": supplemental["source"]["segment_count"] >= 1,
         "resume_applied_once": (
             resumed.get("resumed") is True and resumed.get("idempotent_replay") is False
@@ -855,10 +1023,13 @@ async def execute_e2e(
             and replay.get("submission_artifact_id") == resumed.get("submission_artifact_id")
         ),
         "final_runtime_counts": (
-            len(final_run.get("tasks", [])) == 4
-            and len(final_run.get("artifacts", [])) == 5
+            len(final_run.get("tasks", [])) == 5
+            and len(final_run.get("artifacts", [])) == 6
             and len(final_run.get("model_calls", [])) == MAX_MODEL_CALLS
             and final_run.get("model_call_count") == MAX_MODEL_CALLS
+        ),
+        "final_tasks_succeeded": all(
+            task.get("status") == "succeeded" for task in final_run.get("tasks", [])
         ),
         "final_status_succeeded": (
             final_run.get("status") == EXPECTED_FINAL_STATUS
@@ -878,19 +1049,32 @@ async def execute_e2e(
             )
         ),
         "resume_events_added_once": (
-            len(events_after) == len(events_before) + 3
-            and events_after_types[-3:]
+            len(events_after) == len(events_before) + 10
+            and events_after_types[len(events_before) :]
             == [
                 "run.resumed",
                 "workflow.user_material.accepted",
+                "task.queued",
+                "workflow.editor.queued",
+                "task.started",
+                "model.call.started",
+                "model.call.completed",
+                "task.succeeded",
+                "workflow.editor.completed",
                 "run.succeeded",
             ]
         ),
-        "markdown_stable_after_resume": (
-            markdown_before_sha == markdown_after_sha and markdown_before == markdown_after
+        "scaffold_stable_after_resume": (
+            scaffold_before_sha == scaffold_after_sha and scaffold_before == scaffold_after
         ),
         "scaffold_excludes_supplemental_source_text": (
-            supplemental_text not in markdown_before and supplemental_text not in markdown_after
+            supplemental_text not in scaffold_before and supplemental_text not in scaffold_after
+        ),
+        "podcast_draft_structure_valid": all(podcast_draft_check_results.values()),
+        "show_notes_structure_valid": all(show_notes_check_results.values()),
+        "final_markdown_uses_supplemental_evidence": (
+            podcast_draft_check_results["supplemental_evidence_used_in_body"]
+            and show_notes_check_results["supplemental_evidence_used_in_body"]
         ),
     }
 
@@ -946,13 +1130,28 @@ async def execute_e2e(
             "estimated_costs": _cost_summary(model_calls),
         },
         "markdown": {
-            "kind": "interview_scaffold",
-            "path": str(paths.markdown),
-            "char_count": len(markdown_before),
-            "sha256": markdown_before_sha,
-            "structure": markdown_check_results,
-            "stable_after_resume": markdown_before_sha == markdown_after_sha,
-            "not_yet_final_podcast_draft": True,
+            "interview_scaffold": {
+                "kind": "interview_scaffold",
+                "path": str(paths.interview_scaffold),
+                "char_count": len(scaffold_before),
+                "sha256": scaffold_before_sha,
+                "structure": scaffold_check_results,
+                "stable_after_resume": scaffold_before_sha == scaffold_after_sha,
+            },
+            "podcast_draft": {
+                "kind": "podcast_draft",
+                "path": str(paths.podcast_draft),
+                "char_count": len(podcast_draft),
+                "sha256": podcast_draft_sha,
+                "structure": podcast_draft_check_results,
+            },
+            "show_notes": {
+                "kind": "show_notes",
+                "path": str(paths.show_notes),
+                "char_count": len(show_notes),
+                "sha256": show_notes_sha,
+                "structure": show_notes_check_results,
+            },
         },
         "logs": log_summary,
         "checks": checks,
@@ -977,7 +1176,8 @@ def _print_json(payload: dict[str, Any], *, stream: Any | None = None) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Exercise the complete M3.1 Source -> Run -> Markdown -> Resume API journey. "
+            "Exercise the complete M3.2 Source -> checkpoint -> Resume -> Editor -> "
+            "Markdown API journey. "
             "Without --execute this command only prints a safe preflight."
         )
     )
@@ -1122,7 +1322,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "database": str(paths.database),
                 "log": str(paths.log),
                 "report": str(paths.report),
-                "markdown": str(paths.markdown),
+                "interview_scaffold": str(paths.interview_scaffold),
+                "podcast_draft": str(paths.podcast_draft),
+                "show_notes": str(paths.show_notes),
             },
             "evidence": safe_context,
             "logs": log_summary,
@@ -1146,8 +1348,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "database_path": report["runtime"]["database_path"],
             "log_path": report["logs"]["path"],
             "report_path": str(paths.report),
-            "markdown_path": report["markdown"]["path"],
-            "markdown_sha256": report["markdown"]["sha256"],
+            "interview_scaffold_path": report["markdown"]["interview_scaffold"]["path"],
+            "podcast_draft_path": report["markdown"]["podcast_draft"]["path"],
+            "show_notes_path": report["markdown"]["show_notes"]["path"],
+            "podcast_draft_sha256": report["markdown"]["podcast_draft"]["sha256"],
+            "show_notes_sha256": report["markdown"]["show_notes"]["sha256"],
         }
     )
     return 0 if report["passed"] else 1

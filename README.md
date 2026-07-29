@@ -93,13 +93,13 @@ accounting, input/output bounds, and log redaction. It remains opt-in:
 MockTransport and smoke safety tests use a Fake Provider, so neither incurs API
 usage.
 
-M2.3b-2a adds a separate, bounded live-smoke command. Its default mode is a
+M2.3b-2a added a separate, bounded live-smoke command. Its default mode is a
 zero-network preflight; `--execute` is required before it can send requests
-using short synthetic material. The current workflow-v3 harness is capped at
-three calls—two Researchers followed by one serial Interviewer—fixes the model
-to `deepseek-v4-flash`, allows one attempt per model-backed Task, applies
-Alembic to a dedicated ignored SQLite trace database, and prints only IDs,
-status, tokens, latency, cost, and error codes. M2.3b-2b used the earlier
+using synthetic material. The current workflow-v4 E2E harness is capped at
+four calls—two Researchers followed by a serial Interviewer and Editor—fixes
+the model to `deepseek-v4-flash`, allows one attempt per model-backed Task,
+applies Alembic to a dedicated ignored SQLite trace database, and prints only
+IDs, status, tokens, latency, cost, and error codes. M2.3b-2b used the earlier
 two-call boundary to complete the first live smoke successfully: both Research
 Tasks passed strict validation and fan-in, with an estimated total cost of USD
 0.000491.
@@ -197,7 +197,7 @@ was verified only in dry-run mode: no new paid live smoke was performed. The
 full suite passes with 99 tests. The historical M2.3b live result above remains
 the two-call, 2,301-token, USD 0.000491 trace.
 
-M3.1 adds the first durable human checkpoint. New `episode-research` Runs are
+M3.1 added the first durable human checkpoint. Runs created in that slice were
 stamped workflow `v3`. After the two parallel Researchers, deterministic
 fan-in, and serial Interviewer finish, the Run pauses at
 `waiting_for_user / awaiting_interview_response` with four Tasks, four
@@ -205,23 +205,21 @@ Artifacts, and three completed ModelCalls. The validated Scaffold can already
 be exported while the Run waits, and restarting the backend does not lose the
 checkpoint.
 
-Supplemental speech is currently **text**, not live audio. The user imports an
+Supplemental speech remains **text**, not live audio. The user imports an
 already-transcribed passage through `POST /sources` and passes its Source ID to
 `POST /runs/{run_id}/resume`. Resume persists a source-reference-only
-`user_material_submission`, supports idempotent network replay, and completes
-the M3.1 checkpoint without another Task or model call. It therefore adds no
-Token or API cost, and the output remains the Scaffold until the M3.2 Editor is
-implemented. v1 and v2 in-flight semantics remain compatible.
+`user_material_submission` and supports idempotent network replay. Historical
+v3 Runs complete the M3.1 checkpoint without another Task or model call. v1,
+v2, and v3 in-flight semantics remain compatible.
 
-M3.1 does not request microphone permission and does not implement recording,
-speech-to-text, TTS, voice cloning, a final podcast draft, Show Notes, or a Web
-UI. The supported runtime remains local and single-process; database-level
+M3 does not request microphone permission and does not implement recording,
+speech-to-text, TTS, voice cloning, or a Web UI. The supported runtime remains
+local and single-process; database-level
 multi-process Resume coordination is deferred to deployment hardening. The
-current full suite passes with 130 tests, Ruff lint/format and Alembic
-current/check pass.
+M3.1 historical acceptance completed with 130 tests.
 
-A committed synthetic fixture and guarded command now exercise the complete
-M3.1 backend/API journey without waiting for the Web UI:
+A committed synthetic fixture and guarded command, first introduced for M3.1,
+now exercise the complete v4 backend/API journey without waiting for the Web UI:
 
 ```bash
 cd backend
@@ -229,13 +227,13 @@ python -m epiphany.checkpoint_e2e --provider fake --execute
 ```
 
 It writes an ignored SQLite database, structured JSONL log, machine-readable
-report, and Interview Scaffold Markdown. Fake output now derives deterministic
-topic-relevant sentences from its assigned SourceSegments—the committed
-synthetic fixture in this E2E—instead of English filler.
-Exported Markdown uses `[S1]` labels and a Source-title/segment-position index,
-while raw Source/Segment IDs remain in SQLite and structured Artifacts.
+report, Interview Scaffold, Podcast Draft, and Show Notes. Fake output derives
+deterministic topic-relevant sentences from its assigned SourceSegments—the
+committed synthetic fixture in this E2E—instead of English filler. Exported
+Markdown uses `[S1]` labels and a Source-title/segment-position index, while raw
+Source/Segment IDs remain in SQLite and structured Artifacts.
 
-A separate explicit DeepSeek mode is bounded to three calls. A realistic
+A separate explicit M3.1 DeepSeek mode was bounded to three calls. A realistic
 three-initial-Source plus one-supplemental-Source run has now completed
 `waiting_for_user -> Resume -> succeeded`: 4 Tasks succeeded, 3 ModelCalls
 used 10,046 input and 6,670 output tokens, and local estimated cost was CNY
@@ -245,6 +243,41 @@ content-quality review, and limitations are recorded in the
 [evidence chapter](docs/learning/m3-1-realistic-e2e-evidence.zh-CN.md);
 the [E2E runbook](docs/learning/m3-1-backend-e2e.zh-CN.md) keeps the repeatable
 commands.
+
+M3.2 completes the first source-to-draft backend loop. Newly created
+`episode-research` Runs use workflow `v4`. The Run still pauses with four
+Tasks, four Artifacts, and three ModelCalls. The user imports one or more
+already-transcribed supplemental Sources and calls the same idempotent Resume
+API. Resume now queues a serial root `build_podcast_draft` Editor Task; the
+Worker validates its strict Podcast Script and Show Notes output before
+committing the final Artifact.
+
+A successful v4 Run has five Tasks, six Artifacts, and four ModelCalls. Its
+final output is `build_podcast_draft_result`, while the original Scaffold
+remains independently exportable:
+
+```text
+GET /runs/{run_id}/exports/interview-scaffold.md
+GET /runs/{run_id}/exports/podcast-draft.md
+GET /runs/{run_id}/exports/show-notes.md
+```
+
+The Editor may cite only its assigned initial and supplemental SourceSegments.
+The Podcast Script must use both categories, and Show Notes must use the
+supplemental material. User-facing Markdown uses short `[S1]` citations plus a
+Source-title/segment-position index; raw IDs remain in SQLite and structured
+Artifacts. Resume replay cannot queue or bill the Editor twice. Retry,
+restart recovery, cancellation, lease fencing, and the per-Run call budget
+cover the new Task. v1/v2/v3 persisted Runs retain their historical behavior,
+and no migration is required.
+
+The current 151-test suite, Ruff checks, Alembic checks, and the zero-cost Fake
+M3.2 E2E pass. A 2026-07-29 synthetic `deepseek-v4-flash` E2E also completed
+all four calls and all guarded checks: 16,667 input tokens, 9,468 output tokens,
+73,018 ms combined Provider duration, and an estimated CNY 0.035603. This is a
+local price-table estimate, not the provider invoice, and the candidate content
+still requires human review. See the
+[M3.2 learning chapter](docs/learning/m3-2-editor-final-markdown.zh-CN.md).
 
 ## License
 

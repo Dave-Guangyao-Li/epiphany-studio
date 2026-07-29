@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
 from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
 from epiphany.runtime.providers.base import (
     ProviderResult,
@@ -254,6 +255,7 @@ class FakeProvider:
             "timeline_research": self._timeline_research,
             "theme_research": self._theme_research,
             BUILD_INTERVIEW_SCAFFOLD: self._build_interview_scaffold,
+            BUILD_PODCAST_DRAFT: self._build_podcast_draft,
         }
         try:
             content = handlers[invocation.kind](invocation.input_json)
@@ -533,5 +535,110 @@ class FakeProvider:
                     f"再顺着“{theme_label}”追到今天；新的记忆出现时，就沿着它继续。"
                 ),
                 "source_refs": overview_refs,
+            },
+        }
+
+    @staticmethod
+    def _build_podcast_draft(input_json: dict[str, Any]) -> dict[str, Any]:
+        """Create readable, deterministic Editor output from real test material."""
+
+        topic = str(input_json["topic"])
+        scaffold = input_json["interview_scaffold"]
+        initial_segments = input_json["initial_source_segments"]
+        supplemental_segments = input_json["supplemental_source_segments"]
+
+        initial_refs = [_source_ref(segment) for segment in initial_segments]
+        supplemental_refs = [_source_ref(segment) for segment in supplemental_segments]
+        overview_refs = _merge_refs([initial_refs[0]], [supplemental_refs[0]])
+
+        sections: list[dict[str, Any]] = []
+        for section in scaffold["sections"]:
+            paragraphs: list[dict[str, Any]] = []
+            for context in section["known_context"]:
+                paragraphs.append(
+                    {
+                        "text": _clip(str(context["text"]), 600),
+                        "source_refs": list(context["source_refs"]),
+                    }
+                )
+            if not paragraphs:
+                transition = section["transition"]
+                paragraphs.append(
+                    {
+                        "text": _clip(str(transition["text"]), 600),
+                        "source_refs": list(transition["source_refs"]),
+                    }
+                )
+            sections.append(
+                {
+                    "title": str(section["title"]),
+                    "source_refs": _merge_refs(
+                        list(section["source_refs"]),
+                        *[list(paragraph["source_refs"]) for paragraph in paragraphs],
+                    ),
+                    "paragraphs": paragraphs,
+                }
+            )
+
+        supplemental_paragraphs = [
+            {
+                "text": (
+                    "补充口述把这段经历带回了一个更具体的瞬间："
+                    f"{_clip(_sentences(str(segment['text']))[0], 520)}"
+                ),
+                "source_refs": [_source_ref(segment)],
+            }
+            for segment in supplemental_segments[:3]
+            if _sentences(str(segment["text"]))
+        ]
+        sections[-1]["paragraphs"].extend(supplemental_paragraphs)
+        sections[-1]["source_refs"] = _merge_refs(
+            *[list(paragraph["source_refs"]) for paragraph in supplemental_paragraphs],
+            list(sections[-1]["source_refs"]),
+        )[:10]
+
+        initial_sentence = _clip(
+            _sentences(str(initial_segments[0]["text"]))[0],
+            360,
+        )
+        supplemental_sentence = _clip(
+            _sentences(str(supplemental_segments[0]["text"]))[0],
+            360,
+        )
+        return {
+            "title": topic,
+            "podcast_script": {
+                "opening": {
+                    "text": str(scaffold["opening"]["text"]),
+                    "source_refs": list(scaffold["opening"]["source_refs"]),
+                },
+                "sections": sections,
+                "closing": {
+                    "text": str(scaffold["closing"]["text"]),
+                    "source_refs": list(scaffold["closing"]["source_refs"]),
+                },
+            },
+            "show_notes": {
+                "summary": {
+                    "text": (
+                        f"这一期从“{topic}”出发，把已有记录与后来补充的口述放在一起，"
+                        "保留变化发生时的具体细节。"
+                    ),
+                    "source_refs": overview_refs,
+                },
+                "key_points": [
+                    {
+                        "text": f"已有记录留下的起点：{initial_sentence}",
+                        "source_refs": [initial_refs[0]],
+                    },
+                    {
+                        "text": f"补充口述带回的新细节：{supplemental_sentence}",
+                        "source_refs": [supplemental_refs[0]],
+                    },
+                    {
+                        "text": "已有记录与补充口述会在这一期被放在一起回看。",
+                        "source_refs": overview_refs,
+                    },
+                ],
             },
         }

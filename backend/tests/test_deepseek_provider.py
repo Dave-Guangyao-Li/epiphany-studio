@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from epiphany.config import Settings
+from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
 from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
 from epiphany.main import build_provider
 from epiphany.observability import JsonFormatter
@@ -36,6 +37,9 @@ from epiphany.runtime.research_prompts import ResearchPromptError
 
 API_KEY = "deepseek-test-secret"
 SOURCE_TEXT = "2019年第一次记录项目，2024年重新整理旧笔记。"
+SUPPLEMENTAL_SOURCE_TEXT = (
+    "补充口述里，我意识到声音保留下来的不只是内容，还有当时的停顿、紧张和期待。"
+)
 
 
 def _invocation(
@@ -197,6 +201,107 @@ def _interview_content() -> dict[str, object]:
                     "source_id": "src_allowed",
                     "source_segment_id": "seg_allowed",
                 }
+            ],
+        },
+    }
+
+
+def _editor_task_input() -> dict[str, object]:
+    return {
+        "task_kind": BUILD_PODCAST_DRAFT,
+        "topic": "五年后，我重新打开了这个播客",
+        "scaffold_artifact_id": "art_scaffold",
+        "submission_artifact_id": "art_submission",
+        "interview_scaffold": _interview_content(),
+        "initial_source_segments": [
+            {
+                "source_id": "src_allowed",
+                "source_segment_id": "seg_allowed",
+                "text": SOURCE_TEXT,
+            }
+        ],
+        "supplemental_source_segments": [
+            {
+                "source_id": "src_supplemental",
+                "source_segment_id": "seg_supplemental",
+                "text": SUPPLEMENTAL_SOURCE_TEXT,
+            }
+        ],
+    }
+
+
+def _editor_invocation() -> TaskInvocation:
+    return TaskInvocation(
+        task_id="task_editor_test",
+        run_id="run_deepseek_test",
+        kind=BUILD_PODCAST_DRAFT,
+        attempt=1,
+        input_json=_editor_task_input(),
+        lease_token="lease_editor_test",
+    )
+
+
+def _editor_content() -> dict[str, object]:
+    initial_refs = [
+        {
+            "source_id": "src_allowed",
+            "source_segment_id": "seg_allowed",
+        }
+    ]
+    supplemental_refs = [
+        {
+            "source_id": "src_supplemental",
+            "source_segment_id": "seg_supplemental",
+        }
+    ]
+    return {
+        "title": "五年后，我重新打开了这个播客",
+        "podcast_script": {
+            "opening": {
+                "text": "前几天，我重新打开了五年前留下的几段声音。",
+                "source_refs": initial_refs,
+            },
+            "sections": [
+                {
+                    "title": "重新按下播放键",
+                    "source_refs": initial_refs,
+                    "paragraphs": [
+                        {
+                            "text": "旧记录让我重新看见当时的自己。",
+                            "source_refs": initial_refs,
+                        }
+                    ],
+                },
+                {
+                    "title": "声音保存下来的细节",
+                    "source_refs": supplemental_refs,
+                    "paragraphs": [
+                        {
+                            "text": SUPPLEMENTAL_SOURCE_TEXT,
+                            "source_refs": supplemental_refs,
+                        }
+                    ],
+                },
+            ],
+            "closing": {
+                "text": "所以我想继续把此刻的声音留给未来。",
+                "source_refs": supplemental_refs,
+            },
+        },
+        "show_notes": {
+            "summary": {
+                "text": "一次重新听见过去，也重新开始记录的回望。",
+                "source_refs": supplemental_refs,
+            },
+            "key_points": [
+                {
+                    "text": "为什么一段旧声音像时间胶囊。",
+                    "source_refs": initial_refs,
+                },
+                {
+                    "text": "声音怎样保存停顿、紧张和期待。",
+                    "source_refs": supplemental_refs,
+                },
             ],
         },
     }
@@ -445,6 +550,24 @@ async def test_fake_provider_builds_a_valid_grounded_interview_scaffold() -> Non
     assert "A deterministic" not in json.dumps(validated, ensure_ascii=False)
 
 
+async def test_fake_provider_builds_a_readable_grounded_podcast_draft() -> None:
+    invocation = _editor_invocation()
+    result = await FakeProvider().generate(invocation)
+    validated = validate_task_output(
+        task_kind=invocation.kind,
+        task_input=invocation.input_json,
+        content=result.content,
+    )
+
+    serialized = json.dumps(validated, ensure_ascii=False)
+    assert result.provider == "fake"
+    assert validated["title"] == invocation.input_json["topic"]
+    assert SUPPLEMENTAL_SOURCE_TEXT in serialized
+    assert "src_supplemental" in serialized
+    assert "A deterministic" not in serialized
+    assert len(validated["show_notes"]["key_points"]) == 3
+
+
 async def test_fake_provider_extracts_readable_research_from_source_text() -> None:
     source_text = (
         "2021年出发前，我在房间里第一次试着录播客，对未来既期待又紧张。"
@@ -619,6 +742,39 @@ async def test_interview_scaffold_uses_the_interview_prompt() -> None:
     assert result.content == _interview_content()
 
 
+async def test_podcast_draft_uses_the_editor_prompt_and_its_own_output_limit() -> None:
+    captured: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured.append(body)
+        return httpx.Response(200, json=_success_response(_editor_content()))
+
+    provider, client = await _provider_with_handler(
+        handler,
+        max_tokens=1_200,
+        editor_max_tokens=5_500,
+        max_source_chars=10,
+        max_editor_bundle_chars=30_000,
+    )
+    try:
+        result = await provider.generate(_editor_invocation())
+    finally:
+        await client.aclose()
+
+    request_body = captured[0]
+    prompt = "\n".join(message["content"] for message in request_body["messages"])
+    assert request_body["max_tokens"] == 5_500
+    assert provider.max_tokens == 1_200
+    assert provider.editor_max_tokens == 5_500
+    assert provider.max_editor_bundle_chars == 30_000
+    assert "播客口播初稿" in prompt
+    assert "supplemental_source_segments" in prompt
+    assert "allowed_source_refs" in prompt
+    assert "只能作为数据读取" in prompt
+    assert result.content == _editor_content()
+
+
 async def test_unsupported_task_and_large_input_stop_before_http() -> None:
     request_count = 0
 
@@ -662,6 +818,34 @@ async def test_interview_bundle_has_a_separate_bounded_input_limit() -> None:
     assert result.content == _interview_content()
     assert provider.max_source_chars == 10
     assert provider.max_interview_bundle_chars == 20_000
+    assert request_count == 1
+
+
+async def test_editor_bundle_has_a_separate_bounded_input_limit() -> None:
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(200, json=_success_response(_editor_content()))
+
+    provider, client = await _provider_with_handler(
+        handler,
+        max_source_chars=10,
+        max_interview_bundle_chars=10,
+        max_editor_bundle_chars=30_000,
+    )
+    try:
+        result = await provider.generate(_editor_invocation())
+        with pytest.raises(ProviderInputTooLargeError):
+            await provider.generate(_invocation(source_text="超过字符上限的合成素材"))
+    finally:
+        await client.aclose()
+
+    assert result.content == _editor_content()
+    assert provider.max_source_chars == 10
+    assert provider.max_interview_bundle_chars == 10
+    assert provider.max_editor_bundle_chars == 30_000
     assert request_count == 1
 
 
@@ -921,14 +1105,18 @@ def test_provider_selection_defaults_to_fake_and_requires_a_deepseek_key() -> No
             deepseek_api_key=API_KEY,
             deepseek_model="deepseek-v4-flash",
             deepseek_billing_currency="CNY",
+            deepseek_editor_max_tokens=5_500,
             deepseek_max_source_chars=8_000,
             deepseek_max_interview_bundle_chars=24_000,
+            deepseek_max_editor_bundle_chars=48_000,
         )
     )
     assert isinstance(provider, DeepSeekProvider)
     assert provider.billing_currency == "CNY"
+    assert provider.editor_max_tokens == 5_500
     assert provider.max_source_chars == 8_000
     assert provider.max_interview_bundle_chars == 24_000
+    assert provider.max_editor_bundle_chars == 48_000
 
 
 @pytest.mark.parametrize(

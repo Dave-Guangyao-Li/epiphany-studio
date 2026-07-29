@@ -5,6 +5,7 @@ import json
 import httpx
 
 from epiphany.db import Database
+from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
 from epiphany.runtime.providers import DeepSeekProvider
 from epiphany.runtime.worker import Worker
 from epiphany.services import RunService
@@ -45,6 +46,7 @@ def _response_for(
     request: httpx.Request,
     reference: dict[str, str],
     *,
+    supplemental_reference: dict[str, str] | None = None,
     invalid_reference: bool = False,
     finish_reason: str = "stop",
 ) -> dict:
@@ -86,7 +88,7 @@ def _response_for(
                 }
             ],
         }
-    else:
+    elif task_kind == "build_interview_scaffold":
         grounded_statement = {
             "text": "素材把不同年份的记录联系了起来。",
             "source_refs": [reference],
@@ -129,6 +131,62 @@ def _response_for(
                 "source_refs": [reference],
             },
         }
+    elif task_kind == BUILD_PODCAST_DRAFT:
+        if supplemental_reference is None:
+            raise AssertionError("Editor response requires a supplemental reference")
+        content = {
+            "title": "五年后重新开始录播客",
+            "podcast_script": {
+                "opening": {
+                    "text": "五年前的记录，直到今天才重新被我听见。",
+                    "source_refs": [reference],
+                },
+                "sections": [
+                    {
+                        "title": "被声音保存的时间",
+                        "source_refs": [reference],
+                        "paragraphs": [
+                            {
+                                "text": "旧素材把不同年份的记录重新连在了一起。",
+                                "source_refs": [reference],
+                            }
+                        ],
+                    },
+                    {
+                        "title": "补充口述带回的细节",
+                        "source_refs": [supplemental_reference],
+                        "paragraphs": [
+                            {
+                                "text": "声音保存的不只是内容，也保存了停顿和呼吸。",
+                                "source_refs": [supplemental_reference],
+                            }
+                        ],
+                    },
+                ],
+                "closing": {
+                    "text": "这份新的记录，也会继续留给未来的自己。",
+                    "source_refs": [supplemental_reference],
+                },
+            },
+            "show_notes": {
+                "summary": {
+                    "text": "从旧记录到新口述，重新理解声音如何保存时间。",
+                    "source_refs": [reference, supplemental_reference],
+                },
+                "key_points": [
+                    {
+                        "text": "旧记录如何连接不同年份。",
+                        "source_refs": [reference],
+                    },
+                    {
+                        "text": "补充口述带回停顿和呼吸的细节。",
+                        "source_refs": [supplemental_reference],
+                    },
+                ],
+            },
+        }
+    else:
+        raise AssertionError(f"unexpected task kind: {task_kind}")
 
     return {
         "id": "chatcmpl_runtime_test",
@@ -202,6 +260,79 @@ async def test_mocked_deepseek_research_succeeds_end_to_end(
         "episode_research_bundle",
         "build_interview_scaffold_result",
     }
+
+
+async def test_mocked_deepseek_editor_completes_checkpoint_to_final_markdown(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    run_id, initial_reference = await _create_run(database, service)
+    supplemental_reference: dict[str, str] | None = None
+    request_kinds: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_kinds.append(_task_kind(request))
+        return httpx.Response(
+            200,
+            json=_response_for(
+                request,
+                initial_reference,
+                supplemental_reference=supplemental_reference,
+            ),
+        )
+
+    client = await _install_provider(
+        worker,
+        httpx.MockTransport(handler),
+        billing_currency="CNY",
+    )
+    try:
+        assert await worker.run_until_idle() == 3
+        supplemental = await SourceService(database).import_text(
+            title="DeepSeek Mock 补充口述",
+            source_type="voice_note_transcript",
+            text="声音保存的不只是内容，也保存了停顿和呼吸。",
+            metadata={},
+        )
+        supplemental_reference = {
+            "source_id": supplemental.source.id,
+            "source_segment_id": supplemental.source.segments[0].id,
+        }
+        resumed = await service.resume_run(
+            run_id,
+            checkpoint="interview_scaffold",
+            submission_id="deepseek-editor-round-1",
+            source_ids=[supplemental.source.id],
+        )
+        assert resumed.run.status == "running"
+
+        assert await worker.run_until_idle() == 1
+        completed = await service.get_run(run_id)
+        podcast_markdown = await service.export_podcast_draft_markdown(run_id)
+        show_notes_markdown = await service.export_show_notes_markdown(run_id)
+    finally:
+        await client.aclose()
+
+    assert request_kinds.count(BUILD_PODCAST_DRAFT) == 1
+    assert len(request_kinds) == 4
+    assert completed.status == "succeeded"
+    assert completed.model_call_count == 4
+    assert len(completed.tasks) == 5
+    assert len(completed.artifacts) == 6
+    assert all(call.status == "succeeded" for call in completed.model_calls)
+    assert all(call.cost_currency == "CNY" for call in completed.model_calls)
+    assert (
+        next(
+            artifact.kind
+            for artifact in completed.artifacts
+            if artifact.id == completed.output_artifact_id
+        )
+        == "build_podcast_draft_result"
+    )
+    assert "声音保存的不只是内容，也保存了停顿和呼吸。" in podcast_markdown
+    assert "补充口述带回停顿和呼吸的细节" in show_notes_markdown
+    assert supplemental_reference["source_id"] not in podcast_markdown
+    assert supplemental_reference["source_segment_id"] not in show_notes_markdown
 
 
 async def test_cny_estimate_is_persisted_in_model_call_ledger(
