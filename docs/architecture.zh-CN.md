@@ -67,8 +67,10 @@ create_run
        `- theme_research
   -> fan_in (deterministic)
   -> build_interview_scaffold (serial root Interviewer)
-  -> wait_for_user
+  -> assess_material_readiness (deterministic)
+  -> wait_for_user / awaiting_more_material
   -> import supplemental Source + idempotent Resume
+  -> reassess accumulated material (deterministic)
   -> build_podcast_draft (serial root Editor)
   -> validate strict structure and source scope
   -> render Podcast Draft / Show Notes
@@ -79,6 +81,7 @@ create_run
 其中 `prepare_sources`、`fan_in` 和状态更新是普通代码；
 `timeline_research`、`theme_research`、`build_interview_scaffold` 和
 `build_podcast_draft` 才调用模型。
+`assess_material_readiness` 不调用模型。
 
 M2.4 将可执行边界推进到 `build_interview_scaffold`：两个 Researcher
 仍以同级 Child Task 并行调用模型，确定性 fan-in 持久化研究 Bundle 后，才
@@ -104,11 +107,26 @@ Editor 输入由已验证 Scaffold、Scaffold 实际引用的初始 SourceSegmen
 最终 output。一条完整 v4 Run 因而有五个 Task、六个 Artifact 和四次
 ModelCall。
 
+M3.3 为带 `creative_brief` 的新 Run 使用 workflow v5。Interviewer 完成后，
+普通代码只读取 Scaffold 实际引用到的初始 SourceSegment，并持久化
+`material_readiness_report`。Run 停在
+`waiting_for_user / awaiting_more_material`；Resume 会把所有已经接受的补充
+Source 合并后重新计算。仍不足时再次进入同一检查点，达到门槛时才排队一个
+Editor。正常一轮补充后的 v5 Run 在等待时为四个 Task、五个 Artifact 和
+三次 ModelCall；成功后为五个 Task、八个 Artifact 和四次 ModelCall。
+多出的 Artifact 是两份 Readiness Report 与一份用户材料提交。
+
+初始原文的最小披露规则与 v4 一致：Readiness 可以计算且 Editor 可以读取的
+初始片段集合，严格等于已验证 Scaffold 的引用集合；它不会因为 Source 曾被
+选入 Run 就把整份私人原文继续发送给最后一个模型。补充材料按已接受轮次累计，
+重复提交初始或历史 Source 会在持久化前拒绝，累计补充上限为 500 个
+SourceSegment。Editor 输入另受 Provider 的 48,000 字符上限保护。
+
 为使升级时已经在途的 Run 仍可恢复，v1 保留原有语义：fan-in 后以
 `episode_research_bundle` 成功结束，不要求新增 `topic`，也不排队
 Interviewer；v2 仍在采访脚手架完成后成功；v3 Resume 后仍按 M3.1 语义
-确定性结束，不产生 Editor 调用。四个版本分支都复用现有表和字段，M3.2
-不需要数据库 migration。
+确定性结束，不产生 Editor 调用；没有 Creative Brief 的请求仍走 v4。
+五个版本分支都复用现有表和字段，M3.3 不需要数据库 migration。
 
 ## 5. Subagent 定义
 
@@ -137,6 +155,12 @@ M2.4 的 Interviewer 同样受 Task/Provider/ModelCall 契约约束，但它是 
 M3.2 的 Editor 也是串行根 Task。它不是动态派生的新 Child 层级，也不会与
 人工输入并发；只有持久化 Resume 成功后才能排队。模型提交候选 Podcast
 Script 和 Show Notes，最终状态、导出和发布权限仍由代码与用户控制。
+
+M3.3 的 Readiness 不是 Agent 或 Task，而是确定性业务规则。它不占用模型
+调用预算，输入正文只在内存中用于去重和计数，持久报告仅保留阈值、聚合计数、
+gap code、限制说明和带 SourceReference 的追问。
+计数先按稳定 SourceSegment 引用去重，再按移除空白后的正文内容去重；来源
+多样性只统计真正贡献了新内容的 Source，不能靠复制同一段文字跨过门槛。
 
 ## 6. 持久化模型
 
@@ -355,7 +379,7 @@ M3.2 为 Editor 增加第三种独立输入边界和单独输出上限。默认�
 
 ```text
 EPIPHANY_DEEPSEEK_MAX_EDITOR_BUNDLE_CHARS=48000
-EPIPHANY_DEEPSEEK_EDITOR_MAX_TOKENS=6000
+EPIPHANY_DEEPSEEK_EDITOR_MAX_TOKENS=20000
 ```
 
 Editor 把 Scaffold、topic、初始片段与补充片段都视为不可信数据，并只允许
@@ -364,7 +388,7 @@ topic，Podcast Script 同时使用初始与补充引用，Show Notes 也至少�
 补充引用。未知或越权引用、缺失补充证据和结构漂移都会在 Artifact 提交前
 失败。合法引用仍不是语义蕴含证明，候选稿必须由用户最终审核。
 
-正常 v4 需要四次 Provider 调用。将单 Run 预算设为三时，Editor 调用会在
+正常 v4/v5 都需要四次 Provider 调用。将单 Run 预算设为三时，Editor 调用会在
 进入 Provider 以前以 `model_call_limit_exceeded` 被拒绝。Editor retry、
 timeout、lease、fencing、startup recovery 和 cancel 复用同一 Worker 机制；
 每个重试 attempt 单独记账，但 Artifact 通过稳定 idempotency key 只提交一次。
@@ -397,6 +421,10 @@ Podcast Draft 与 Show Notes 只接受最终成功且 `output_artifact_id` 指�
 `build_podcast_draft_result` 的 Run。未就绪、类型不符或内容无效时返回
 409。
 
+Readiness 首版不增加单独 endpoint；`GET /runs/{id}` 的 Artifact 列表会返回
+所有 `material_readiness_report`，按创建时间可以看到初始判断和每轮补充后的
+变化。未来 UI 直接消费这一结构，无需解析运行日志。
+
 Markdown 由已验证 JSON 确定性渲染。正文把原始 Source/Segment ID 显示为
 短标签 `[S1]`，文末通过数据库中的 Source 标题与 Segment 位置生成来源索引；
 结构化 Artifact 与数据库仍保留原始 ID，因此追踪能力没有丢失。任何引用
@@ -412,7 +440,7 @@ POST /sources
   -> text = 已经转成文字的补充口述
 
 POST /runs/{id}/resume
-  -> checkpoint = interview_scaffold
+  -> checkpoint = interview_scaffold（v3/v4）或 material_readiness（v5）
   -> submission_id = 调用方稳定重试键
   -> source_ids = 新 Source ID 列表
 ```
@@ -420,8 +448,9 @@ POST /runs/{id}/resume
 Resume 不接受原始正文。正文只存于 `sources` / `source_segments`；
 `user_material_submission` Artifact 和 Events 只保存检查点、Artifact ID、
 Source ID、Segment ID 与计数。相同 submission 和相同 Source 列表重放返回
-已有结果；同一 submission 对应不同 Source 返回 409。v4 第一次提交还会
-确定性创建一个 Editor Task；相同请求重放不会再次排队或再次调用模型。
+已有结果；同一 submission 对应不同 Source 返回 409。v4 第一次提交会
+确定性创建一个 Editor Task；v5 会先把历史与本轮 Source 累计后重新判断，
+达到门槛才创建 Editor。相同请求重放不会再次计算、排队或调用模型。
 
 ## 12. 可观测性与调试
 
@@ -475,6 +504,11 @@ M3.2 新增持久事件 `workflow.editor.queued` 和
 引用数量和 Markdown 字符数；不记录节目正文。等待点后的正常 v4 事件顺序
 是 Resume 接收、Editor 排队、Task/ModelCall 执行、Editor 完成和
 `run.succeeded`。
+
+M3.3 新增 `workflow.material_readiness.evaluated`，只记录报告 Artifact ID、
+状态、目标分钟、素材/片段计数和缺少字符数，不记录原文或追问全文。正常 v5
+顺序是 Interviewer 完成、Readiness 不足、持久等待、Resume 接收、Readiness
+就绪、Editor 排队和最终成功。App 重启时不会自动跨过等待点。
 
 ## 13. 升级触发条件
 

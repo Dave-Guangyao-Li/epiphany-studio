@@ -541,7 +541,7 @@ Default Editor-specific DeepSeek limits:
 
 ```text
 EPIPHANY_DEEPSEEK_MAX_EDITOR_BUNDLE_CHARS=48000
-EPIPHANY_DEEPSEEK_EDITOR_MAX_TOKENS=6000
+EPIPHANY_DEEPSEEK_EDITOR_MAX_TOKENS=20000
 ```
 
 The final `output_artifact_id` points to `build_podcast_draft_result`.

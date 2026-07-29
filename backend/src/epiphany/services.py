@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from epiphany.db import Database
 from epiphany.editor_schemas import (
     BUILD_PODCAST_DRAFT,
+    MAX_EDITOR_SUPPLEMENTAL_SEGMENTS,
     PodcastDraftTaskInput,
     editor_output_reference_keys,
 )
@@ -20,18 +21,30 @@ from epiphany.episode_markdown import (
     render_show_notes_markdown,
 )
 from epiphany.events import append_event
-from epiphany.human_input_schemas import INTERVIEW_SCAFFOLD_CHECKPOINT
+from epiphany.human_input_schemas import (
+    INTERVIEW_SCAFFOLD_CHECKPOINT,
+    MATERIAL_READINESS_CHECKPOINT,
+)
 from epiphany.ids import new_id, stable_id
 from epiphany.interview_markdown import (
     SourceCitation,
     interview_scaffold_reference_keys,
     render_interview_scaffold_markdown,
 )
+from epiphany.interview_schemas import (
+    BUILD_INTERVIEW_SCAFFOLD,
+    InterviewScaffoldOutput,
+)
+from epiphany.material_readiness import (
+    ReadinessFollowUpQuestion,
+    assess_material_readiness,
+)
 from epiphany.models import Artifact, Event, Run, Source, Task
 from epiphany.research_schemas import EpisodeResearchPayload
 from epiphany.runtime.orchestrator import (
     EDITOR_RESEARCH_WORKFLOW_VERSION,
     INTERVIEW_RESEARCH_WORKFLOW_VERSION,
+    MATERIAL_READINESS_WORKFLOW_VERSION,
     Orchestrator,
 )
 from epiphany.schemas import (
@@ -147,7 +160,13 @@ class RunService:
                 "research_fan_out" if workflow_type == "episode-research" else "prepare_sources"
             )
             workflow_version = (
-                EDITOR_RESEARCH_WORKFLOW_VERSION if workflow_type == "episode-research" else "v1"
+                (
+                    MATERIAL_READINESS_WORKFLOW_VERSION
+                    if research_payload.creative_brief is not None
+                    else EDITOR_RESEARCH_WORKFLOW_VERSION
+                )
+                if workflow_type == "episode-research"
+                else "v1"
             )
             run = Run(
                 workflow_type=workflow_type,
@@ -405,6 +424,18 @@ class RunService:
         submission_id: str,
         source_ids: list[str],
     ) -> ResumeRunResponse:
+        async with self.database.sessions() as version_session:
+            versioned_run = await version_session.get(Run, run_id)
+            if versioned_run is None:
+                raise RunNotFound(run_id)
+            if versioned_run.workflow_version == MATERIAL_READINESS_WORKFLOW_VERSION:
+                return await self._resume_material_readiness_run(
+                    run_id,
+                    checkpoint=checkpoint,
+                    submission_id=submission_id,
+                    source_ids=source_ids,
+                )
+
         async with self._run_mutation_lock:
             resumed = False
             idempotent_replay = False
@@ -703,6 +734,362 @@ class RunService:
                 run=run_view,
             )
 
+    async def _resume_material_readiness_run(
+        self,
+        run_id: str,
+        *,
+        checkpoint: str,
+        submission_id: str,
+        source_ids: list[str],
+    ) -> ResumeRunResponse:
+        """Accept one v5 material round, reassess, and queue Editor only when ready."""
+
+        async with self._run_mutation_lock:
+            resumed = False
+            idempotent_replay = False
+            editor_queued = False
+            readiness_status: str | None = None
+            source_count = len(source_ids)
+            segment_count = 0
+            submission_artifact_id: str
+            idempotency_key = stable_id(
+                "human_input",
+                "\x00".join([run_id, checkpoint, submission_id]),
+            )
+
+            async with self.database.sessions() as session, session.begin():
+                run = await session.get(Run, run_id)
+                if run is None:
+                    raise RunNotFound(run_id)
+
+                existing = (
+                    await session.execute(
+                        select(Artifact).where(
+                            Artifact.run_id == run.id,
+                            Artifact.idempotency_key == idempotency_key,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    existing_content = existing.content_json
+                    if (
+                        existing.kind != "user_material_submission"
+                        or existing_content.get("checkpoint") != checkpoint
+                        or existing_content.get("submission_id") != submission_id
+                        or existing_content.get("source_ids") != source_ids
+                    ):
+                        raise RunResumeConflict(
+                            "submission_id was already used with different material"
+                        )
+                    submission_artifact_id = existing.id
+                    segment_count = len(existing_content.get("source_refs", []))
+                    idempotent_replay = True
+                else:
+                    if (
+                        run.workflow_type != "episode-research"
+                        or run.workflow_version != MATERIAL_READINESS_WORKFLOW_VERSION
+                        or run.status != RunStatus.WAITING_FOR_USER
+                        or run.current_step != "awaiting_more_material"
+                    ):
+                        raise RunResumeNotAllowed("run is not waiting for supplemental material")
+                    if checkpoint != MATERIAL_READINESS_CHECKPOINT:
+                        raise RunResumeNotAllowed("run is not waiting at this checkpoint")
+
+                    scaffold = (
+                        await session.execute(
+                            select(Artifact)
+                            .where(
+                                Artifact.run_id == run.id,
+                                Artifact.kind == f"{BUILD_INTERVIEW_SCAFFOLD}_result",
+                            )
+                            .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    if scaffold is None:
+                        raise RunResumeNotAllowed(
+                            "run does not have a valid interview scaffold checkpoint"
+                        )
+                    scaffold_content = {
+                        key: value
+                        for key, value in scaffold.content_json.items()
+                        if key != "_execution"
+                    }
+                    try:
+                        parsed_scaffold = InterviewScaffoldOutput.model_validate(scaffold_content)
+                        scaffold_reference_keys = interview_scaffold_reference_keys(
+                            scaffold_content
+                        )
+                    except (ValidationError, ValueError, TypeError) as error:
+                        raise RunResumeNotAllowed(
+                            "run does not have a valid interview scaffold checkpoint"
+                        ) from error
+
+                    prior_submissions = (
+                        (
+                            await session.execute(
+                                select(Artifact)
+                                .where(
+                                    Artifact.run_id == run.id,
+                                    Artifact.kind == "user_material_submission",
+                                )
+                                .order_by(Artifact.created_at, Artifact.id)
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    initial_source_ids = list(run.input_json["source_ids"])
+                    prior_supplemental_source_ids = _stable_unique(
+                        [
+                            source_id
+                            for artifact in prior_submissions
+                            for source_id in artifact.content_json.get("source_ids", [])
+                        ]
+                    )
+                    already_used_source_ids = {
+                        *initial_source_ids,
+                        *prior_supplemental_source_ids,
+                    }
+                    repeated_source_ids = [
+                        source_id
+                        for source_id in source_ids
+                        if source_id in already_used_source_ids
+                    ]
+                    if repeated_source_ids:
+                        raise RunResumeNotAllowed(
+                            "submitted material must add Sources not already used by this Run"
+                        )
+                    supplemental_source_ids = _stable_unique(
+                        [*prior_supplemental_source_ids, *source_ids]
+                    )
+                    all_source_ids = _stable_unique([*initial_source_ids, *supplemental_source_ids])
+                    sources = (
+                        (
+                            await session.execute(
+                                select(Source)
+                                .where(Source.id.in_(all_source_ids))
+                                .options(selectinload(Source.segments))
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    sources_by_id = {source.id: source for source in sources}
+                    missing_source_ids = [
+                        source_id for source_id in source_ids if source_id not in sources_by_id
+                    ]
+                    if missing_source_ids:
+                        raise RunSourceNotFound(missing_source_ids[0])
+
+                    segments_by_key = {
+                        (source.id, segment.id): segment
+                        for source in sources
+                        for segment in source.segments
+                    }
+                    missing_scaffold_references = [
+                        key for key in scaffold_reference_keys if key not in segments_by_key
+                    ]
+                    if missing_scaffold_references:
+                        raise RunResumeNotAllowed(
+                            "interview scaffold source material is unavailable"
+                        )
+                    initial_segments = [
+                        {
+                            "source_id": source_id,
+                            "source_segment_id": segment_id,
+                            "text": segments_by_key[(source_id, segment_id)].text,
+                        }
+                        for source_id, segment_id in scaffold_reference_keys
+                    ]
+                    supplemental_segments = _segments_for_sources(
+                        supplemental_source_ids,
+                        sources_by_id,
+                    )
+                    if len(supplemental_segments) > MAX_EDITOR_SUPPLEMENTAL_SEGMENTS:
+                        raise RunResumeNotAllowed(
+                            "supplemental material exceeds the 500 segment MVP limit"
+                        )
+
+                    source_refs = [
+                        {
+                            "source_id": source.id,
+                            "source_segment_id": segment.id,
+                        }
+                        for source_id in source_ids
+                        for source in [sources_by_id[source_id]]
+                        for segment in sorted(
+                            source.segments,
+                            key=lambda item: item.position,
+                        )
+                    ]
+                    segment_count = len(source_refs)
+                    submission_artifact_id = new_id("art")
+                    follow_up_questions = [
+                        ReadinessFollowUpQuestion(
+                            prompt=question.prompt,
+                            purpose=question.purpose,
+                            source_refs=question.source_refs,
+                        )
+                        for section in parsed_scaffold.sections
+                        for question in section.questions
+                    ][:6]
+                    try:
+                        report = assess_material_readiness(
+                            creative_brief=run.input_json["creative_brief"],
+                            initial_source_segments=initial_segments,
+                            supplemental_source_segments=supplemental_segments,
+                            follow_up_questions=follow_up_questions,
+                        )
+                    except (ValidationError, ValueError, TypeError) as error:
+                        raise RunResumeNotAllowed(
+                            "submitted material cannot be evaluated safely"
+                        ) from error
+                    readiness_status = report.status
+
+                    editor_input_json: dict[str, Any] | None = None
+                    if report.status == "ready":
+                        submission_artifact_ids = [
+                            *[artifact.id for artifact in prior_submissions],
+                            submission_artifact_id,
+                        ]
+                        try:
+                            editor_input_json = PodcastDraftTaskInput.model_validate(
+                                {
+                                    "task_kind": BUILD_PODCAST_DRAFT,
+                                    "topic": run.input_json["topic"],
+                                    "scaffold_artifact_id": scaffold.id,
+                                    "submission_artifact_id": submission_artifact_id,
+                                    "submission_artifact_ids": (submission_artifact_ids),
+                                    "creative_brief": run.input_json["creative_brief"],
+                                    "interview_scaffold": scaffold_content,
+                                    "initial_source_segments": initial_segments,
+                                    "supplemental_source_segments": (supplemental_segments),
+                                }
+                            ).model_dump(mode="json")
+                        except (ValidationError, ValueError, TypeError) as error:
+                            raise RunResumeNotAllowed(
+                                "submitted material cannot build a valid Editor task"
+                            ) from error
+
+                    submission = Artifact(
+                        id=submission_artifact_id,
+                        run_id=run.id,
+                        task_id=None,
+                        kind="user_material_submission",
+                        content_json={
+                            "checkpoint": checkpoint,
+                            "submission_id": submission_id,
+                            "scaffold_artifact_id": scaffold.id,
+                            "source_ids": source_ids,
+                            "source_refs": source_refs,
+                        },
+                        idempotency_key=idempotency_key,
+                    )
+                    session.add(submission)
+                    await session.flush()
+
+                    validate_run_transition(run.status, RunStatus.RUNNING)
+                    run.status = RunStatus.RUNNING
+                    run.current_step = "assessing_material_readiness"
+                    await append_event(
+                        session,
+                        run_id=run.id,
+                        event_type="run.resumed",
+                        payload={
+                            "checkpoint": checkpoint,
+                            "submission_artifact_id": submission.id,
+                        },
+                    )
+                    await append_event(
+                        session,
+                        run_id=run.id,
+                        event_type="workflow.user_material.accepted",
+                        payload={
+                            "checkpoint": checkpoint,
+                            "submission_artifact_id": submission.id,
+                            "source_count": source_count,
+                            "segment_count": segment_count,
+                        },
+                    )
+                    readiness_artifact = await self.orchestrator.persist_material_readiness(
+                        session,
+                        run=run,
+                        report=report,
+                        round_key=f"submission:{submission.id}",
+                        task_id=None,
+                    )
+
+                    if report.status == "ready":
+                        if editor_input_json is None:
+                            raise RuntimeError("validated Editor input is missing")
+                        await self.orchestrator.enqueue_editor(
+                            session,
+                            run=run,
+                            input_json=editor_input_json,
+                        )
+                        editor_queued = True
+                    else:
+                        validate_run_transition(
+                            run.status,
+                            RunStatus.WAITING_FOR_USER,
+                        )
+                        run.status = RunStatus.WAITING_FOR_USER
+                        run.current_step = "awaiting_more_material"
+                        run.output_artifact_id = scaffold.id
+                        checkpoint_payload = {
+                            "checkpoint": MATERIAL_READINESS_CHECKPOINT,
+                            "output_artifact_id": scaffold.id,
+                            "readiness_artifact_id": readiness_artifact.id,
+                            "readiness_status": report.status,
+                            "additional_source_chars_needed": (
+                                report.additional_source_chars_needed
+                            ),
+                        }
+                        await append_event(
+                            session,
+                            run_id=run.id,
+                            event_type="workflow.user_input.requested",
+                            payload=checkpoint_payload,
+                        )
+                        await append_event(
+                            session,
+                            run_id=run.id,
+                            event_type="run.waiting_for_user",
+                            payload=checkpoint_payload,
+                        )
+                    resumed = True
+
+            run_view = await self.get_run(run_id)
+            logger.info(
+                (
+                    "Resume replay returned the existing user material"
+                    if idempotent_replay
+                    else "Run accepted supplemental material"
+                ),
+                extra={
+                    "event": (
+                        "run.resume.idempotent_replay"
+                        if idempotent_replay
+                        else "run.resume.accepted"
+                    ),
+                    "run_id": run_id,
+                    "artifact_id": submission_artifact_id,
+                    "checkpoint": checkpoint,
+                    "source_count": source_count,
+                    "segment_count": segment_count,
+                    "idempotent_replay": idempotent_replay,
+                    "readiness_status": readiness_status,
+                    "editor_queued": editor_queued,
+                },
+            )
+            return ResumeRunResponse(
+                resumed=resumed,
+                idempotent_replay=idempotent_replay,
+                submission_artifact_id=submission_artifact_id,
+                run=run_view,
+            )
+
     async def cancel_run(self, run_id: str) -> RunView:
         async with self._run_mutation_lock:
             async with self.database.sessions() as session, session.begin():
@@ -756,3 +1143,30 @@ class RunService:
                 },
             )
             return await self.get_run(run_id)
+
+
+def _stable_unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def _segments_for_sources(
+    source_ids: list[str],
+    sources_by_id: dict[str, Source],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "source_id": source.id,
+            "source_segment_id": segment.id,
+            "text": segment.text,
+        }
+        for source_id in source_ids
+        for source in [sources_by_id[source_id]]
+        for segment in sorted(source.segments, key=lambda item: item.position)
+    ]

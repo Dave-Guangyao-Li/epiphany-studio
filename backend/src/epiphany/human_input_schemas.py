@@ -5,8 +5,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 INTERVIEW_SCAFFOLD_CHECKPOINT = "interview_scaffold"
+MATERIAL_READINESS_CHECKPOINT = "material_readiness"
 
-HumanInputCheckpoint = Literal["interview_scaffold"]
+HumanInputCheckpoint = Literal["interview_scaffold", "material_readiness"]
 
 
 class ResumeRunRequest(BaseModel):

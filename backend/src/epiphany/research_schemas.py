@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from epiphany.quality_contract_schemas import CreativeBrief
 from epiphany.schemas import SourceReference
 
 TIMELINE_RESEARCH = "timeline_research"
@@ -31,6 +32,7 @@ class EpisodeResearchPayload(BaseModel):
 
     topic: str = Field(min_length=1, max_length=200)
     source_ids: list[str] = Field(min_length=1, max_length=20)
+    creative_brief: CreativeBrief | None = None
 
     @field_validator("topic")
     @classmethod

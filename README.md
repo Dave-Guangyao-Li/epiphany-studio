@@ -47,9 +47,11 @@ The first vertical slice will:
    - timeline extraction;
    - themes and verbatim-detail extraction.
 4. Merge their structured results into a semi-scripted interview scaffold.
-5. Pause for human input.
-6. Generate a source-grounded draft and show notes.
-7. Expose a replayable run/task event trace.
+5. Apply a saved Creative Brief and estimate whether the material can support
+   the requested duration.
+6. Pause for supplemental human input when the evidence is clearly too short.
+7. Generate a source-grounded draft and show notes.
+8. Expose a replayable run/task event trace.
 
 Every extracted claim must point back to a source segment. Generated memories
 remain candidates until the user confirms them.
@@ -278,6 +280,52 @@ all four calls and all guarded checks: 16,667 input tokens, 9,468 output tokens,
 local price-table estimate, not the provider invoice, and the candidate content
 still requires human review. See the
 [M3.2 learning chapter](docs/learning/m3-2-editor-final-markdown.zh-CN.md).
+
+M3.3 adds an explicit quality contract before Editor generation. Supplying a
+`creative_brief` creates workflow `v5` and records a 10, 15, or 30 minute
+target, adjustable Chinese characters-per-minute estimate, scenario, audience,
+communication goal, tone, required details, and patterns to avoid. Omitting the
+Brief preserves the existing v4 path for backward compatibility.
+
+After Interviewer, ordinary deterministic code writes a
+`material_readiness_report`; no model call is used for this decision. The first
+version counts unique non-whitespace Source characters, initial/supplemental
+material, source diversity, and overlap against the configured duration's
+lower bound. It is an explainable shortage detector, not a promise of recording
+duration or a content-quality score. The report contains counts, gap codes,
+limitations, and bounded grounded follow-up questions, but does not copy Source
+text.
+
+An insufficient v5 Run persists at
+`waiting_for_user / awaiting_more_material`. Each idempotent Resume stores the
+new Source references and recomputes readiness over all accepted rounds. Editor
+is queued exactly once only after the accumulated material is ready. Its prompt
+receives the same Brief and is instructed to prefer a shorter grounded draft
+over repetition, filler, or invented facts.
+
+The committed synthetic E2E is fully automatic:
+
+```bash
+cd backend
+python -m epiphany.quality_contract_e2e --provider fake --execute
+```
+
+It imports three synthetic Sources, reaches the durable checkpoint, closes and
+restarts the App on the same SQLite database, imports one synthetic supplemental
+transcript, replays Resume idempotently, completes Editor, and exports the
+readiness reports plus Scaffold, Podcast Draft, Show Notes, JSONL logs, and a
+machine-readable report. The raw initial Sources contain 2,106 evidence
+characters. After Scaffold-reference minimum disclosure the readiness gate sees
+488; one 2,215-character supplement raises the usable total to 2,703 against a
+2,380 lower bound. The run moves from 4 Tasks / 5 Artifacts /
+3 ModelCalls to 5 / 8 / 4, and uses zero tokens and zero cost with Fake
+Provider. All 178 tests, Ruff, Alembic, and the guarded Fake E2E pass.
+
+M3.4 will evaluate the generated draft itself: deterministic duration and
+repetition checks, an evidence-bearing model self-review, and separately stored
+human feedback. Mock feedback and same-model review will remain labeled as
+synthetic/advisory rather than presented as real user approval. See the
+[M3.3 learning chapter](docs/learning/m3-3-creative-brief-material-readiness.zh-CN.md).
 
 ## License
 

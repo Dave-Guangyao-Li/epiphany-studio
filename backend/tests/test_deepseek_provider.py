@@ -1119,6 +1119,14 @@ def test_provider_selection_defaults_to_fake_and_requires_a_deepseek_key() -> No
     assert provider.max_editor_bundle_chars == 48_000
 
 
+def test_default_editor_output_limit_can_cover_a_thirty_minute_brief() -> None:
+    settings = Settings(_env_file=None)
+    provider = DeepSeekProvider(api_key=API_KEY)
+
+    assert settings.deepseek_editor_max_tokens == 20_000
+    assert provider.editor_max_tokens == 20_000
+
+
 @pytest.mark.parametrize(
     ("configured_currency", "expected_currency"),
     [

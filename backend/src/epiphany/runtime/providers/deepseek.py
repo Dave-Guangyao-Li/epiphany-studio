@@ -80,7 +80,7 @@ class DeepSeekProvider:
         billing_currency: BillingCurrency | str = "USD",
         base_url: str = DEFAULT_BASE_URL,
         max_tokens: int = 2_000,
-        editor_max_tokens: int = 6_000,
+        editor_max_tokens: int = 20_000,
         max_source_chars: int = 24_000,
         max_interview_bundle_chars: int | None = None,
         max_editor_bundle_chars: int = 48_000,
