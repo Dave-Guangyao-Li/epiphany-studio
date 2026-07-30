@@ -255,6 +255,7 @@ class RunService:
             )
             return RunView(
                 id=run.id,
+                parent_run_id=run.parent_run_id,
                 workflow_type=run.workflow_type,
                 workflow_version=run.workflow_version,
                 status=run.status,
