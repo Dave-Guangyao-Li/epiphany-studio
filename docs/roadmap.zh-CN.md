@@ -388,6 +388,41 @@ Run；只有用户明确提交 `POST /runs/{run_id}/revisions` 才会开始一�
 和 comparison。M3.6 尚未进行真实 DeepSeek E2E；在得到真实模型与人工内容
 复核证据前，不把 Fake 结果表述为真实生成质量验收。
 
+### M3.7：写作样本受控 A/B 验证
+
+#### M3.7a：冻结输入与零费用预检
+
+- [x] 从一个已完成的 v8 Run 读取唯一 Editor 输入
+- [x] 要求写作样本经过明确授权且 `writing_style_profile` 为 `ready`
+- [x] 构造“不提供 Sample / 提供 Sample”两个 Editor 输入
+- [x] 用规范化 hash 证明除写作样本外，其余输入完全相同
+- [x] 冻结质量配置、模型与调用上限，并证明 Sample 确实进入 Editor Prompt
+- [x] SQLite 使用 `mode=ro + query_only`，拒绝修改源 Run
+- [x] 默认只输出脱敏 dry-run，不联网、不写实验产物、不修改 Run、不调用模型
+- [x] 使用真实持久化 Fake v8 Run 完成手工预检
+
+M3.7a 不生成候选稿，也不声称写作样本已经有效。它只把实验前提变成代码
+可以验证的合同，避免把不同素材、不同 Brief 或不同采访结果误当成风格提升。
+
+#### M3.7b：有界生成与同条件 Reviewer
+
+- [ ] 同一 Flash Editor 分别生成两份候选稿
+- [ ] 两稿分别执行严格来源校验、Sample 泄漏检查和确定性质量分析
+- [ ] 同一 Pro Reviewer 在相同 ready Sample 下评价两稿
+- [ ] 把真实调用严格限制为 2 次 Editor + 2 次 Reviewer
+- [ ] 付费调用前重新计算并核对预检合同 hash，阻止预检后的输入/配置漂移
+- [ ] 用 scripted Provider 覆盖失败、记账、顺序与日志脱敏
+
+#### M3.7c：匿名候选与真人揭盲
+
+- [ ] 随机映射 Candidate A / B，并把私有映射与候选正文分开保存
+- [ ] 用户在揭盲前提交 `voice_match_rating`、可录性与 forced choice
+- [ ] 以真人声音匹配为主证据，模型第七维只作辅助
+- [ ] 完成一次真实 DeepSeek 单 pair 实验并记录 tokens、费用与限制
+
+单个 pair 只能算一个人的一次方向性案例，不能证明模型或写作 Sample 对所有
+主题都稳定有效。更强结论需要至少三个主题或三个独立 pair。
+
 ## M4：可靠性与 Trace
 
 - [ ] timeout / bounded retry

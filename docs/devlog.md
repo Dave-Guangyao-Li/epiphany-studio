@@ -2,6 +2,54 @@
 
 ## 2026-07-30
 
+### M3.7a frozen-input writing-style A/B preflight
+
+- Split the writing-sample experiment into three reviewable slices instead of
+  adding generation, automated review, blind rating, and live calls in one
+  change. M3.7a contains only the frozen-input and safety-preflight boundary;
+  M3.7b and M3.7c remain separate planned changes.
+- Added a loader for one completed workflow-v8 `episode-research` Run. It
+  requires exactly one succeeded original `build_podcast_draft` Task, validates
+  its final Draft, cross-checks Run/Task/final-Artifact linkage, topic,
+  Creative Brief, enabled quality configuration, and the Editor style profile
+  and segments against the Run's explicit consented writing-style contract.
+- Added an explicit read-only SQLite mode using URI `mode=ro` and
+  `PRAGMA query_only=ON`. It refuses missing paths, does not create parent
+  directories, does not enable WAL, and rejects write statements. SQLite may
+  still maintain connection-level WAL/SHM sidecars when reading a WAL-mode
+  database, but the database contents and workflow records remain unchanged.
+- Derived `without_sample` and `with_sample` Editor inputs from the exact same
+  persisted bundle. The former clears only `writing_style_profile` and
+  `writing_style_segments`; topic, factual Sources, supplemental material,
+  Interview Scaffold, Creative Brief, and quality configuration remain frozen.
+- Added canonical SHA-256 evidence for the common Editor input, style context,
+  both prompts, and a wider common experiment contract containing quality
+  configuration, model tiers, temperatures, token limits, bundle limits, and
+  the shared Reviewer style context. The preflight refuses to continue unless
+  common-input hashes match and the Sample actually changes the Editor prompt.
+- Added a guarded CLI:
+  `python -m epiphany.writing_style_ab --run-id ... --database ...`.
+  This slice is always a dry run: it has no `--execute` mode, makes zero
+  Provider calls, writes no experiment files, and never mutates the source Run.
+- Kept preflight output content-free. It reports IDs, hashes, counts, planned
+  Flash/Pro models, the future four-call ceiling, and privacy flags without
+  printing Source text, writing samples, prompts, or API keys.
+- Added ten focused tests for the zero-network boundary, single-variable arm
+  derivation, prompt-treatment reach, valid completed-v8 loading, tampered
+  persistent relations, read-only write rejection, missing paths, and a
+  blocked missing-Run path.
+- Passed the complete 308-test backend suite, full Ruff lint/format checks, a
+  clean Alembic upgrade to `0004_run_lineage`, and `alembic check` with no
+  ungenerated schema operations.
+- Ran a realistic zero-cost workflow-v8 fixture to
+  `run_1bbe5ae81b0e4f118331461ab61dd656`, then ran the new preflight against its
+  dedicated SQLite database. It reported a matching common input hash, a ready
+  846-character style context from 1 Source / 7 Segments, zero calls, and all
+  privacy flags false.
+- The preflight does not measure whether a sample improves the Draft. M3.7b
+  will implement the bounded two-Editor/two-Reviewer executor; M3.7c will hide
+  arm identity until human voice-match and recordability ratings are saved.
+
 ### M3.6 consented writing-style context and explicit guided Revision Runs
 
 - Versioned new quality-enabled Runs as workflow v8. Historical v1–v7 Runs
