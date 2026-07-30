@@ -20,9 +20,12 @@ from epiphany.draft_quality_schemas import (
     LEGACY_MODEL_REVIEW_TASK_VERSION,
     MODEL_REVIEW_TASK_VERSION,
     REVIEW_PODCAST_DRAFT,
+    STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
+    STYLE_AWARE_MODEL_REVIEW_TASK_VERSION,
     DeterministicDraftQualityResult,
     ModelSelfReviewOutput,
     ModelSelfReviewTaskInput,
+    WritingStyleContextStatus,
 )
 from epiphany.editor_schemas import BUILD_PODCAST_DRAFT, editor_output_reference_keys
 from epiphany.events import append_event
@@ -38,6 +41,7 @@ from epiphany.material_readiness import (
 )
 from epiphany.models import Artifact, Run, Source, Task
 from epiphany.research_schemas import THEME_RESEARCH, TIMELINE_RESEARCH
+from epiphany.revision_schemas import REVISE_PODCAST_DRAFT
 from epiphany.state_machine import (
     RunStatus,
     TaskStatus,
@@ -56,10 +60,17 @@ INTERVIEW_RESEARCH_WORKFLOW_VERSION = "v3"
 EDITOR_RESEARCH_WORKFLOW_VERSION = "v4"
 MATERIAL_READINESS_WORKFLOW_VERSION = "v5"
 LEGACY_QUALITY_REVIEW_WORKFLOW_VERSION = "v6"
-QUALITY_REVIEW_WORKFLOW_VERSION = "v7"
+CALIBRATED_QUALITY_REVIEW_WORKFLOW_VERSION = "v7"
+GUIDED_REVISION_WORKFLOW_VERSION = "v8"
+QUALITY_REVIEW_WORKFLOW_VERSION = GUIDED_REVISION_WORKFLOW_VERSION
 QUALITY_REVIEW_WORKFLOW_VERSIONS = (
     LEGACY_QUALITY_REVIEW_WORKFLOW_VERSION,
+    CALIBRATED_QUALITY_REVIEW_WORKFLOW_VERSION,
     QUALITY_REVIEW_WORKFLOW_VERSION,
+)
+DETERMINISTIC_FACTS_WORKFLOW_VERSIONS = (
+    CALIBRATED_QUALITY_REVIEW_WORKFLOW_VERSION,
+    GUIDED_REVISION_WORKFLOW_VERSION,
 )
 
 
@@ -101,7 +112,7 @@ class Orchestrator:
                 completed_task=completed_task,
                 artifact=artifact,
             )
-        if run.workflow_type == "episode-research":
+        if run.workflow_type in {"episode-research", "podcast-revision"}:
             await self._advance_episode_research(
                 session,
                 run=run,
@@ -109,6 +120,53 @@ class Orchestrator:
             )
             return None
         raise ValueError(f"unsupported workflow type: {run.workflow_type}")
+
+    async def start_revision_run(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        input_json: dict[str, Any],
+    ) -> Task:
+        """Queue one explicit revision without replaying research or checkpoint steps."""
+
+        if (
+            run.workflow_type != "podcast-revision"
+            or run.workflow_version != GUIDED_REVISION_WORKFLOW_VERSION
+            or run.parent_run_id is None
+            or run.status != RunStatus.QUEUED
+        ):
+            raise ValueError("revision task requires a queued v8 child Run")
+        task = await self._enqueue_task(
+            session,
+            run=run,
+            kind=REVISE_PODCAST_DRAFT,
+            agent_type="editor",
+            parent_task_id=None,
+            input_json=input_json,
+        )
+        await append_event(
+            session,
+            run_id=run.id,
+            task_id=task.id,
+            event_type="workflow.draft_revision.queued",
+            payload={
+                "parent_run_id": run.parent_run_id,
+                "revision_task_id": task.id,
+                "request_artifact_id": input_json["request_artifact_id"],
+                "plan_artifact_id": input_json["plan_artifact_id"],
+            },
+        )
+        logger.info(
+            "Draft revision task queued",
+            extra={
+                "event": "workflow.draft_revision.queued",
+                "run_id": run.id,
+                "task_id": task.id,
+                "parent_run_id": run.parent_run_id,
+            },
+        )
+        return task
 
     async def enqueue_editor(
         self,
@@ -129,7 +187,7 @@ class Orchestrator:
             }
             or run.status != RunStatus.RUNNING
         ):
-            raise ValueError("editor can only be queued for a running v4/v5/v6/v7 episode workflow")
+            raise ValueError("editor can only be queued for a running v4-v8 episode workflow")
 
         task = await self._enqueue_task(
             session,
@@ -170,7 +228,7 @@ class Orchestrator:
         failed_task: Task,
     ) -> None:
         if (
-            run.workflow_type == "episode-research"
+            run.workflow_type in {"episode-research", "podcast-revision"}
             and run.workflow_version in QUALITY_REVIEW_WORKFLOW_VERSIONS
             and failed_task.kind == REVIEW_PODCAST_DRAFT
         ):
@@ -372,7 +430,7 @@ class Orchestrator:
                 completed_task=completed_task,
             )
             return
-        if completed_task.kind == BUILD_PODCAST_DRAFT:
+        if completed_task.kind in {BUILD_PODCAST_DRAFT, REVISE_PODCAST_DRAFT}:
             await self._complete_podcast_draft(
                 session,
                 run=run,
@@ -682,18 +740,15 @@ class Orchestrator:
             MATERIAL_READINESS_WORKFLOW_VERSION,
             *QUALITY_REVIEW_WORKFLOW_VERSIONS,
         }:
-            raise ValueError("editor task is only supported by the v4/v5/v6/v7 episode workflow")
+            raise ValueError("editor task is only supported by a v4-v8 Draft workflow")
         if completed_task.parent_task_id is not None:
             raise ValueError("editor task must be a sequential root task")
         if completed_task.output_artifact_id is None:
             raise ValueError("editor task has no output artifact")
 
         artifact = await session.get(Artifact, completed_task.output_artifact_id)
-        if (
-            artifact is None
-            or artifact.run_id != run.id
-            or artifact.kind != f"{BUILD_PODCAST_DRAFT}_result"
-        ):
+        expected_kind = f"{completed_task.kind}_result"
+        if artifact is None or artifact.run_id != run.id or artifact.kind != expected_kind:
             raise ValueError("editor output artifact is missing or invalid")
 
         await append_event(
@@ -846,16 +901,32 @@ class Orchestrator:
                 for source_id, segment_id in sorted_keys
             ],
         }
-        if run.workflow_version == QUALITY_REVIEW_WORKFLOW_VERSION:
+        if run.workflow_version in DETERMINISTIC_FACTS_WORKFLOW_VERSIONS:
             review_payload.update(
                 {
-                    "review_contract_version": MODEL_REVIEW_TASK_VERSION,
+                    "review_contract_version": (
+                        STYLE_AWARE_MODEL_REVIEW_TASK_VERSION
+                        if run.workflow_version == GUIDED_REVISION_WORKFLOW_VERSION
+                        else MODEL_REVIEW_TASK_VERSION
+                    ),
                     "deterministic_metrics_artifact_id": metrics_artifact.id,
                     "deterministic_quality_facts": build_deterministic_quality_facts(
                         deterministic
                     ).model_dump(mode="json"),
                 }
             )
+            if run.workflow_version == GUIDED_REVISION_WORKFLOW_VERSION:
+                profile = editor_task.input_json.get("writing_style_profile")
+                if profile is not None:
+                    review_payload.update(
+                        {
+                            "writing_style_profile": profile,
+                            "writing_style_segments": editor_task.input_json.get(
+                                "writing_style_segments",
+                                [],
+                            ),
+                        }
+                    )
         else:
             review_payload["review_contract_version"] = LEGACY_MODEL_REVIEW_TASK_VERSION
 
@@ -921,7 +992,7 @@ class Orchestrator:
             or completed_task.parent_task_id is not None
             or completed_task.output_artifact_id is None
         ):
-            raise ValueError("quality Reviewer is only supported by a sequential v6/v7 workflow")
+            raise ValueError("quality Reviewer is only supported by a sequential v6-v8 workflow")
 
         review_artifact = await session.get(Artifact, completed_task.output_artifact_id)
         if (
@@ -935,10 +1006,18 @@ class Orchestrator:
         if (
             draft_artifact is None
             or draft_artifact.run_id != run.id
-            or draft_artifact.kind != f"{BUILD_PODCAST_DRAFT}_result"
+            or draft_artifact.kind
+            not in {
+                f"{BUILD_PODCAST_DRAFT}_result",
+                f"{REVISE_PODCAST_DRAFT}_result",
+            }
         ):
             raise ValueError("quality Reviewer draft artifact is missing or invalid")
-        deterministic, review_contract_version = await self._load_deterministic_quality(
+        (
+            deterministic,
+            review_contract_version,
+            writing_style_context_status,
+        ) = await self._load_deterministic_quality(
             session,
             run=run,
             reviewer_task=completed_task,
@@ -956,6 +1035,7 @@ class Orchestrator:
             reviewer_artifact=review_artifact,
             reviewer_task_id=completed_task.id,
             review_contract_version=review_contract_version,
+            writing_style_context_status=writing_style_context_status,
         )
         await append_event(
             session,
@@ -1000,10 +1080,18 @@ class Orchestrator:
         if (
             draft_artifact is None
             or draft_artifact.run_id != run.id
-            or draft_artifact.kind != f"{BUILD_PODCAST_DRAFT}_result"
+            or draft_artifact.kind
+            not in {
+                f"{BUILD_PODCAST_DRAFT}_result",
+                f"{REVISE_PODCAST_DRAFT}_result",
+            }
         ):
             raise ValueError("failed quality Reviewer has no valid Draft to preserve")
-        deterministic, review_contract_version = await self._load_deterministic_quality(
+        (
+            deterministic,
+            review_contract_version,
+            writing_style_context_status,
+        ) = await self._load_deterministic_quality(
             session,
             run=run,
             reviewer_task=failed_task,
@@ -1019,6 +1107,7 @@ class Orchestrator:
             reviewer_task_id=failed_task.id,
             unavailable_reason=failed_task.error_code or "model_self_review_unavailable",
             review_contract_version=review_contract_version,
+            writing_style_context_status=writing_style_context_status,
         )
         await append_event(
             session,
@@ -1045,7 +1134,11 @@ class Orchestrator:
         run: Run,
         reviewer_task: Task,
         draft_artifact_id: str,
-    ) -> tuple[DeterministicDraftQualityResult, str]:
+    ) -> tuple[
+        DeterministicDraftQualityResult,
+        str,
+        WritingStyleContextStatus,
+    ]:
         """Load metrics using the persisted Reviewer contract, not only the Run label.
 
         An M3.5 pre-release process could persist a workflow-v6 Run whose
@@ -1058,7 +1151,10 @@ class Orchestrator:
         if review_input.draft_artifact_id != draft_artifact_id:
             raise ValueError("quality Reviewer task references a different Draft")
 
-        if review_input.review_contract_version == MODEL_REVIEW_TASK_VERSION:
+        if review_input.review_contract_version in {
+            MODEL_REVIEW_TASK_VERSION,
+            STYLE_AWARE_MODEL_REVIEW_TASK_VERSION,
+        }:
             metrics_artifact = await session.get(
                 Artifact,
                 review_input.deterministic_metrics_artifact_id,
@@ -1080,7 +1176,10 @@ class Orchestrator:
         deterministic = DeterministicDraftQualityResult.model_validate(
             metrics_artifact.content_json
         )
-        if review_input.review_contract_version == MODEL_REVIEW_TASK_VERSION:
+        if review_input.review_contract_version in {
+            MODEL_REVIEW_TASK_VERSION,
+            STYLE_AWARE_MODEL_REVIEW_TASK_VERSION,
+        }:
             if (
                 deterministic.metrics.rules_version != DRAFT_QUALITY_RULES_VERSION
                 or build_deterministic_quality_facts(deterministic)
@@ -1091,7 +1190,11 @@ class Orchestrator:
                 )
         elif deterministic.metrics.rules_version != LEGACY_DRAFT_QUALITY_RULES_VERSION:
             raise ValueError("legacy quality Reviewer must use legacy Draft metrics")
-        return deterministic, review_input.review_contract_version
+        return (
+            deterministic,
+            review_input.review_contract_version,
+            review_input.writing_style_context_status,
+        )
 
     async def _persist_draft_quality_report(
         self,
@@ -1105,15 +1208,18 @@ class Orchestrator:
         reviewer_task_id: str,
         unavailable_reason: str | None = None,
         review_contract_version: str,
+        writing_style_context_status: WritingStyleContextStatus,
     ) -> Artifact:
-        scoring_formula_version = (
-            LEGACY_DRAFT_QUALITY_FORMULA_VERSION
-            if review_contract_version == LEGACY_MODEL_REVIEW_TASK_VERSION
-            else DRAFT_QUALITY_FORMULA_VERSION
-        )
-        report_key_suffix = (
-            "v1" if scoring_formula_version == LEGACY_DRAFT_QUALITY_FORMULA_VERSION else "v2"
-        )
+        scoring_formula_version = {
+            LEGACY_MODEL_REVIEW_TASK_VERSION: LEGACY_DRAFT_QUALITY_FORMULA_VERSION,
+            MODEL_REVIEW_TASK_VERSION: DRAFT_QUALITY_FORMULA_VERSION,
+            STYLE_AWARE_MODEL_REVIEW_TASK_VERSION: (STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION),
+        }[review_contract_version]
+        report_key_suffix = {
+            LEGACY_DRAFT_QUALITY_FORMULA_VERSION: "v1",
+            DRAFT_QUALITY_FORMULA_VERSION: "v2",
+            STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION: "v3",
+        }[scoring_formula_version]
         report_key = f"draft-quality:{run.id}:{draft_artifact.id}:{report_key_suffix}"
         existing = (
             await session.execute(select(Artifact).where(Artifact.idempotency_key == report_key))
@@ -1136,6 +1242,7 @@ class Orchestrator:
             reviewer_model=reviewer_execution.get("model"),
             unavailable_reason=unavailable_reason,
             scoring_formula_version=scoring_formula_version,
+            writing_style_context_status=writing_style_context_status,
         )
         artifact = Artifact(
             run_id=run.id,

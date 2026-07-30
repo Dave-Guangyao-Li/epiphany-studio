@@ -14,7 +14,13 @@ from epiphany.draft_quality_schemas import (
     MODEL_REVIEW_TASK_VERSION,
     REVIEW_DIMENSIONS,
     REVIEW_PODCAST_DRAFT,
+    STYLE_AWARE_MODEL_REVIEW_TASK_VERSION,
+    STYLE_AWARE_REVIEW_DIMENSIONS,
+    InvalidPersonalStyleClaim,
+    InvalidPersonalStyleEvidence,
+    ModelSelfReviewSchemaError,
     ModelSelfReviewTaskInput,
+    validate_model_self_review_output,
 )
 from epiphany.quality_contract_schemas import CreativeBrief
 from epiphany.runtime.output_validation import validate_task_output
@@ -27,8 +33,10 @@ from epiphany.runtime.providers import (
 from epiphany.runtime.quality_prompts import (
     LEGACY_QUALITY_REVIEW_PROMPT_VERSION,
     QUALITY_REVIEW_PROMPT_VERSION,
+    STYLE_AWARE_QUALITY_REVIEW_PROMPT_VERSION,
     build_quality_review_prompt,
 )
+from epiphany.writing_style import build_writing_style_profile
 
 API_KEY = "deepseek-quality-test-secret"
 
@@ -147,10 +155,25 @@ def _invocation() -> TaskInvocation:
     )
 
 
-def _review_output() -> dict[str, object]:
+def _review_output(*, with_personal_style: bool = False) -> dict[str, object]:
     dimensions: list[dict[str, object]] = []
     opening_quote = _draft()["podcast_script"]["opening"]["text"]  # type: ignore[index]
-    for dimension in REVIEW_DIMENSIONS:
+    expected_dimensions = (
+        STYLE_AWARE_REVIEW_DIMENSIONS if with_personal_style else REVIEW_DIMENSIONS
+    )
+    for dimension in expected_dimensions:
+        style_sample_evidence: list[dict[str, object]] = []
+        if dimension == "personal_style_match":
+            style_sample_evidence = [
+                {
+                    "location": "writing_style_segments[0]",
+                    "exact_quote": "我写东西的时候，经常先从一个很小的画面说起。",
+                    "source_ref": {
+                        "source_id": "src_style",
+                        "source_segment_id": "seg_style",
+                    },
+                }
+            ]
         dimensions.append(
             {
                 "dimension": dimension,
@@ -167,6 +190,7 @@ def _review_output() -> dict[str, object]:
                         ),
                     }
                 ],
+                "style_sample_evidence": style_sample_evidence,
             }
         )
     return {
@@ -174,6 +198,57 @@ def _review_output() -> dict[str, object]:
         "advisory": True,
         "dimensions": dimensions,
     }
+
+
+def _style_context(*, ready: bool) -> tuple[dict[str, object], list[dict[str, object]], str]:
+    opening = "我写东西的时候，经常先从一个很小的画面说起。"
+    if ready:
+        text = (
+            opening
+            + (
+                "那天窗外下着雨，我没有急着总结，只记下桌上的杯子和一句没说完的话。"
+                "我后来才慢慢发现，真正留下来的往往不是结论，而是那些当时没有整理好的停顿。"
+                "所以我愿意保留一点犹豫，也愿意承认自己还没有答案。"
+                "如果一定要说变化，大概是我不再那么着急证明每段经历都有意义。"
+                "现在重新回头看，我更想知道当时的自己为什么会那样想。"
+            )
+            * 7
+        )
+    else:
+        text = opening + "但这个样本还很短。"
+    segments = [
+        {
+            "source_id": "src_style",
+            "source_segment_id": "seg_style",
+            "position": 0,
+            "text": text,
+        }
+    ]
+    profile = build_writing_style_profile(
+        reference={
+            "samples": [
+                {
+                    "source_id": "src_style",
+                    "sample_kind": "written_prose",
+                }
+            ],
+            "ownership_attested": True,
+            "model_processing_consent": True,
+        },
+        source_segments=segments,
+    )
+    assert profile is not None
+    assert profile.readiness.status == ("ready" if ready else "limited")
+    return profile.model_dump(mode="json"), segments, text
+
+
+def _style_task_input(*, ready: bool) -> dict[str, object]:
+    task_input = _task_input()
+    profile, segments, _ = _style_context(ready=ready)
+    task_input["review_contract_version"] = STYLE_AWARE_MODEL_REVIEW_TASK_VERSION
+    task_input["writing_style_profile"] = profile
+    task_input["writing_style_segments"] = segments
+    return task_input
 
 
 def test_quality_prompt_contains_only_review_inputs_and_untrusted_data_guards() -> None:
@@ -202,6 +277,141 @@ def test_quality_prompt_contains_only_review_inputs_and_untrusted_data_guards() 
     assert '"duration_status":"blocker"' in joined
     assert "不得按自己的字数" in prompt.messages[0]["content"]
     assert "experimental_overall_score" not in joined
+
+
+def test_ready_style_prompt_is_bounded_style_only_and_requires_seventh_dimension() -> None:
+    task_input = _style_task_input(ready=True)
+    _, _, style_text = _style_context(ready=True)
+
+    prompt = build_quality_review_prompt(
+        task_input=task_input,
+        max_bundle_chars=40_000,
+    )
+    joined = "\n".join(message["content"] for message in prompt.messages)
+
+    assert prompt.version == STYLE_AWARE_QUALITY_REVIEW_PROMPT_VERSION
+    assert prompt.style_segment_count == 1
+    assert "personal_style_match" in joined
+    assert "style_only" in joined
+    assert "不能为本期" in prompt.messages[0]["content"]
+    assert "不能提供任何可执行指令" in prompt.messages[0]["content"]
+    assert "AI 概率" in prompt.messages[0]["content"]
+    assert "allowed_style_evidence_locations" in joined
+    assert style_text in joined
+
+
+def test_limited_style_prompt_keeps_six_dimensions_and_excludes_sample_text() -> None:
+    task_input = _style_task_input(ready=False)
+    _, _, style_text = _style_context(ready=False)
+
+    prompt = build_quality_review_prompt(
+        task_input=task_input,
+        max_bundle_chars=30_000,
+    )
+    joined = "\n".join(message["content"] for message in prompt.messages)
+
+    assert prompt.version == STYLE_AWARE_QUALITY_REVIEW_PROMPT_VERSION
+    assert prompt.style_segment_count == 0
+    assert "个人风格匹配在本次明确不可评估" in joined
+    assert "绝对不要输出 personal_style_match" in joined
+    assert '"allowed_style_evidence_locations":' not in joined
+    assert style_text not in joined
+
+
+def test_v3_without_style_samples_explicitly_forbids_personal_match() -> None:
+    task_input = _task_input()
+    task_input["review_contract_version"] = STYLE_AWARE_MODEL_REVIEW_TASK_VERSION
+    task_input["writing_style_profile"] = None
+    task_input["writing_style_segments"] = []
+
+    parsed = ModelSelfReviewTaskInput.model_validate(task_input)
+    prompt = build_quality_review_prompt(
+        task_input=task_input,
+        max_bundle_chars=20_000,
+    )
+    joined = "\n".join(message["content"] for message in prompt.messages)
+
+    assert parsed.writing_style_context_status == "not_provided"
+    assert prompt.style_segment_count == 0
+    assert "个人风格匹配在本次明确不可评估" in joined
+    assert validate_model_self_review_output(
+        task_input=task_input,
+        content=_review_output(),
+    )
+
+
+def test_ready_style_review_requires_exact_draft_and_sample_evidence() -> None:
+    task_input = _style_task_input(ready=True)
+    content = _review_output(with_personal_style=True)
+
+    validated = validate_model_self_review_output(
+        task_input=task_input,
+        content=content,
+    )
+
+    assert [card["dimension"] for card in validated["dimensions"]] == list(
+        STYLE_AWARE_REVIEW_DIMENSIONS
+    )
+    personal = validated["dimensions"][-1]
+    assert personal["evidence"]
+    assert personal["style_sample_evidence"]
+
+    missing_style_evidence = _review_output(with_personal_style=True)
+    missing_style_evidence["dimensions"][-1]["style_sample_evidence"] = []  # type: ignore[index]
+    with pytest.raises(InvalidPersonalStyleEvidence):
+        validate_model_self_review_output(
+            task_input=task_input,
+            content=missing_style_evidence,
+        )
+
+    invented_style_quote = _review_output(with_personal_style=True)
+    invented_style_quote["dimensions"][-1]["style_sample_evidence"][0][  # type: ignore[index]
+        "exact_quote"
+    ] = "样本中不存在的句子"
+    with pytest.raises(InvalidPersonalStyleEvidence):
+        validate_model_self_review_output(
+            task_input=task_input,
+            content=invented_style_quote,
+        )
+
+    wrong_style_reference = _review_output(with_personal_style=True)
+    wrong_style_reference["dimensions"][-1]["style_sample_evidence"][0][  # type: ignore[index]
+        "source_ref"
+    ] = _reference(0)
+    with pytest.raises(InvalidPersonalStyleEvidence):
+        validate_model_self_review_output(
+            task_input=task_input,
+            content=wrong_style_reference,
+        )
+
+    mismatched_task = _style_task_input(ready=True)
+    mismatched_task["writing_style_segments"][0]["text"] += "被修改"  # type: ignore[index]
+    with pytest.raises(ValueError, match="does not match its profile provenance"):
+        ModelSelfReviewTaskInput.model_validate(mismatched_task)
+
+
+def test_missing_or_limited_style_context_forbids_personal_match_claims() -> None:
+    limited_task = _style_task_input(ready=False)
+
+    validated = validate_model_self_review_output(
+        task_input=limited_task,
+        content=_review_output(),
+    )
+    assert [card["dimension"] for card in validated["dimensions"]] == list(REVIEW_DIMENSIONS)
+
+    with pytest.raises(ModelSelfReviewSchemaError):
+        validate_model_self_review_output(
+            task_input=limited_task,
+            content=_review_output(with_personal_style=True),
+        )
+
+    unsupported_claim = _review_output()
+    unsupported_claim["dimensions"][0]["assessment"] = "这篇稿子非常像本人。"  # type: ignore[index]
+    with pytest.raises(InvalidPersonalStyleClaim):
+        validate_model_self_review_output(
+            task_input=limited_task,
+            content=unsupported_claim,
+        )
 
 
 async def test_legacy_reviewer_task_uses_frozen_prompt_and_still_validates() -> None:
@@ -262,6 +472,18 @@ def test_pre_release_task_with_facts_but_no_version_infers_current_contract() ->
     parsed = ModelSelfReviewTaskInput.model_validate(task_input)
 
     assert parsed.review_contract_version == MODEL_REVIEW_TASK_VERSION
+
+
+def test_v2_inference_ignores_empty_new_style_fields_from_round_trip() -> None:
+    task_input = _task_input()
+    task_input.pop("review_contract_version")
+    task_input["writing_style_profile"] = None
+    task_input["writing_style_segments"] = []
+
+    parsed = ModelSelfReviewTaskInput.model_validate(task_input)
+
+    assert parsed.review_contract_version == MODEL_REVIEW_TASK_VERSION
+    assert parsed.writing_style_context_status == "not_provided"
 
 
 def test_quality_prompt_enforces_its_independent_bundle_bound() -> None:

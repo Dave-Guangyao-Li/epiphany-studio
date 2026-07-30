@@ -16,6 +16,10 @@ from epiphany.draft_feedback_schemas import (
     DraftUserFeedbackRequest,
     DraftUserFeedbackResponse,
 )
+from epiphany.draft_improvement import (
+    DraftImprovementPlanInputError,
+    build_draft_improvement_plan,
+)
 from epiphany.draft_quality_markdown import render_draft_quality_markdown
 from epiphany.draft_quality_schemas import (
     DraftQualityReport,
@@ -52,8 +56,22 @@ from epiphany.material_readiness import (
 )
 from epiphany.models import Artifact, Event, Run, Source, Task
 from epiphany.research_schemas import EpisodeResearchPayload
+from epiphany.revision_schemas import (
+    REVISE_PODCAST_DRAFT,
+    CreateDraftRevisionRequest,
+    CreateDraftRevisionResponse,
+    DraftImprovementPlan,
+    DraftImprovementPlanRecord,
+    DraftRevisionComparison,
+    DraftRevisionComparisonRecord,
+    DraftRevisionRequestRecord,
+    PodcastRevisionTaskInput,
+    build_draft_revision_candidate_summary,
+    build_draft_revision_comparison,
+)
 from epiphany.runtime.orchestrator import (
     EDITOR_RESEARCH_WORKFLOW_VERSION,
+    GUIDED_REVISION_WORKFLOW_VERSION,
     INTERVIEW_RESEARCH_WORKFLOW_VERSION,
     MATERIAL_READINESS_WORKFLOW_VERSION,
     QUALITY_REVIEW_WORKFLOW_VERSION,
@@ -74,6 +92,8 @@ from epiphany.state_machine import (
     validate_run_transition,
     validate_task_transition,
 )
+from epiphany.writing_style import build_writing_style_profile
+from epiphany.writing_style_schemas import WritingStyleProfile
 
 logger = logging.getLogger("epiphany.run_service")
 
@@ -122,6 +142,22 @@ class DraftQualityReportNotReady(ValueError):
     pass
 
 
+class DraftImprovementPlanNotReady(ValueError):
+    pass
+
+
+class DraftRevisionNotAllowed(ValueError):
+    pass
+
+
+class DraftRevisionConflict(ValueError):
+    pass
+
+
+class DraftRevisionComparisonNotReady(ValueError):
+    pass
+
+
 class RunService:
     def __init__(self, database: Database, orchestrator: Orchestrator) -> None:
         self.database = database
@@ -135,6 +171,60 @@ class RunService:
         # deployment concern.
         self._run_mutation_lock = asyncio.Lock()
 
+    async def _load_writing_style_task_fields(
+        self,
+        session: Any,
+        *,
+        run: Run,
+    ) -> dict[str, Any]:
+        """Hydrate only the profile-selected sample text for Editor/Reviewer tasks."""
+
+        raw_profile = run.input_json.get("writing_style_profile")
+        if raw_profile is None:
+            return {}
+        try:
+            profile = WritingStyleProfile.model_validate(raw_profile)
+        except ValidationError as error:
+            raise RunResumeNotAllowed("writing-style profile is invalid") from error
+        source_ids = _stable_unique([segment.source_id for segment in profile.selected_segments])
+        sources = (
+            (
+                await session.execute(
+                    select(Source)
+                    .where(Source.id.in_(source_ids))
+                    .options(selectinload(Source.segments))
+                )
+            )
+            .scalars()
+            .all()
+            if source_ids
+            else []
+        )
+        segments_by_key = {
+            (source.id, segment.id): segment for source in sources for segment in source.segments
+        }
+        missing_refs = [
+            (reference.source_id, reference.source_segment_id)
+            for reference in profile.selected_segments
+            if (reference.source_id, reference.source_segment_id) not in segments_by_key
+        ]
+        if missing_refs:
+            raise RunResumeNotAllowed("writing-style sample material is unavailable")
+        return {
+            "writing_style_profile": profile.model_dump(mode="json"),
+            "writing_style_segments": [
+                {
+                    "source_id": reference.source_id,
+                    "source_segment_id": reference.source_segment_id,
+                    "position": reference.position,
+                    "text": segments_by_key[
+                        (reference.source_id, reference.source_segment_id)
+                    ].text,
+                }
+                for reference in profile.selected_segments
+            ],
+        }
+
     async def create_run(
         self,
         *,
@@ -143,17 +233,27 @@ class RunService:
     ) -> RunView:
         async with self.database.sessions() as session, session.begin():
             research_source_segments: list[dict[str, str]] | None = None
+            writing_style_profile: WritingStyleProfile | None = None
             if workflow_type == "episode-research":
                 try:
                     research_payload = EpisodeResearchPayload.model_validate(payload)
                 except ValidationError as error:
                     raise InvalidRunPayload("invalid episode-research payload") from error
 
+                style_source_ids = (
+                    [
+                        sample.source_id
+                        for sample in research_payload.writing_style_reference.samples
+                    ]
+                    if research_payload.writing_style_reference is not None
+                    else []
+                )
+                source_ids_to_load = [*research_payload.source_ids, *style_source_ids]
                 sources = (
                     (
                         await session.execute(
                             select(Source)
-                            .where(Source.id.in_(research_payload.source_ids))
+                            .where(Source.id.in_(source_ids_to_load))
                             .options(selectinload(Source.segments))
                         )
                     )
@@ -168,8 +268,29 @@ class RunService:
                 ]
                 if missing_source_ids:
                     raise RunSourceNotFound(missing_source_ids[0])
+                missing_style_source_ids = [
+                    source_id for source_id in style_source_ids if source_id not in sources_by_id
+                ]
+                if missing_style_source_ids:
+                    raise RunSourceNotFound(missing_style_source_ids[0])
 
                 payload = research_payload.model_dump(mode="json")
+                writing_style_profile = build_writing_style_profile(
+                    reference=research_payload.writing_style_reference,
+                    source_segments=[
+                        {
+                            "source_id": source.id,
+                            "source_segment_id": segment.id,
+                            "position": segment.position,
+                            "text": segment.text,
+                        }
+                        for source_id in style_source_ids
+                        for source in [sources_by_id[source_id]]
+                        for segment in sorted(source.segments, key=lambda item: item.position)
+                    ],
+                )
+                if writing_style_profile is not None:
+                    payload["writing_style_profile"] = writing_style_profile.model_dump(mode="json")
                 research_source_segments = [
                     {
                         "source_id": source.id,
@@ -207,6 +328,30 @@ class RunService:
             )
             session.add(run)
             await session.flush()
+            if writing_style_profile is not None:
+                style_artifact = Artifact(
+                    run_id=run.id,
+                    task_id=None,
+                    kind="writing_style_profile",
+                    content_json=writing_style_profile.model_dump(mode="json"),
+                    idempotency_key=f"writing-style-profile:{run.id}",
+                )
+                session.add(style_artifact)
+                await session.flush()
+                await append_event(
+                    session,
+                    run_id=run.id,
+                    event_type="workflow.writing_style_profile.created",
+                    payload={
+                        "artifact_id": style_artifact.id,
+                        "readiness_status": writing_style_profile.readiness.status,
+                        "source_count": writing_style_profile.stats.source_count,
+                        "segment_count": writing_style_profile.stats.segment_count,
+                        "non_whitespace_char_count": (
+                            writing_style_profile.stats.non_whitespace_char_count
+                        ),
+                    },
+                )
             await append_event(
                 session,
                 run_id=run.id,
@@ -307,7 +452,11 @@ class RunService:
                 if (
                     draft is None
                     or draft.run_id != run.id
-                    or draft.kind != f"{BUILD_PODCAST_DRAFT}_result"
+                    or draft.kind
+                    not in {
+                        f"{BUILD_PODCAST_DRAFT}_result",
+                        f"{REVISE_PODCAST_DRAFT}_result",
+                    }
                 ):
                     raise DraftFeedbackNotAllowed(
                         "draft feedback requires a succeeded Run with a podcast draft"
@@ -464,6 +613,702 @@ class RunService:
                     "persisted draft quality report is invalid"
                 ) from error
 
+    async def get_draft_improvement_plan(
+        self,
+        run_id: str,
+    ) -> DraftImprovementPlanRecord:
+        """Return or deterministically create the plan for one immutable Draft."""
+
+        async with self._run_mutation_lock:
+            async with self.database.sessions() as session, session.begin():
+                run = await session.get(Run, run_id)
+                if run is None:
+                    raise RunNotFound(run_id)
+                if run.status != RunStatus.SUCCEEDED or run.output_artifact_id is None:
+                    raise DraftImprovementPlanNotReady(
+                        "draft improvement plan requires a succeeded quality Run"
+                    )
+
+                draft = await session.get(Artifact, run.output_artifact_id)
+                accepted_draft_kinds = {
+                    f"{BUILD_PODCAST_DRAFT}_result",
+                    f"{REVISE_PODCAST_DRAFT}_result",
+                }
+                if (
+                    draft is None
+                    or draft.run_id != run.id
+                    or draft.kind not in accepted_draft_kinds
+                    or draft.task_id is None
+                ):
+                    raise DraftImprovementPlanNotReady(
+                        "Run output is not a supported podcast Draft"
+                    )
+                report = (
+                    await session.execute(
+                        select(Artifact)
+                        .where(
+                            Artifact.run_id == run.id,
+                            Artifact.kind == "draft_quality_report",
+                        )
+                        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if report is None:
+                    raise DraftImprovementPlanNotReady("draft quality report is not ready")
+                editor_task = await session.get(Task, draft.task_id)
+                if editor_task is None:
+                    raise DraftImprovementPlanNotReady("Draft task provenance is unavailable")
+
+                plan_key = (
+                    f"draft-improvement:{run.id}:{draft.id}:{report.id}:"
+                    f"{DraftImprovementPlan.model_fields['schema_version'].default}"
+                )
+                artifact = (
+                    await session.execute(
+                        select(Artifact).where(Artifact.idempotency_key == plan_key)
+                    )
+                ).scalar_one_or_none()
+                if artifact is None:
+                    draft_content = {
+                        key: value
+                        for key, value in draft.content_json.items()
+                        if key != "_execution"
+                    }
+                    try:
+                        plan = build_draft_improvement_plan(
+                            parent_run_id=run.id,
+                            parent_draft_artifact_id=draft.id,
+                            quality_report_artifact_id=report.id,
+                            editor_task_input=_base_editor_input(editor_task.input_json),
+                            podcast_draft=draft_content,
+                            quality_report=report.content_json,
+                            interview_scaffold=editor_task.input_json["interview_scaffold"],
+                            writing_style_context_available=(
+                                _writing_style_context_is_ready(editor_task.input_json)
+                            ),
+                        )
+                    except (DraftImprovementPlanInputError, KeyError) as error:
+                        raise DraftImprovementPlanNotReady(
+                            "workflow artifacts cannot produce a safe improvement plan"
+                        ) from error
+                    artifact = Artifact(
+                        run_id=run.id,
+                        task_id=editor_task.id,
+                        kind="draft_improvement_plan",
+                        content_json=plan.model_dump(mode="json"),
+                        idempotency_key=plan_key,
+                    )
+                    session.add(artifact)
+                    await session.flush()
+                    await append_event(
+                        session,
+                        run_id=run.id,
+                        task_id=editor_task.id,
+                        event_type="workflow.draft_improvement.planned",
+                        payload={
+                            "artifact_id": artifact.id,
+                            "draft_artifact_id": draft.id,
+                            "quality_report_artifact_id": report.id,
+                            "duration_resolution": plan.duration_resolution,
+                            "missing_script_character_count": (
+                                plan.duration.missing_script_character_count
+                            ),
+                            "unused_factual_segment_count": (
+                                plan.material.unused_factual_segment_count
+                            ),
+                            "targeted_question_count": len(plan.targeted_questions),
+                            "writing_style_context_available": (
+                                plan.writing_style_context_available
+                            ),
+                        },
+                    )
+                try:
+                    plan = DraftImprovementPlan.model_validate(artifact.content_json)
+                except ValidationError as error:
+                    raise DraftImprovementPlanNotReady(
+                        "persisted draft improvement plan is invalid"
+                    ) from error
+                artifact_view = ArtifactView.model_validate(artifact)
+
+        logger.info(
+            "Draft improvement plan ready",
+            extra={
+                "event": "workflow.draft_improvement.planned",
+                "run_id": run_id,
+                "artifact_id": artifact_view.id,
+                "duration_resolution": plan.duration_resolution,
+                "missing_script_character_count": (plan.duration.missing_script_character_count),
+                "unused_factual_segment_count": (plan.material.unused_factual_segment_count),
+            },
+        )
+        return DraftImprovementPlanRecord(plan=plan, artifact=artifact_view)
+
+    async def create_draft_revision(
+        self,
+        parent_run_id: str,
+        *,
+        request: CreateDraftRevisionRequest,
+    ) -> CreateDraftRevisionResponse:
+        """Create exactly one explicit child Run; never mutate the parent Draft."""
+
+        plan_record = await self.get_draft_improvement_plan(parent_run_id)
+        request_key = stable_id(
+            "revision",
+            f"{parent_run_id}:{request.submission_id}",
+        )
+        idempotency_key = f"draft-revision-request:{request_key}"
+        idempotent_replay = False
+
+        async with self._run_mutation_lock:
+            async with self.database.sessions() as session, session.begin():
+                existing = (
+                    await session.execute(
+                        select(Artifact).where(Artifact.idempotency_key == idempotency_key)
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    try:
+                        existing_record = DraftRevisionRequestRecord.model_validate(
+                            existing.content_json
+                        )
+                    except ValidationError as error:
+                        raise DraftRevisionConflict(
+                            "persisted revision request is invalid"
+                        ) from error
+                    if not _revision_request_matches(
+                        request=request,
+                        record=existing_record,
+                        parent_run_id=parent_run_id,
+                        plan_artifact_id=plan_record.artifact.id,
+                    ):
+                        raise DraftRevisionConflict(
+                            "submission_id was already used with a different revision request"
+                        )
+                    child = await session.get(Run, existing_record.child_run_id)
+                    if child is None:
+                        raise DraftRevisionConflict(
+                            "revision request references a missing child Run"
+                        )
+                    request_artifact_id = existing.id
+                    child_run_id = child.id
+                    idempotent_replay = True
+                else:
+                    parent = await session.get(Run, parent_run_id)
+                    if (
+                        parent is None
+                        or parent.status != RunStatus.SUCCEEDED
+                        or parent.output_artifact_id is None
+                    ):
+                        if parent is None:
+                            raise RunNotFound(parent_run_id)
+                        raise DraftRevisionNotAllowed(
+                            "revision requires a succeeded parent quality Run"
+                        )
+                    parent_draft = await session.get(Artifact, parent.output_artifact_id)
+                    if (
+                        parent_draft is None
+                        or parent_draft.kind
+                        not in {
+                            f"{BUILD_PODCAST_DRAFT}_result",
+                            f"{REVISE_PODCAST_DRAFT}_result",
+                        }
+                        or parent_draft.task_id is None
+                    ):
+                        raise DraftRevisionNotAllowed(
+                            "parent output is not a supported podcast Draft"
+                        )
+                    parent_editor_task = await session.get(Task, parent_draft.task_id)
+                    if parent_editor_task is None:
+                        raise DraftRevisionNotAllowed("parent Draft task provenance is unavailable")
+                    parent_report = await session.get(
+                        Artifact,
+                        plan_record.plan.quality_report_artifact_id,
+                    )
+                    if (
+                        parent_report is None
+                        or parent_report.run_id != parent.id
+                        or parent_report.kind != "draft_quality_report"
+                    ):
+                        raise DraftRevisionNotAllowed(
+                            "parent quality report provenance is unavailable"
+                        )
+
+                    selected_gaps = {gap.code: gap for gap in plan_record.plan.gaps}
+                    missing_gap_codes = [
+                        code for code in request.selected_gap_codes if code not in selected_gaps
+                    ]
+                    if missing_gap_codes:
+                        raise DraftRevisionNotAllowed(
+                            f"selected improvement gap is unavailable: {missing_gap_codes[0]}"
+                        )
+                    if (
+                        "reuse_unused_material" in request.selected_actions
+                        and plan_record.plan.material.unused_factual_segment_count == 0
+                    ):
+                        raise DraftRevisionNotAllowed(
+                            "improvement plan has no unused factual material to reuse"
+                        )
+
+                    feedback_artifacts = (
+                        (
+                            await session.execute(
+                                select(Artifact).where(
+                                    Artifact.id.in_(request.selected_feedback_artifact_ids)
+                                )
+                            )
+                        )
+                        .scalars()
+                        .all()
+                        if request.selected_feedback_artifact_ids
+                        else []
+                    )
+                    feedback_by_id = {artifact.id: artifact for artifact in feedback_artifacts}
+                    selected_feedback: list[dict[str, Any]] = []
+                    for artifact_id in request.selected_feedback_artifact_ids:
+                        artifact = feedback_by_id.get(artifact_id)
+                        if (
+                            artifact is None
+                            or artifact.run_id != parent.id
+                            or artifact.kind != "draft_user_feedback"
+                        ):
+                            raise DraftRevisionNotAllowed(
+                                f"selected feedback is unavailable: {artifact_id}"
+                            )
+                        try:
+                            feedback = DraftUserFeedback.model_validate(artifact.content_json)
+                        except ValidationError as error:
+                            raise DraftRevisionNotAllowed(
+                                "selected feedback artifact is invalid"
+                            ) from error
+                        selected_feedback.append(
+                            {
+                                "artifact_id": artifact.id,
+                                "feedback_origin": feedback.feedback_origin,
+                                "decision": feedback.decision,
+                                "overall_rating": feedback.overall_rating,
+                                "voice_match_rating": feedback.voice_match_rating,
+                                "recordability_rating": feedback.recordability_rating,
+                                "usefulness_rating": feedback.usefulness_rating,
+                                "tone_fit_rating": feedback.tone_fit_rating,
+                                "would_record_as_is": feedback.would_record_as_is,
+                                "observed_duration_minutes": (feedback.observed_duration_minutes),
+                                "comment": feedback.comment,
+                            }
+                        )
+
+                    base_editor_input = _base_editor_input(parent_editor_task.input_json)
+                    parent_brief = dict(base_editor_input["creative_brief"])
+                    if request.target_duration_minutes is not None:
+                        if request.target_duration_minutes >= int(
+                            parent_brief["target_duration_minutes"]
+                        ):
+                            raise DraftRevisionNotAllowed(
+                                "revised target duration must be lower than the parent target"
+                            )
+                        allowed_lower_targets = {
+                            option.suggested_target_duration_minutes
+                            for option in plan_record.plan.options
+                            if option.kind == "lower_target_duration"
+                        }
+                        if request.target_duration_minutes not in allowed_lower_targets:
+                            raise DraftRevisionNotAllowed(
+                                "requested target duration is not offered by the improvement plan"
+                            )
+                        parent_brief["target_duration_minutes"] = request.target_duration_minutes
+
+                    parent_factual_source_ids = _stable_unique(
+                        [
+                            str(segment["source_id"])
+                            for segment in [
+                                *base_editor_input["initial_source_segments"],
+                                *base_editor_input["supplemental_source_segments"],
+                            ]
+                        ]
+                    )
+                    style_source_ids = {
+                        str(segment["source_id"])
+                        for segment in base_editor_input.get(
+                            "writing_style_segments",
+                            [],
+                        )
+                    }
+                    duplicate_source_ids = [
+                        source_id
+                        for source_id in request.source_ids
+                        if source_id in {*parent_factual_source_ids, *style_source_ids}
+                    ]
+                    if duplicate_source_ids:
+                        raise DraftRevisionNotAllowed(
+                            "supplemental revision Sources must be new factual material"
+                        )
+                    added_sources = (
+                        (
+                            await session.execute(
+                                select(Source)
+                                .where(Source.id.in_(request.source_ids))
+                                .options(selectinload(Source.segments))
+                            )
+                        )
+                        .scalars()
+                        .all()
+                        if request.source_ids
+                        else []
+                    )
+                    added_sources_by_id = {source.id: source for source in added_sources}
+                    missing_source_ids = [
+                        source_id
+                        for source_id in request.source_ids
+                        if source_id not in added_sources_by_id
+                    ]
+                    if missing_source_ids:
+                        raise RunSourceNotFound(missing_source_ids[0])
+                    added_segments = _segments_for_sources(
+                        request.source_ids,
+                        added_sources_by_id,
+                    )
+                    supplemental_segments = [
+                        *base_editor_input["supplemental_source_segments"],
+                        *added_segments,
+                    ]
+                    if len(supplemental_segments) > MAX_EDITOR_SUPPLEMENTAL_SEGMENTS:
+                        raise DraftRevisionNotAllowed(
+                            "revision material exceeds the 500 segment MVP limit"
+                        )
+
+                    child = Run(
+                        parent_run_id=parent.id,
+                        workflow_type="podcast-revision",
+                        workflow_version=GUIDED_REVISION_WORKFLOW_VERSION,
+                        status=RunStatus.QUEUED,
+                        current_step=REVISE_PODCAST_DRAFT,
+                        input_json={
+                            "topic": parent.input_json["topic"],
+                            "source_ids": [
+                                *parent_factual_source_ids,
+                                *request.source_ids,
+                            ],
+                            "creative_brief": parent_brief,
+                            "draft_quality": parent.input_json["draft_quality"],
+                            "parent_run_id": parent.id,
+                            "parent_draft_artifact_id": parent_draft.id,
+                            "parent_quality_report_artifact_id": parent_report.id,
+                            "plan_artifact_id": plan_record.artifact.id,
+                            **(
+                                {
+                                    "writing_style_profile": base_editor_input[
+                                        "writing_style_profile"
+                                    ]
+                                }
+                                if base_editor_input.get("writing_style_profile") is not None
+                                else {}
+                            ),
+                        },
+                    )
+                    session.add(child)
+                    await session.flush()
+
+                    request_record = DraftRevisionRequestRecord(
+                        submission_id=request.submission_id,
+                        parent_run_id=parent.id,
+                        child_run_id=child.id,
+                        plan_artifact_id=plan_record.artifact.id,
+                        parent_draft_artifact_id=parent_draft.id,
+                        parent_quality_report_artifact_id=parent_report.id,
+                        selected_actions=request.selected_actions,
+                        selected_feedback_artifact_ids=(request.selected_feedback_artifact_ids),
+                        selected_gap_codes=request.selected_gap_codes,
+                        source_ids=request.source_ids,
+                        target_duration_minutes=request.target_duration_minutes,
+                        revision_instruction=request.revision_instruction,
+                    )
+                    request_artifact = Artifact(
+                        run_id=parent.id,
+                        task_id=None,
+                        kind="draft_revision_request",
+                        content_json=request_record.model_dump(mode="json"),
+                        idempotency_key=idempotency_key,
+                    )
+                    session.add(request_artifact)
+                    await session.flush()
+                    request_artifact_id = request_artifact.id
+
+                    revision_input = {
+                        "task_kind": REVISE_PODCAST_DRAFT,
+                        "topic": parent.input_json["topic"],
+                        "parent_run_id": parent.id,
+                        "parent_draft_artifact_id": parent_draft.id,
+                        "parent_quality_report_artifact_id": parent_report.id,
+                        "plan_artifact_id": plan_record.artifact.id,
+                        "request_artifact_id": request_artifact.id,
+                        "creative_brief": parent_brief,
+                        "interview_scaffold": base_editor_input["interview_scaffold"],
+                        "scaffold_artifact_id": base_editor_input["scaffold_artifact_id"],
+                        "submission_artifact_id": base_editor_input["submission_artifact_id"],
+                        "submission_artifact_ids": base_editor_input.get(
+                            "submission_artifact_ids",
+                            [],
+                        ),
+                        "parent_podcast_draft": {
+                            key: value
+                            for key, value in parent_draft.content_json.items()
+                            if key != "_execution"
+                        },
+                        "initial_source_segments": base_editor_input["initial_source_segments"],
+                        "supplemental_source_segments": supplemental_segments,
+                        "selected_actions": request.selected_actions,
+                        "selected_feedback": selected_feedback,
+                        "selected_quality_gaps": [
+                            selected_gaps[code].model_dump(mode="json")
+                            for code in request.selected_gap_codes
+                        ],
+                        "revision_instruction": request.revision_instruction,
+                        **(
+                            {
+                                "writing_style_profile": base_editor_input["writing_style_profile"],
+                                "writing_style_segments": base_editor_input[
+                                    "writing_style_segments"
+                                ],
+                            }
+                            if base_editor_input.get("writing_style_profile") is not None
+                            else {}
+                        ),
+                    }
+                    try:
+                        revision_input = PodcastRevisionTaskInput.model_validate(
+                            revision_input
+                        ).model_dump(mode="json")
+                    except (ValidationError, ValueError, TypeError) as error:
+                        raise DraftRevisionNotAllowed(
+                            "revision choices cannot build a valid Editor task"
+                        ) from error
+                    await append_event(
+                        session,
+                        run_id=parent.id,
+                        event_type="workflow.draft_revision.requested",
+                        payload={
+                            "request_artifact_id": request_artifact.id,
+                            "child_run_id": child.id,
+                            "selected_action_count": len(request.selected_actions),
+                            "selected_feedback_count": len(selected_feedback),
+                            "selected_gap_count": len(request.selected_gap_codes),
+                            "supplemental_source_count": len(request.source_ids),
+                        },
+                    )
+                    await append_event(
+                        session,
+                        run_id=child.id,
+                        event_type="run.created",
+                        payload={
+                            "workflow_type": child.workflow_type,
+                            "workflow_version": child.workflow_version,
+                            "parent_run_id": parent.id,
+                            "request_artifact_id": request_artifact.id,
+                        },
+                    )
+                    await self.orchestrator.start_revision_run(
+                        session,
+                        run=child,
+                        input_json=revision_input,
+                    )
+                    child_run_id = child.id
+
+        child_view = await self.get_run(child_run_id)
+        logger.info(
+            (
+                "Revision request replay returned existing child Run"
+                if idempotent_replay
+                else "Revision child Run created"
+            ),
+            extra={
+                "event": (
+                    "workflow.draft_revision.idempotent_replay"
+                    if idempotent_replay
+                    else "workflow.draft_revision.requested"
+                ),
+                "run_id": parent_run_id,
+                "child_run_id": child_run_id,
+                "artifact_id": request_artifact_id,
+                "idempotent_replay": idempotent_replay,
+            },
+        )
+        return CreateDraftRevisionResponse(
+            idempotent_replay=idempotent_replay,
+            request_artifact_id=request_artifact_id,
+            improvement_plan=plan_record,
+            run=child_view,
+        )
+
+    async def get_draft_revision_comparison(
+        self,
+        run_id: str,
+    ) -> DraftRevisionComparisonRecord:
+        """Return or persist a text-free parent/child quality comparison."""
+
+        async with self._run_mutation_lock:
+            async with self.database.sessions() as session, session.begin():
+                revision_run = await session.get(Run, run_id)
+                if revision_run is None:
+                    raise RunNotFound(run_id)
+                if (
+                    revision_run.workflow_type != "podcast-revision"
+                    or revision_run.parent_run_id is None
+                    or revision_run.status != RunStatus.SUCCEEDED
+                    or revision_run.output_artifact_id is None
+                ):
+                    raise DraftRevisionComparisonNotReady(
+                        "comparison requires a succeeded podcast-revision child Run"
+                    )
+                revision_task = (
+                    await session.execute(
+                        select(Task)
+                        .where(
+                            Task.run_id == revision_run.id,
+                            Task.kind == REVISE_PODCAST_DRAFT,
+                        )
+                        .order_by(Task.created_at, Task.id)
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if revision_task is None:
+                    raise DraftRevisionComparisonNotReady("revision task provenance is unavailable")
+                try:
+                    task_input = PodcastRevisionTaskInput.model_validate(revision_task.input_json)
+                except ValidationError as error:
+                    raise DraftRevisionComparisonNotReady(
+                        "persisted revision task is invalid"
+                    ) from error
+                if task_input.parent_run_id != revision_run.parent_run_id:
+                    raise DraftRevisionComparisonNotReady(
+                        "revision Run lineage differs from its task provenance"
+                    )
+
+                parent_run = await session.get(Run, task_input.parent_run_id)
+                parent_draft = await session.get(
+                    Artifact,
+                    task_input.parent_draft_artifact_id,
+                )
+                revision_draft = await session.get(
+                    Artifact,
+                    revision_run.output_artifact_id,
+                )
+                parent_report = await session.get(
+                    Artifact,
+                    task_input.parent_quality_report_artifact_id,
+                )
+                revision_report = (
+                    await session.execute(
+                        select(Artifact)
+                        .where(
+                            Artifact.run_id == revision_run.id,
+                            Artifact.kind == "draft_quality_report",
+                        )
+                        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if (
+                    parent_run is None
+                    or parent_run.id != revision_run.parent_run_id
+                    or parent_draft is None
+                    or parent_draft.run_id != parent_run.id
+                    or parent_report is None
+                    or parent_report.run_id != parent_run.id
+                    or parent_report.kind != "draft_quality_report"
+                    or revision_draft is None
+                    or revision_draft.run_id != revision_run.id
+                    or revision_draft.kind != f"{REVISE_PODCAST_DRAFT}_result"
+                    or revision_report is None
+                    or revision_report.kind != "draft_quality_report"
+                ):
+                    raise DraftRevisionComparisonNotReady(
+                        "parent or revision quality provenance is unavailable"
+                    )
+
+                comparison_key = (
+                    f"draft-revision-comparison:{parent_draft.id}:{revision_draft.id}:"
+                    f"{parent_report.id}:{revision_report.id}:"
+                    f"{DraftRevisionComparison.model_fields['version'].default}"
+                )
+                comparison_artifact = (
+                    await session.execute(
+                        select(Artifact).where(Artifact.idempotency_key == comparison_key)
+                    )
+                ).scalar_one_or_none()
+                if comparison_artifact is None:
+                    try:
+                        comparison = build_draft_revision_comparison(
+                            parent=build_draft_revision_candidate_summary(
+                                run_id=parent_run.id,
+                                draft_artifact_id=parent_draft.id,
+                                quality_report_artifact_id=parent_report.id,
+                                quality_report=parent_report.content_json,
+                            ),
+                            revision=build_draft_revision_candidate_summary(
+                                run_id=revision_run.id,
+                                draft_artifact_id=revision_draft.id,
+                                quality_report_artifact_id=revision_report.id,
+                                quality_report=revision_report.content_json,
+                            ),
+                        )
+                    except (ValidationError, ValueError, TypeError) as error:
+                        raise DraftRevisionComparisonNotReady(
+                            "quality artifacts cannot produce a valid comparison"
+                        ) from error
+                    comparison_artifact = Artifact(
+                        run_id=revision_run.id,
+                        task_id=revision_task.id,
+                        kind="draft_revision_comparison",
+                        content_json=comparison.model_dump(mode="json"),
+                        idempotency_key=comparison_key,
+                    )
+                    session.add(comparison_artifact)
+                    await session.flush()
+                    await append_event(
+                        session,
+                        run_id=revision_run.id,
+                        task_id=revision_task.id,
+                        event_type="workflow.draft_revision.compared",
+                        payload={
+                            "artifact_id": comparison_artifact.id,
+                            "parent_run_id": parent_run.id,
+                            "parent_draft_artifact_id": parent_draft.id,
+                            "revision_draft_artifact_id": revision_draft.id,
+                            "script_character_delta": comparison.script_character_delta,
+                            "estimated_duration_delta_minutes": (
+                                comparison.estimated_duration_delta_minutes
+                            ),
+                            "deterministic_score_delta": (comparison.deterministic_score_delta),
+                            "automatic_winner_selected": False,
+                        },
+                    )
+                try:
+                    comparison = DraftRevisionComparison.model_validate(
+                        comparison_artifact.content_json
+                    )
+                except ValidationError as error:
+                    raise DraftRevisionComparisonNotReady(
+                        "persisted revision comparison is invalid"
+                    ) from error
+                artifact_view = ArtifactView.model_validate(comparison_artifact)
+
+        logger.info(
+            "Draft revision comparison ready",
+            extra={
+                "event": "workflow.draft_revision.compared",
+                "run_id": run_id,
+                "artifact_id": artifact_view.id,
+                "parent_run_id": comparison.parent.run_id,
+                "script_character_delta": comparison.script_character_delta,
+                "estimated_duration_delta_minutes": (comparison.estimated_duration_delta_minutes),
+                "deterministic_score_delta": comparison.deterministic_score_delta,
+            },
+        )
+        return DraftRevisionComparisonRecord(
+            comparison=comparison,
+            artifact=artifact_view,
+        )
+
     async def export_draft_quality_markdown(self, run_id: str) -> str:
         record = await self.get_draft_quality_report(run_id)
         try:
@@ -581,7 +1426,11 @@ class RunService:
             if (
                 artifact is None
                 or artifact.run_id != run.id
-                or artifact.kind != f"{BUILD_PODCAST_DRAFT}_result"
+                or artifact.kind
+                not in {
+                    f"{BUILD_PODCAST_DRAFT}_result",
+                    f"{REVISE_PODCAST_DRAFT}_result",
+                }
             ):
                 raise PodcastDraftExportNotReady("run output is not a podcast draft")
 
@@ -1189,6 +2038,10 @@ class RunService:
                             *[artifact.id for artifact in prior_submissions],
                             submission_artifact_id,
                         ]
+                        writing_style_task_fields = await self._load_writing_style_task_fields(
+                            session,
+                            run=run,
+                        )
                         try:
                             editor_input_json = PodcastDraftTaskInput.model_validate(
                                 {
@@ -1201,6 +2054,7 @@ class RunService:
                                     "interview_scaffold": scaffold_content,
                                     "initial_source_segments": initial_segments,
                                     "supplemental_source_segments": (supplemental_segments),
+                                    **writing_style_task_fields,
                                 }
                             ).model_dump(mode="json")
                         except (ValidationError, ValueError, TypeError) as error:
@@ -1406,3 +2260,44 @@ def _segments_for_sources(
         for source in [sources_by_id[source_id]]
         for segment in sorted(source.segments, key=lambda item: item.position)
     ]
+
+
+def _base_editor_input(input_json: dict[str, Any]) -> dict[str, Any]:
+    """Project Build/Revision task payloads onto the common Editor contract."""
+
+    projected = {
+        field_name: input_json[field_name]
+        for field_name in PodcastDraftTaskInput.model_fields
+        if field_name != "task_kind" and field_name in input_json
+    }
+    projected["task_kind"] = BUILD_PODCAST_DRAFT
+    return projected
+
+
+def _writing_style_context_is_ready(input_json: dict[str, Any]) -> bool:
+    profile = input_json.get("writing_style_profile")
+    return bool(
+        isinstance(profile, dict)
+        and isinstance(profile.get("readiness"), dict)
+        and profile["readiness"].get("status") == "ready"
+    )
+
+
+def _revision_request_matches(
+    *,
+    request: CreateDraftRevisionRequest,
+    record: DraftRevisionRequestRecord,
+    parent_run_id: str,
+    plan_artifact_id: str,
+) -> bool:
+    return (
+        record.submission_id == request.submission_id
+        and record.parent_run_id == parent_run_id
+        and record.plan_artifact_id == plan_artifact_id
+        and record.selected_actions == request.selected_actions
+        and record.selected_feedback_artifact_ids == request.selected_feedback_artifact_ids
+        and record.selected_gap_codes == request.selected_gap_codes
+        and record.source_ids == request.source_ids
+        and record.target_duration_minutes == request.target_duration_minutes
+        and record.revision_instruction == request.revision_instruction
+    )

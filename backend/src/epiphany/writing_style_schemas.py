@@ -199,6 +199,14 @@ class WritingStyleProfile(BaseModel):
     def aggregate_counts_must_match_selected_references(
         self,
     ) -> WritingStyleProfile:
+        reference_keys = [
+            (segment.source_id, segment.source_segment_id) for segment in self.selected_segments
+        ]
+        positions = [(segment.source_id, segment.position) for segment in self.selected_segments]
+        if len(reference_keys) != len(set(reference_keys)):
+            raise ValueError("writing style selected segment references must be unique")
+        if len(positions) != len(set(positions)):
+            raise ValueError("writing style selected positions must be unique within a source")
         source_count = len({segment.source_id for segment in self.selected_segments})
         expected_counts = {
             "segment_count": len(self.selected_segments),
@@ -225,6 +233,7 @@ class WritingStyleProfile(BaseModel):
         if (
             self.provenance.selected_segment_count != len(self.selected_segments)
             or self.provenance.selected_source_count != source_count
+            or self.provenance.requested_sample_count < source_count
             or self.provenance.selected_segment_count + self.provenance.excluded_segment_count
             != self.provenance.candidate_segment_count
         ):

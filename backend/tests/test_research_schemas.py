@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from epiphany.research_schemas import (
+    EpisodeResearchPayload,
     InvalidSourceReference,
     QuoteSourceMismatch,
     ResearchSchemaError,
@@ -22,6 +24,39 @@ SOURCE_REF = {
     "source_id": "src_allowed",
     "source_segment_id": "seg_allowed",
 }
+
+
+def test_writing_style_source_cannot_also_be_factual_in_the_same_run() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="writing-style Sources must be separate from factual source_ids",
+    ):
+        EpisodeResearchPayload.model_validate(
+            {
+                "topic": "一次变化",
+                "source_ids": ["src_same"],
+                "creative_brief": {
+                    "target_duration_minutes": 10,
+                    "speaking_rate_chars_per_minute": 280,
+                    "scenario": "reflective_solo",
+                    "target_audience": "普通听众",
+                    "communication_goal": "讲清楚一次变化",
+                    "tone": ["自然"],
+                    "must_include": [],
+                    "avoid_patterns": [],
+                },
+                "writing_style_reference": {
+                    "samples": [
+                        {
+                            "source_id": "src_same",
+                            "sample_kind": "written_prose",
+                        }
+                    ],
+                    "ownership_attested": True,
+                    "model_processing_consent": True,
+                },
+            }
+        )
 
 
 def test_timeline_output_is_strict_and_source_grounded() -> None:

@@ -96,7 +96,13 @@ class EventView(BaseModel):
     created_at: datetime
 
 
-SourceType = Literal["journal", "podcast_draft", "voice_note_transcript", "other"]
+SourceType = Literal[
+    "journal",
+    "podcast_draft",
+    "voice_note_transcript",
+    "writing_sample",
+    "other",
+]
 
 
 class CreateSourceRequest(BaseModel):

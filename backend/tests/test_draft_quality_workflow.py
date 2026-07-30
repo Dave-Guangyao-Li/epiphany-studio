@@ -11,8 +11,9 @@ from epiphany.draft_quality_schemas import (
     DRAFT_QUALITY_RULES_VERSION,
     LEGACY_DRAFT_QUALITY_FORMULA_VERSION,
     LEGACY_DRAFT_QUALITY_RULES_VERSION,
-    MODEL_REVIEW_TASK_VERSION,
     REVIEW_PODCAST_DRAFT,
+    STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
+    STYLE_AWARE_MODEL_REVIEW_TASK_VERSION,
     DeterministicDraftQualityResult,
 )
 from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
@@ -187,7 +188,7 @@ async def test_creative_brief_defaults_to_v7_and_explicit_opt_out_stays_v5(
     }
 
 
-async def test_v7_editor_queues_one_reviewer_then_preserves_draft_as_final_output(
+async def test_v8_editor_queues_style_aware_reviewer_then_preserves_draft_as_final_output(
     runtime: tuple[Database, RunService, Worker],
 ) -> None:
     database, service, worker = runtime
@@ -218,7 +219,10 @@ async def test_v7_editor_queues_one_reviewer_then_preserves_draft_as_final_outpu
     async with database.sessions() as session:
         persisted_reviewer = await session.get(Task, reviewers[0].id)
     assert persisted_reviewer is not None
-    assert persisted_reviewer.input_json["review_contract_version"] == MODEL_REVIEW_TASK_VERSION
+    assert (
+        persisted_reviewer.input_json["review_contract_version"]
+        == STYLE_AWARE_MODEL_REVIEW_TASK_VERSION
+    )
     assert persisted_reviewer.input_json["deterministic_metrics_artifact_id"] == metrics[0].id
     assert persisted_reviewer.input_json["deterministic_quality_facts"] == (
         build_deterministic_quality_facts(persisted_deterministic).model_dump(mode="json")
@@ -255,7 +259,8 @@ async def test_v7_editor_queues_one_reviewer_then_preserves_draft_as_final_outpu
     assert reviewer.status == "succeeded"
     assert reviewer.attempt == 1
     report_record = await service.get_draft_quality_report(run_id)
-    assert report_record.report.scoring_formula_version == DRAFT_QUALITY_FORMULA_VERSION
+    assert report_record.report.scoring_formula_version == STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION
+    assert report_record.report.writing_style_context_status == "not_provided"
     assert report_record.report.model_review_status == "completed"
     assert report_record.report.model_review_advisory is True
     assert report_record.report.requires_human_review is True
@@ -409,8 +414,10 @@ async def test_prerelease_v6_current_reviewer_task_keeps_v2_caps_after_restart(
             )
         ).scalar_one()
         prerelease_input = dict(reviewer_task.input_json)
-        assert prerelease_input["review_contract_version"] == MODEL_REVIEW_TASK_VERSION
+        assert prerelease_input["review_contract_version"] == STYLE_AWARE_MODEL_REVIEW_TASK_VERSION
         prerelease_input.pop("review_contract_version")
+        prerelease_input.pop("writing_style_profile", None)
+        prerelease_input.pop("writing_style_segments", None)
         reviewer_task.input_json = prerelease_input
         metrics_artifact = await session.get(
             Artifact,

@@ -12,6 +12,10 @@ from epiphany.interview_schemas import (
     validate_interview_scaffold_output,
 )
 from epiphany.research_schemas import THEME_RESEARCH, TIMELINE_RESEARCH, validate_research_output
+from epiphany.revision_schemas import (
+    REVISE_PODCAST_DRAFT,
+    validate_podcast_revision_output,
+)
 
 UNVALIDATED_FAKE_TASKS = frozenset(
     {
@@ -41,6 +45,11 @@ def validate_task_output(
         )
     if task_kind == BUILD_PODCAST_DRAFT:
         return validate_podcast_draft_output(
+            task_input=task_input,
+            content=content,
+        )
+    if task_kind == REVISE_PODCAST_DRAFT:
+        return validate_podcast_revision_output(
             task_input=task_input,
             content=content,
         )

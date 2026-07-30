@@ -96,6 +96,38 @@ def build_writing_style_profile(
     )
 
 
+def validate_writing_style_profile_segments(
+    *,
+    profile: WritingStyleProfile | dict[str, Any],
+    source_segments: list[WritingStyleSegmentInput | dict[str, Any]],
+) -> None:
+    """Verify that ephemeral text is the exact selection described by a profile.
+
+    The order, references, positions, hashes, and observable per-segment counts
+    must all agree. This prevents a caller from attaching different personal
+    text to an already-consented profile.
+    """
+
+    parsed_profile = WritingStyleProfile.model_validate(profile)
+    parsed_segments = [
+        WritingStyleSegmentInput.model_validate(segment) for segment in source_segments
+    ]
+    if len(parsed_profile.selected_segments) != len(parsed_segments):
+        raise ValueError("style profile and segment selection lengths do not match")
+
+    for expected, actual in zip(
+        parsed_profile.selected_segments,
+        parsed_segments,
+        strict=True,
+    ):
+        actual_reference = _segment_reference(
+            segment=actual,
+            sample_kind=expected.sample_kind,
+        )
+        if actual_reference != expected:
+            raise ValueError("style profile reference, hash, or text statistics do not match")
+
+
 def _validate_segment_scope(
     *,
     reference: WritingStyleReference,

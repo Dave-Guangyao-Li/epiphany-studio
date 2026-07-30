@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from hashlib import sha256
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -20,17 +21,28 @@ from epiphany.quality_contract_schemas import (
     DraftQualityProfile,
 )
 from epiphany.schemas import ArtifactView, SourceReference
+from epiphany.writing_style_schemas import (
+    MAX_STYLE_NON_WHITESPACE_CHARS,
+    WritingStyleProfile,
+    WritingStyleSegmentInput,
+)
 
 REVIEW_PODCAST_DRAFT = "review_podcast_draft"
 LEGACY_MODEL_REVIEW_TASK_VERSION = "model_self_review_task_v1"
 MODEL_REVIEW_TASK_VERSION = "model_self_review_task_v2_deterministic_facts"
+STYLE_AWARE_MODEL_REVIEW_TASK_VERSION = "model_self_review_task_v3_writing_style"
 LEGACY_DRAFT_QUALITY_FORMULA_VERSION = "draft_quality_v1_60_40"
 DRAFT_QUALITY_FORMULA_VERSION = "draft_quality_v2_non_compensatory_caps"
+STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION = "draft_quality_v3_personal_style_non_compensatory_caps"
 DETERMINISTIC_QUALITY_FACTS_VERSION = "deterministic_quality_facts_v1"
 LEGACY_DRAFT_QUALITY_RULES_VERSION = "draft_quality_rules_v1"
 DRAFT_QUALITY_RULES_VERSION = "draft_quality_rules_v2_chinese_calibration"
 CHINESE_STYLE_HEURISTIC_VERSION = "zh_podcast_style_v1"
 _INTERNAL_SOURCE_IDENTIFIER = re.compile(r"(?:src|seg)_[A-Za-z0-9][A-Za-z0-9_-]*")
+_UNSUPPORTED_PERSONAL_STYLE_CLAIM = re.compile(
+    r"(?:很|较|更|非常|确实|明显|高度)?像(?:作者|用户)?本人|"
+    r"(?:符合|贴合|还原)(?:作者|用户|本人)的?(?:个人)?(?:写作|表达)?风格"
+)
 
 FindingStatus = Literal["pass", "info", "warning", "blocker"]
 DraftQualityDecision = Literal[
@@ -52,7 +64,9 @@ ReviewDimensionName = Literal[
     "structure_and_coherence",
     "oral_naturalness_and_voice_fit",
     "conciseness_and_non_redundancy",
+    "personal_style_match",
 ]
+WritingStyleContextStatus = Literal["not_provided", "limited", "ready"]
 
 REVIEW_DIMENSIONS: tuple[ReviewDimensionName, ...] = (
     "brief_adherence",
@@ -62,6 +76,12 @@ REVIEW_DIMENSIONS: tuple[ReviewDimensionName, ...] = (
     "oral_naturalness_and_voice_fit",
     "conciseness_and_non_redundancy",
 )
+PERSONAL_STYLE_DIMENSION: ReviewDimensionName = "personal_style_match"
+STYLE_AWARE_REVIEW_DIMENSIONS: tuple[ReviewDimensionName, ...] = (
+    *REVIEW_DIMENSIONS,
+    PERSONAL_STYLE_DIMENSION,
+)
+PERSONAL_STYLE_MODEL_WEIGHT = 0.30
 
 ObservedValue = int | float | str | bool
 RequiredText = Annotated[str, Field(min_length=1, max_length=2_000)]
@@ -90,6 +110,50 @@ def _unique_references(value: list[SourceReference]) -> list[SourceReference]:
     if len(keys) != len(set(keys)):
         raise ValueError("source_refs must be unique")
     return value
+
+
+def expected_review_dimensions(
+    writing_style_context_status: WritingStyleContextStatus,
+) -> tuple[ReviewDimensionName, ...]:
+    return (
+        STYLE_AWARE_REVIEW_DIMENSIONS
+        if writing_style_context_status == "ready"
+        else REVIEW_DIMENSIONS
+    )
+
+
+def calculate_model_review_score(
+    review: ModelSelfReviewOutput,
+    *,
+    scoring_formula_version: str,
+    writing_style_context_status: WritingStyleContextStatus,
+) -> float | None:
+    """Calculate an experimental score without weakening deterministic caps."""
+
+    expected_dimensions = expected_review_dimensions(writing_style_context_status)
+    cards = {dimension.dimension: dimension for dimension in review.dimensions}
+    if set(cards) != set(expected_dimensions):
+        return None
+    scores = {
+        name: cards[name].score
+        for name in expected_dimensions
+        if cards[name].assessable and cards[name].score is not None
+    }
+    if len(scores) != len(expected_dimensions):
+        return None
+
+    base_score = sum(scores[name] for name in REVIEW_DIMENSIONS) / len(REVIEW_DIMENSIONS) / 5 * 100
+    if (
+        scoring_formula_version == STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION
+        and writing_style_context_status == "ready"
+    ):
+        style_score = scores[PERSONAL_STYLE_DIMENSION] / 5 * 100
+        return round(
+            (1 - PERSONAL_STYLE_MODEL_WEIGHT) * base_score
+            + PERSONAL_STYLE_MODEL_WEIGHT * style_score,
+            2,
+        )
+    return round(base_score, 2)
 
 
 def _iter_draft_references(draft: PodcastDraftOutput) -> Iterator[SourceReference]:
@@ -309,6 +373,7 @@ class ModelSelfReviewTaskInput(BaseModel):
     review_contract_version: Literal[
         "model_self_review_task_v1",
         "model_self_review_task_v2_deterministic_facts",
+        "model_self_review_task_v3_writing_style",
     ]
     task_kind: Literal["review_podcast_draft"]
     draft_artifact_id: str = Field(min_length=1, max_length=200)
@@ -325,6 +390,11 @@ class ModelSelfReviewTaskInput(BaseModel):
     referenced_source_segments: list[ReviewSourceSegment] = Field(
         min_length=1,
         max_length=500,
+    )
+    writing_style_profile: WritingStyleProfile | None = None
+    writing_style_segments: list[WritingStyleSegmentInput] = Field(
+        default_factory=list,
+        max_length=20,
     )
 
     _source_refs_are_unique = field_validator("allowed_source_refs")(_unique_references)
@@ -343,10 +413,15 @@ class ModelSelfReviewTaskInput(BaseModel):
         if not isinstance(value, dict) or "review_contract_version" in value:
             return value
         normalized = dict(value)
+        has_style_context = normalized.get("writing_style_profile") is not None or bool(
+            normalized.get("writing_style_segments")
+        )
         has_metrics_id = normalized.get("deterministic_metrics_artifact_id") is not None
         has_facts = normalized.get("deterministic_quality_facts") is not None
         normalized["review_contract_version"] = (
-            MODEL_REVIEW_TASK_VERSION
+            STYLE_AWARE_MODEL_REVIEW_TASK_VERSION
+            if has_style_context
+            else MODEL_REVIEW_TASK_VERSION
             if has_metrics_id or has_facts
             else LEGACY_MODEL_REVIEW_TASK_VERSION
         )
@@ -412,6 +487,11 @@ class ModelSelfReviewTaskInput(BaseModel):
             )
             if facts.paragraph_citation_coverage != expected_citation_coverage:
                 raise ValueError("deterministic facts contain inconsistent citation coverage")
+        if self.review_contract_version != STYLE_AWARE_MODEL_REVIEW_TASK_VERSION:
+            if self.writing_style_profile is not None or self.writing_style_segments:
+                raise ValueError("only v3 review tasks may contain writing style context")
+        else:
+            self._validate_writing_style_context()
         allowed = {_reference_key(reference) for reference in self.allowed_source_refs}
         if any(
             _reference_key(reference) not in allowed
@@ -426,6 +506,45 @@ class ModelSelfReviewTaskInput(BaseModel):
             raise ValueError("referenced_source_segments must exactly match allowed_source_refs")
         return self
 
+    @property
+    def writing_style_context_status(self) -> WritingStyleContextStatus:
+        if self.writing_style_profile is None:
+            return "not_provided"
+        return self.writing_style_profile.readiness.status
+
+    def _validate_writing_style_context(self) -> None:
+        if self.writing_style_profile is None:
+            if self.writing_style_segments:
+                raise ValueError("writing style segments require a writing style profile")
+            return
+
+        profile = self.writing_style_profile
+        expected = {
+            (segment.source_id, segment.source_segment_id): segment
+            for segment in profile.selected_segments
+        }
+        actual = {
+            (segment.source_id, segment.source_segment_id): segment
+            for segment in self.writing_style_segments
+        }
+        if len(actual) != len(self.writing_style_segments):
+            raise ValueError("writing style segments must be unique")
+        if set(actual) != set(expected):
+            raise ValueError("writing style segments must exactly cover profile-selected segments")
+        total_characters = 0
+        for key, segment in actual.items():
+            reference = expected[key]
+            non_whitespace_characters = len("".join(segment.text.split()))
+            total_characters += non_whitespace_characters
+            if (
+                segment.position != reference.position
+                or sha256(segment.text.encode("utf-8")).hexdigest() != reference.content_sha256
+                or non_whitespace_characters != reference.non_whitespace_char_count
+            ):
+                raise ValueError("writing style segment text does not match its profile provenance")
+        if total_characters > MAX_STYLE_NON_WHITESPACE_CHARS:
+            raise ValueError("writing style context exceeds the character limit")
+
 
 class ModelReviewEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -438,6 +557,18 @@ class ModelReviewEvidence(BaseModel):
     _source_refs_are_unique = field_validator("source_refs")(_unique_references)
 
 
+class ModelReviewStyleEvidence(BaseModel):
+    """Verbatim style-only evidence, never episode factual grounding."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    location: str = Field(min_length=1, max_length=500)
+    exact_quote: str = Field(min_length=1, max_length=500)
+    source_ref: SourceReference
+
+    _text_is_not_blank = field_validator("location", "exact_quote")(_normalize_required_text)
+
+
 class ModelReviewDimension(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -447,6 +578,10 @@ class ModelReviewDimension(BaseModel):
     assessment: RequiredText
     limitation: str | None = Field(default=None, min_length=1, max_length=2_000)
     evidence: list[ModelReviewEvidence] = Field(default_factory=list, max_length=5)
+    style_sample_evidence: list[ModelReviewStyleEvidence] = Field(
+        default_factory=list,
+        max_length=5,
+    )
 
     _assessment_is_not_blank = field_validator("assessment")(_normalize_required_text)
 
@@ -467,8 +602,12 @@ class ModelReviewDimension(BaseModel):
                 raise ValueError("unassessable dimensions must not provide a score")
             if self.evidence:
                 raise ValueError("unassessable dimensions must not invent evidence")
+            if self.style_sample_evidence:
+                raise ValueError("unassessable dimensions must not invent style evidence")
             if self.limitation is None:
                 raise ValueError("unassessable dimensions require a limitation")
+        if self.dimension != PERSONAL_STYLE_DIMENSION and self.style_sample_evidence:
+            raise ValueError("only personal_style_match may contain style sample evidence")
         return self
 
 
@@ -485,7 +624,7 @@ class ModelSelfReviewOutput(BaseModel):
     advisory: Literal[True] = True
     dimensions: list[ModelReviewDimension] = Field(
         min_length=len(REVIEW_DIMENSIONS),
-        max_length=len(REVIEW_DIMENSIONS),
+        max_length=len(STYLE_AWARE_REVIEW_DIMENSIONS),
     )
 
     @model_validator(mode="after")
@@ -493,8 +632,14 @@ class ModelSelfReviewOutput(BaseModel):
         names = [dimension.dimension for dimension in self.dimensions]
         if len(names) != len(set(names)):
             raise ValueError("review dimensions must be unique")
-        if set(names) != set(REVIEW_DIMENSIONS):
-            raise ValueError("review must contain every fixed dimension exactly once")
+        if frozenset(names) not in {
+            frozenset(REVIEW_DIMENSIONS),
+            frozenset(STYLE_AWARE_REVIEW_DIMENSIONS),
+        }:
+            raise ValueError(
+                "review must contain either the fixed six dimensions or "
+                "the style-aware seven dimensions"
+            )
         return self
 
 
@@ -545,6 +690,14 @@ class InvalidModelReviewSourceReference(ModelSelfReviewOutputError):
     code = "invalid_model_review_source_reference"
 
 
+class InvalidPersonalStyleEvidence(ModelSelfReviewOutputError):
+    code = "invalid_personal_style_evidence"
+
+
+class InvalidPersonalStyleClaim(ModelSelfReviewOutputError):
+    code = "invalid_personal_style_claim"
+
+
 def validate_model_self_review_output(
     *,
     task_input: dict[str, Any],
@@ -565,15 +718,38 @@ def validate_model_self_review_output(
     allowed_references = {
         _reference_key(reference) for reference in parsed_input.allowed_source_refs
     }
+    expected_dimensions = expected_review_dimensions(parsed_input.writing_style_context_status)
+    if {dimension.dimension for dimension in parsed_output.dimensions} != set(expected_dimensions):
+        raise ModelSelfReviewSchemaError(
+            "review dimensions do not match writing style context readiness"
+        )
+    style_blocks = {
+        f"writing_style_segments[{index}]": segment.text
+        for index, segment in enumerate(parsed_input.writing_style_segments)
+    }
+    style_block_references = {
+        f"writing_style_segments[{index}]": (
+            segment.source_id,
+            segment.source_segment_id,
+        )
+        for index, segment in enumerate(parsed_input.writing_style_segments)
+    }
     for dimension in parsed_output.dimensions:
         narrative_fields = [
             dimension.assessment,
             dimension.limitation or "",
             *[evidence.exact_quote for evidence in dimension.evidence],
+            *[evidence.exact_quote for evidence in dimension.style_sample_evidence],
         ]
         if any(_INTERNAL_SOURCE_IDENTIFIER.search(value) for value in narrative_fields):
             raise InvalidModelReviewEvidence(
                 "review prose must not expose internal Source or Segment identifiers"
+            )
+        if parsed_input.writing_style_context_status != "ready" and any(
+            _UNSUPPORTED_PERSONAL_STYLE_CLAIM.search(value) for value in narrative_fields
+        ):
+            raise InvalidPersonalStyleClaim(
+                "review cannot claim a personal style match without ready samples"
             )
         for evidence in dimension.evidence:
             block_text = blocks.get(evidence.location)
@@ -595,6 +771,16 @@ def validate_model_self_review_output(
                 raise InvalidModelReviewSourceReference(
                     "review evidence source_refs must be attached to its Draft block"
                 )
+        for evidence in dimension.style_sample_evidence:
+            style_text = style_blocks.get(evidence.location)
+            if style_text is None or evidence.exact_quote not in style_text:
+                raise InvalidPersonalStyleEvidence(
+                    "style evidence must be a verbatim quote from its style block"
+                )
+            if _reference_key(evidence.source_ref) != style_block_references[evidence.location]:
+                raise InvalidPersonalStyleEvidence(
+                    "style evidence source_ref must match its style block"
+                )
 
     faithfulness = next(
         dimension
@@ -606,6 +792,30 @@ def validate_model_self_review_output(
     ):
         raise InvalidModelReviewSourceReference(
             "assessable source_faithfulness requires referenced evidence"
+        )
+
+    personal_style = next(
+        (
+            dimension
+            for dimension in parsed_output.dimensions
+            if dimension.dimension == PERSONAL_STYLE_DIMENSION
+        ),
+        None,
+    )
+    if parsed_input.writing_style_context_status == "ready":
+        if (
+            personal_style is None
+            or not personal_style.assessable
+            or personal_style.score is None
+            or not personal_style.evidence
+            or not personal_style.style_sample_evidence
+        ):
+            raise InvalidPersonalStyleEvidence(
+                "ready style context requires draft and style evidence"
+            )
+    elif personal_style is not None:
+        raise InvalidPersonalStyleClaim(
+            "personal style match cannot be claimed without ready style context"
         )
 
     return parsed_output.model_dump(mode="json")
@@ -630,7 +840,9 @@ class DraftQualityReport(BaseModel):
     scoring_formula_version: Literal[
         "draft_quality_v1_60_40",
         "draft_quality_v2_non_compensatory_caps",
+        "draft_quality_v3_personal_style_non_compensatory_caps",
     ] = LEGACY_DRAFT_QUALITY_FORMULA_VERSION
+    writing_style_context_status: WritingStyleContextStatus = "not_provided"
     deterministic_weight: Literal[0.6] = 0.6
     model_weight: Literal[0.4] = 0.4
     experimental_model_score: float | None = Field(default=None, ge=0, le=100)
@@ -658,6 +870,11 @@ class DraftQualityReport(BaseModel):
 
         if self.profile != self.deterministic.profile:
             raise ValueError("report profile must match the deterministic result")
+        if (
+            self.scoring_formula_version != STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION
+            and self.writing_style_context_status != "not_provided"
+        ):
+            raise ValueError("only the v3 formula may record writing style context")
 
         if self.model_review_status == "completed":
             if self.model_self_review is None:
@@ -666,6 +883,11 @@ class DraftQualityReport(BaseModel):
                 raise ValueError("completed model review cannot have an unavailable reason")
             if self.reviewer_relation is None:
                 raise ValueError("completed model review requires a reviewer relation")
+            expected_dimensions = expected_review_dimensions(self.writing_style_context_status)
+            if {dimension.dimension for dimension in self.model_self_review.dimensions} != set(
+                expected_dimensions
+            ):
+                raise ValueError("model review dimensions do not match writing style readiness")
         else:
             if self.model_self_review is not None:
                 raise ValueError("unavailable model review cannot contain review cards")
@@ -676,16 +898,11 @@ class DraftQualityReport(BaseModel):
 
         expected_model_score: float | None = None
         if self.model_self_review is not None:
-            scores = [
-                dimension.score
-                for dimension in self.model_self_review.dimensions
-                if dimension.assessable and dimension.score is not None
-            ]
-            if len(scores) == len(REVIEW_DIMENSIONS):
-                expected_model_score = round(
-                    sum(scores) / len(REVIEW_DIMENSIONS) / 5 * 100,
-                    2,
-                )
+            expected_model_score = calculate_model_review_score(
+                self.model_self_review,
+                scoring_formula_version=self.scoring_formula_version,
+                writing_style_context_status=self.writing_style_context_status,
+            )
         self._require_optional_score(
             actual=self.experimental_model_score,
             expected=expected_model_score,
