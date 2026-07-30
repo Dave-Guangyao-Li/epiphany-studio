@@ -2,7 +2,7 @@
 
 状态：Draft
 
-日期：2026-07-29
+日期：2026-07-30
 
 ## 1. 产品命题
 
@@ -316,10 +316,15 @@ v6。调用方可以显式提交 `draft_quality.enabled=false` 保持 v5 的较�
 
 Editor 成功后先由普通代码生成 `draft_metrics_report`：
 
-- 按 Creative Brief 保存的字符速度估算实际文字可支持的分钟数；
+- 只统计真正会被说出的 opening、section paragraph 和 closing 正文，再按
+  Creative Brief 保存的字符速度估算文字可支持的分钟数；标题、章节标题、
+  SourceReference、`[S1]`、来源索引、Show Notes 和渲染后的 Markdown 均不
+  进入口播字数；
 - 检查每个口播段落是否带来源引用，并报告 Source/Segment 多样性；
 - 检查规范化后完全重复的段落和重复八字符窗口；
-- 检查 must-include、avoid pattern、固定 filler、模板短语和重复句式；
+- 观察 must-include 字面文本、avoid pattern、固定 filler、模板短语和重复
+  句式；must-include 的字面 miss 只记为 `info`，不能证明同义表达没有覆盖，
+  语义判断交给 Reviewer；
 - 所有 finding 都包含明确 code、status、location、observed 和 threshold。
 
 10 / 15 / 30 分钟是文字阶段估算，不是实际录音时长。系统默认按每分钟 280
@@ -368,6 +373,90 @@ M3.4 复用 Run、Task、Artifact、Event 与 ModelCall 表，不新增数据库
 migration。确定性指标、模型原始六维结果、代码合成报告和用户反馈分别保存，
 避免把工程验收、模型自评和真实用户认可混成一个分数。
 
+### M3.5 中文质量校准、可信事实与非补偿上限
+
+M3.5 将新质量 Run 升级为 workflow v7，但不改变 Task 数量、公开 API 或
+数据库 schema。升级是必要的，因为持久化 Reviewer Task 输入、Prompt、
+确定性规则和报告语义都发生了变化。已经停在 checkpoint、排队或租约恢复中的
+v6 Run 继续按 M3.4 的旧规则、旧 Prompt 与 v1 报告合同执行，不会被偷偷改成
+v7。若预发布数据表现为 `workflow v6`、但持久 Reviewer Task 已经携带
+current deterministic facts，则恢复时以 Task 合同为准继续 v2 报告语义，
+避免丢失 score cap 与 conflict。新版本解决“模型给高分，却把明显时长缺口
+平均掉”的问题。
+
+Reviewer Task 新增一份由应用代码生成的
+`deterministic_quality_facts_v1`。它只包含当前持久 Draft 的目标分钟数、
+口播正文字符数、估算分钟数、时长覆盖率/状态、引用覆盖、blocker/warning
+数量和版本化中文风格计数。Task 输入 validator 会从同一份结构化 Draft
+重新计算字数、时长与引用覆盖并逐项核对；事实不一致时，在调用模型前拒绝。
+因此 Reviewer 可以解释事实的编辑意义，却不能自己重新数一遍后否认或覆盖。
+
+综合分仍保留原始六维模型均分和 60/40 的未封顶加权值，随后由代码应用最
+严格的**非补偿上限**：
+
+- 任一确定性 blocker：最终实验分最多 39；
+- 估算时长不足目标的 60%：最多 59；
+- 任一确定性 warning：最多 79。
+
+上限不把原始模型卡改写掉。报告同时保存 raw model score、uncapped score、
+cap、cap reason、capped score 和显式冲突，便于看清“模型意见”和“代码事实”
+为何不同。Decision 仍按 blocker、review 不可用、warning/低维度等规则由
+应用代码计算，始终需要用户终审。
+
+报告在任何反序列化入口还必须重新验证跨字段一致性：六维卡片与模型换算分、
+确定性分与未封顶 60/40 分、findings 与 cap/reasons、未封顶分与封顶后分数，
+以及 evidence/status 与 decision 必须能够互相推出。像“cap 为 39，但最终分
+为 80”这样的 JSON 即使字段类型全部合法，也必须被 API、导出和 E2E 拒绝。
+历史 v1 Artifact 继续按旧合同读取。
+
+v6 的确定性规则冻结为 `draft_quality_rules_v1`；v7 使用
+`draft_quality_rules_v2_chinese_calibration`。中文启发式规则使用版本
+`zh_podcast_style_v1`，观察成组反差、层层递进、
+枚举、通用转场/顿悟/收束和过度礼貌，以及句长/段长变异。这些只是可重复的
+**表达风险信号**，不是作者身份判断，也不产生“AI 写作概率”。规则使用保守
+重复阈值；一次自然出现不应直接扣分。为兼容历史报告，
+`style.template_phrases` 与 `style.not_but_pattern` 仍可显示，但与新分类
+重叠时仅为 `info`，由版本化中文分类统一承担一次分数影响。
+
+Reviewer 可以独立路由。未设置 `EPIPHANY_DEEPSEEK_REVIEWER_MODEL` 时复用
+Editor 模型；设为受支持的 Flash 或 Pro 时，只把
+`review_podcast_draft` Task 送到该模型。ModelCall 和 Artifact
+`_execution` 记录真正的 provider/model，报告用 `same_model`、
+`cross_tier_same_family` 或 `different_model` 说明关系。跨 tier 仍只是同一
+模型家族的参考评价，不等于独立人工审核。
+
+冻结稿比较工具对同一份 Draft、Prompt 和 strict schema 依次调用 Flash 与
+Pro，不重新运行 Editor。`--recompute-current-rules` 先用当前代码重建
+deterministic result/facts，再让两个 Reviewer 看见相同输入，避免把历史规则
+差异错当成模型差异。工具输出经过脱敏，只比较分数、decision、schema
+成功与否、tokens、耗时和本地估算费用；它不把实验调用伪装成正式 Run 的
+ModelCall 账本。
+
+当前合成案例的工程事实是：
+
+- 正式 v7 Fake 全流程 Run `run_f41eac8520cd4b47b97cc1181acb3d63`
+  全部检查通过；
+- DeepSeek Run `run_0af27a7596474a92ba79e298e912e35e` 是 M3.5
+  预发布 workflow-v6 开发快照，其 workflow 成功，
+  口播正文为 2,055 字符，估算 7.34 / 15 分钟，五次调用本地估算
+  CNY 0.089433；
+- 真实 Run 初次报告中的两项失败来自旧 E2E harness：它错误假设 Editor 与
+  Reviewer 使用同一模型，并只接受旧报告关系值；修复后的离线重验两项均为
+  true，未再次付费生成 Draft；
+- 当前规则重算为 deterministic 62、1 blocker、1 warning、2 info，最严格
+  cap 仍为 39；
+- 历史快照的同稿比较为 Flash 76.67、Pro 80，封顶后都为 39；
+- 当前规则比较中 Flash 未通过 strict schema，Pro raw 70、封顶 39；两次
+  调用本地估算分别为 CNY 0.013950 与 CNY 0.044008。
+
+这只是一个合成样本，不能证明 Pro 普遍更好，也不能把一次 schema 失败推断
+为 Flash 普遍不可用。产品选择模型时还要累计多主题、多长度和真实用户反馈。
+
+M3.5 仍只把用户评价 append-only 保存，不会自动修改旧稿。M3.6 目前只是
+计划：由用户显式选择反馈并创建一个带 `parent_run_id` 的 Revision Run，
+保留旧 Draft/Report 不变，生成新候选后重新走完整质量检查和独立预算。系统
+不会因为分数未达标就自己无限改写，也不会把模型自评当作自动发布条件。
+
 ## 7. 成功标准
 
 完成 MVP 时，应能演示：
@@ -395,5 +484,6 @@ migration。确定性指标、模型原始六维结果、代码合成报告和�
 - 失败恢复次数；
 - 用户对脚手架“是否帮助想起新内容”的主观评分。
 - Draft 目标时长偏差、引用覆盖、重复和模板模式；
+- 原始模型分、未封顶分、代码 cap、封顶后分数和 Reviewer schema 成功率；
 - 用户对 voice match、recordability、usefulness 与 tone fit 的独立评分；
 - `synthetic_test` 与 human feedback 必须分开统计。

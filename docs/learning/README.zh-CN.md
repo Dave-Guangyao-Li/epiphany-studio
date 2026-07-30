@@ -1,6 +1,6 @@
 # Epiphany Studio 学习实践手册
 
-更新时间：2026-07-29
+更新时间：2026-07-30
 
 ## 这套手册解决什么问题
 
@@ -51,7 +51,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 15. [M3.2：Editor 与最终 Markdown](m3-2-editor-final-markdown.zh-CN.md)
 16. [M3.3：Creative Brief、目标时长与素材充足度](m3-3-creative-brief-material-readiness.zh-CN.md)
 17. [M3.4：Draft Quality Report、模型自评与用户反馈](m3-4-draft-quality-report.zh-CN.md)
-18. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+18. [M3.5：中文口播质量校准与冻结稿 Reviewer 实验](m3-5-chinese-quality-calibration.zh-CN.md)
+19. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -74,6 +75,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M3.2 | Resume 后运行 grounded Editor，导出口播稿和 Show Notes | Fake + DeepSeek E2E 已验证 | 本次 focused commit |
 | M3.3 | 保存创作目标，素材明显不足时持久等待，补足后才运行 Editor | 178 tests + Fake E2E 已验证 | 本次 focused commit |
 | M3.4 | 用可解释规则、证据化模型自评和独立用户反馈审阅 Draft | 205 tests + Fake/DeepSeek E2E 已验证 | 本次 focused commit |
+| M3.5 | 只按口播正文估时、校准中文风格信号，并阻止模型高分掩盖硬性问题 | 实现与对照实验完成，待本分支合并 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -98,8 +100,10 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
   -> 严格校验初始来源与补充来源引用
   -> 导出口播稿和 Show Notes Markdown
   -> 计算时长、引用、重复和模板表达指标
+  -> 只用 opening / section paragraphs / closing 的正文估算口播时长
   -> 独立 Reviewer 按六维给出带逐字证据的建议
-  -> 代码生成 Draft Quality Report
+  -> 代码把可信确定性事实传给 Reviewer，并验证不能被篡改
+  -> 代码生成带非补偿式评分上限的 Draft Quality Report
   -> 用户最终审稿
   -> 用户单独提交声音匹配与可录性反馈
   -> 从 Run、Task、Artifact、Event 和日志中复盘全过程
@@ -161,6 +165,18 @@ Reviewer 固定检查 Brief 匹配、来源忠实、覆盖与具体性、结构�
 `blocked`，否则降级为 `automated_review_incomplete`；两种情况都不会隐藏
 已经生成的 Draft。
 
+M3.5 把新的质量流程升级为 workflow v7，因为持久化 Reviewer Task、Prompt、
+确定性规则和报告语义已经变化；历史 v6 仍可从等待、队列或租约状态按旧合同
+恢复。口播字符只统计 opening、各 section paragraph 和 closing 的 `text`，
+标题、引用、来源索引和 Show Notes 不计入时长。新报告同时保留模型局部维度
+平均、未封顶 60/40 分、代码上限和封顶分；blocker、低于 60% 的时长覆盖、
+任一 warning 分别设置 39 / 59 / 79 的最高分，严格者优先。
+
+中文规则 `zh_podcast_style_v1` 只报告可观察的风格风险，不判断作者身份。
+`must_include` 的逐字未命中是 `info`，语义覆盖交给 Reviewer；旧模板与
+`not_but` 指标保留显示但不重复扣分。Reviewer 可以单独选择 Flash 或 Pro，
+同一家族不同档位只记为 `cross_tier_same_family`，不能包装成独立裁判。
+
 用户反馈与自动报告分开保存。自动 E2E 使用的 `synthetic_test` 永远是
 `human_signal_eligible=false`。当前无鉴权 MVP 的 origin 是调用方自报标签，
 不是已验证真人身份。详细原理、Swagger 和测试命令见
@@ -213,6 +229,10 @@ Run 使用 16,667 input tokens、9,468 output tokens、73,018 ms Provider
 - 已能生成带引用的播客候选稿，但仍需本人审核事实、语气和取舍；
 - 已能生成 Draft Quality Report，但它仍是辅助审稿，不代表真实录制反馈；
 - 已加入证据化模型自评，但默认可能是同模型 self-review，只能作为 advisory；
+- 中文启发式不能输出“AI 概率”，阈值也尚未用真实用户录音校准；
+- `must_include` 仍不能由普通代码可靠识别同义改写；
+- Flash 与 Pro 属于同一 DeepSeek 家族，不等于跨家族独立裁判；
+- 用户反馈目前只追加保存，不会自动生成修订稿；
 - 尚未提供可视化采访脚手架和播客稿 editor；
 - M3.2 的 Editor 已通过合成素材真实调用，但尚未使用个人隐私素材验收；
 - 尚未提供麦克风录音、音频上传、STT 或语音克隆；

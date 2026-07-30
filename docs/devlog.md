@@ -1,5 +1,105 @@
 # Development Log
 
+## 2026-07-30
+
+### M3.5 Chinese draft-quality calibration and frozen Reviewer comparison
+
+- Versioned new quality-enabled Runs as workflow v7 because the persisted
+  Reviewer Task input, Prompt, deterministic rules, and Report semantics
+  changed. Persisted M3.4 workflow-v6 Runs remain resumable under their legacy
+  v1 contracts; an automated restart regression queues an old-shape Reviewer
+  Task, creates fresh runtime objects over the same SQLite file, and completes
+  it without silently upgrading stored data.
+- Closed the narrower pre-release compatibility gap where a Run was labeled
+  v6 but its persisted Reviewer Task already carried current deterministic
+  facts. Recovery now selects metrics and report semantics from the durable
+  Task contract rather than only the Run label; a second restart regression
+  proves that v2 caps, conflict cards, and the `:v2` report key survive.
+- Narrowed duration accounting to the words that a person would actually
+  speak: opening text, section paragraph text, and closing text. Titles,
+  section headings, structured SourceReferences, `[S1]` labels, source indexes,
+  Show Notes, and rendered Markdown no longer inflate
+  `script_character_count`.
+- Added a bounded, versioned `deterministic_quality_facts` projection for the
+  Reviewer. It contains the code-owned target/estimated duration, spoken
+  character count, duration coverage/status, citation coverage, finding
+  counts, and Chinese-style counts. The strict Task validator recomputes key
+  values from the exact Draft and rejects stale or altered facts before a
+  Provider call.
+- Kept model opinion and application facts visibly separate. The report now
+  preserves the raw six-dimension model score and the uncapped 60/40 weighted
+  score, then applies the strictest code-owned non-compensatory cap: 39 for any
+  deterministic blocker, 59 when estimated duration is below 60% of target,
+  and 79 for any deterministic warning.
+- Added explicit model/code conflict records instead of silently rewriting raw
+  model cards. A generous Reviewer can still be inspected, but it cannot turn
+  a blocker into an 80-point candidate.
+- Added report-level invariant validation. API reads, exports, and E2E checks
+  now recompute the six-card model score, uncapped formula, code cap/reasons,
+  capped score, and decision, rejecting internally impossible JSON such as a
+  final score above its cap. Historical v1 Artifacts retain their legacy
+  compatibility boundary.
+- Added conservative, versioned Chinese oral-writing signals for parallel
+  contrast, escalation, enumeration, generic transitions/epiphanies/codas,
+  over-politeness, and sentence/paragraph-length variation. These are
+  observable editing signals, not an AI-authorship detector.
+- Prevented overlapping style rules from charging twice. Historical
+  `style.template_phrases` and `style.not_but_pattern` remain as informational
+  compatibility findings; the `style.zh.*` categories own the score impact.
+  A literal `must_include` miss is also informational because substring search
+  cannot prove semantic absence. The evidence-bearing Reviewer assesses
+  paraphrased coverage.
+- Added optional Reviewer-only routing through
+  `EPIPHANY_DEEPSEEK_REVIEWER_MODEL`. Leaving it unset reuses the primary
+  model; choosing a supported Flash/Pro tier changes only the trusted
+  `review_podcast_draft` Task. ModelCall and Artifact execution metadata record
+  the actual provider/model, and the report distinguishes `same_model` from
+  `cross_tier_same_family`.
+- Added a privacy-safe frozen-input comparison runner. It validates one exact
+  persisted Draft/metrics/Reviewer bundle, calls Flash and Pro in fixed order,
+  and reports only schema status, scores, caps, tokens, latency, and local
+  estimated cost. `--recompute-current-rules` rebuilds deterministic
+  metrics/facts under the current code without regenerating the Editor Draft.
+  Provider responses that incur usage but later fail strict schema/evidence
+  validation retain safe token, currency, and estimated-cost fields in the
+  failure row instead of disappearing from the experiment ledger.
+  These experiment calls do not pretend to be entries in the source Run's
+  formal ModelCall ledger.
+- Passed the final workflow-v7 zero-cost Fake E2E as
+  `run_f41eac8520cd4b47b97cc1181acb3d63`, covering the durable checkpoint,
+  two process restarts, supplement, Editor, current deterministic rules,
+  Reviewer, exports, feedback replay, and redacted logs.
+- Completed the realistic DeepSeek workflow as
+  `run_0af27a7596474a92ba79e298e912e35e`. This paid Run is explicitly retained
+  as a pre-release M3.5 workflow-v6 development snapshot rather than relabeled
+  as v7. It succeeded with six successful Tasks, five calls, and a locally
+  estimated CNY 0.089433. The final spoken Draft had 2,055 characters,
+  estimated as 7.34 minutes against a 15-minute target.
+- Preserved an important harness failure rather than hiding it. The first
+  machine report marked `model_calls_match_provider` and
+  `quality_report_contract_valid` false because the old checker assumed Editor
+  and Reviewer always used one model and only accepted the old relation
+  contract. The persisted workflow data was valid. After routing-aware/current
+  contract fixes, an offline validation against the same database made both
+  checks true, so no paid workflow rerun was needed.
+- Recomputed the frozen Draft under current rules: deterministic score 62,
+  1 blocker, 1 warning, and 2 informational observations. The strictest cap
+  remains 39.
+- On the first historical deterministic snapshot, Flash scored 76.67 and Pro
+  80; both finished at 39 after the same code cap. In current-rules mode,
+  Flash failed the strict output schema while Pro returned raw 70 and final
+  39. The two current-rules comparison attempts had local estimated costs of
+  CNY 0.013950 and CNY 0.044008.
+- Treat the comparison as one synthetic calibration sample, not a benchmark.
+  It cannot establish that Pro is generally better or that Flash generally
+  fails. More topics, lengths, repeated trials, and real-user feedback are
+  required before changing the default.
+- Planned M3.6, but did not implement it in this slice. The intended boundary
+  is an explicit feedback-driven child Revision Run with immutable parent
+  Draft/report, selected feedback, its own budget, a new candidate, and a full
+  re-evaluation. Append-only feedback still has no automatic rewrite side
+  effect, and there is no score-chasing loop.
+
 ## 2026-07-29
 
 ### M3.4 Draft Quality Report and independent feedback

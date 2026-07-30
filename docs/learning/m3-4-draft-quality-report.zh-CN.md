@@ -98,6 +98,16 @@ Creative Brief 允许选择 `10`、`15` 或 `30` 分钟，并保存
 估算分钟数 = 口播正文的非空白字符数 / 每分钟字符数
 ```
 
+这里的“口播正文”只包含真正会被说出口的字段：
+
+- `podcast_script.opening.text`
+- `podcast_script.sections[*].paragraphs[*].text`
+- `podcast_script.closing.text`
+
+标题、章节标题、`source_refs`、用户看到的 `[S1]`、来源索引、Show Notes、
+Markdown 标记和 Artifact metadata 都不进入分子。否则引用越多，系统反而会
+错误地把稿子估得越长。
+
 例如，正文是 2,520 个非空白字符：
 
 ```text
@@ -151,8 +161,8 @@ Creative Brief 允许选择 `10`、`15` 或 `30` 分钟，并保存
 
 ### 5.4 Brief 与表达模式
 
-- `must_include` 中哪些明确文字没有出现；
-- `avoid_patterns` 中哪些明确模式出现；
+- `must_include` 中哪些指定字面短语没有逐字出现；这不等于相关语义一定缺失；
+- `avoid_patterns` 中哪些指定字面短语出现；抽象风格要求仍由 Reviewer 判断；
 - 固定口语填充词命中数；
 - 常见模板化短语命中数；
 - “不是……而是……”句式命中数。
@@ -163,6 +173,13 @@ Creative Brief 允许选择 `10`、`15` 或 `30` 分钟，并保存
 
 确定性分数是实验性的回归指标。它适合比较同一规则版本下的两版稿子，
 不代表文学质量，也不应跨 profile 直接比较。
+
+M3.5 把中文口播模式扩展为版本化的
+`zh_podcast_style_v1`：二元对照、递进、机械列举、书面连接、模板化顿悟、
+模板化收束和过度礼貌。旧 `template_phrases` 与 `not_but_pattern` 为兼容
+历史报告继续显示，但降为不扣分的 `info`，避免与新版类别对同一句重复扣分。
+完整研究与误报边界见
+[中文个人口播稿的风格信号研究](../research/chinese-podcast-style-signals.zh-CN.md)。
 
 ## 6. 为什么不输出“AI 味概率”
 
@@ -253,7 +270,7 @@ Reviewer 只提交六张建议卡片，不提交最终结论。最终 decision �
 | `revision_recommended` | 有 warning，或至少一个模型维度不高于 2 分 |
 | `candidate_ready_for_human_review` | 自动检查未发现上述问题，可以交给人审稿 |
 
-实验性综合分使用有版本号的 60 / 40 公式：
+M3.4 最初使用有版本号的 60 / 40 公式：
 
 ```text
 综合分 = 确定性分数 × 60% + 六维模型平均分换算值 × 40%
@@ -261,6 +278,20 @@ Reviewer 只提交六张建议卡片，不提交最终结论。最终 decision �
 
 只要六维中有一维不可评价，就不生成综合分，避免用一个数字掩盖信息缺口。
 无论 decision 和分数是什么，`requires_human_review` 永远为 `true`。
+
+这是历史公式 `draft_quality_v1_60_40`。M3.5 的新报告改用
+`draft_quality_v2_non_compensatory_caps`，同时保留四层信息：
+
+1. 模型六个局部维度的简单平均；
+2. 确定性 60% + 模型 40% 的未封顶实验分；
+3. 由代码拥有的非补偿式上限；
+4. 封顶后的实验分与最终 decision。
+
+代码上限为：任一确定性 blocker 最高 39；时长覆盖低于 60% 最高 59；
+任一确定性 warning 最高 79；同时满足多条时取最严格的一条。因此目标
+10 分钟、实际只能支持约 5 分钟时，即使模型喜欢结构和语气，也不能把整体
+展示成“80 多分、表现不错”。原始模型卡仍保留，只用于研究 Reviewer 偏差，
+不代表整体可录制性。
 
 ## 10. Reviewer 失败时为什么不让整条 Run 失败
 
@@ -307,6 +338,9 @@ ModelCall 账本仍复用 Worker 的既有可靠性机制。
 信号。同一个 submission 和相同内容重放不会产生第二份 Artifact；同 ID
 改成另一份内容会返回 409。
 
+当前反馈是 append-only 评价记录：提交反馈本身不会排队 Editor、不会调用
+Provider，也不会修改旧 Draft。消费选中的反馈生成新版本属于计划中的 M3.6。
+
 评论正文只进入 `draft_user_feedback` Artifact，不进入 Event 和 stdout
 日志；它仍可通过本地 Run/API/SQLite 数据读取，并不等于加密保密。事件只
 记录 origin、decision、总体分、是否愿意直接录等非正文摘要。
@@ -347,7 +381,8 @@ uvicorn epiphany.main:app --reload
 http://127.0.0.1:8000/docs
 ```
 
-创建带 Creative Brief 的 Run 时，省略 `draft_quality` 就会默认启用 v6：
+在 M3.4 阶段，省略 `draft_quality` 会创建 workflow v6。当前 M3.5 代码会为
+同样请求创建 workflow v7；已经持久化的 v6 Run 仍按 M3.4 旧合同恢复：
 
 ```json
 {
@@ -421,7 +456,7 @@ pytest \
 
 这些测试覆盖：
 
-- v6 默认开启和显式 opt-out 回到 v5；
+- 历史 M3.4 v6、当前 M3.5 v7 默认路径，以及显式 opt-out 回到 v5；
 - 时长、引用、重复、模板、filler 与 Brief 规则；
 - 六维 Schema、quote/location 和 SourceReference 越权拒绝；
 - Editor 后只排队一个 Reviewer；
@@ -431,7 +466,7 @@ pytest \
 - 用户反馈创建、幂等重放、冲突、列表和 origin 隔离；
 - 反馈评论不进入 Event 或日志，但仍保存在 Artifact 中。
 
-一条命令运行隐私安全、零费用的 v6 Fake E2E：
+当前代码中，一条命令运行隐私安全、零费用的 v7 Fake E2E：
 
 ```bash
 python -m epiphany.draft_quality_e2e --provider fake --execute
@@ -563,8 +598,13 @@ experimental overall score: 83.2
 | “不是……而是……” | 4 |
 
 这份结果非常有价值：真实模型给自己的六维评价全部 5/5，但可重复计算的时长
-仍然表明稿子只达到目标的一半左右。实验综合分 83.2 也没有把 decision 改成
+仍然表明稿子只达到目标的一半左右。83.2 是 M3.4 历史
+`draft_quality_v1_60_40` 公式产生的未封顶结果；它没有把 decision 改成
 “可以直接发布”。代码仍然给出 `revision_recommended`。
+
+如果用 M3.5 的非补偿规则重新分析同类约 51% 时长覆盖稿，最终实验分最高只能
+是 59；若时长已经触发 blocker，则最高只能是 39。历史 Artifact 不会被回写，
+所以旧报告中的 83.2 会原样保留并明确标记旧公式。
 
 这不是系统“打架”，而是在展示三种证据的不同性质：
 
@@ -624,5 +664,6 @@ M3.4 不做：
 - 麦克风采集、STT、TTS 或 voice cloning；
 - 把 synthetic E2E 评价写成真实用户认可。
 
-下一步更值得做的是最小 Web UI：让用户在页面中看到 Creative Brief、
-等待点、Draft、质量报告和反馈表单，并保留后端现有的可追踪执行过程。
+M3.6 计划实现的也不是模型自动“改到高分为止”，而是用户显式触发的一次
+Revision Run：选择要采用的反馈、补充 Source 和修改要求，创建有 lineage、
+独立预算和独立 Trace 的新 Run。旧 Draft、旧质量报告和旧反馈保持不可变。
