@@ -22,17 +22,29 @@ from epiphany.quality_contract_schemas import (
 from epiphany.schemas import ArtifactView, SourceReference
 
 REVIEW_PODCAST_DRAFT = "review_podcast_draft"
-DRAFT_QUALITY_FORMULA_VERSION = "draft_quality_v1_60_40"
+LEGACY_MODEL_REVIEW_TASK_VERSION = "model_self_review_task_v1"
+MODEL_REVIEW_TASK_VERSION = "model_self_review_task_v2_deterministic_facts"
+LEGACY_DRAFT_QUALITY_FORMULA_VERSION = "draft_quality_v1_60_40"
+DRAFT_QUALITY_FORMULA_VERSION = "draft_quality_v2_non_compensatory_caps"
+DETERMINISTIC_QUALITY_FACTS_VERSION = "deterministic_quality_facts_v1"
+LEGACY_DRAFT_QUALITY_RULES_VERSION = "draft_quality_rules_v1"
+DRAFT_QUALITY_RULES_VERSION = "draft_quality_rules_v2_chinese_calibration"
+CHINESE_STYLE_HEURISTIC_VERSION = "zh_podcast_style_v1"
 _INTERNAL_SOURCE_IDENTIFIER = re.compile(r"(?:src|seg)_[A-Za-z0-9][A-Za-z0-9_-]*")
 
-FindingStatus = Literal["pass", "warning", "blocker"]
+FindingStatus = Literal["pass", "info", "warning", "blocker"]
 DraftQualityDecision = Literal[
     "blocked",
     "automated_review_incomplete",
     "revision_recommended",
     "candidate_ready_for_human_review",
 ]
-ReviewerRelation = Literal["same_model", "different_model", "unknown"]
+ReviewerRelation = Literal[
+    "same_model",
+    "cross_tier_same_family",
+    "different_model",
+    "unknown",
+]
 ReviewDimensionName = Literal[
     "brief_adherence",
     "source_faithfulness",
@@ -59,6 +71,13 @@ def _normalize_required_text(value: str) -> str:
     normalized = " ".join(value.split())
     if not normalized:
         raise ValueError("text must contain non-whitespace characters")
+    return normalized
+
+
+def _normalize_unique_required_texts(value: list[str]) -> list[str]:
+    normalized = [_normalize_required_text(item) for item in value]
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("text items must be unique")
     return normalized
 
 
@@ -149,6 +168,25 @@ class DraftQualityFinding(BaseModel):
     _normalize_code_and_location = field_validator("code", "location")(_normalize_required_text)
 
 
+class ChineseStylePatternCounts(BaseModel):
+    """Versioned, observable Chinese style signals.
+
+    These counts describe wording in the spoken script. They are not an
+    authorship classifier and must not be presented as an "AI probability".
+    Defaults keep persisted reports from before this profile readable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    parallel_contrast: int = Field(default=0, ge=0)
+    escalation: int = Field(default=0, ge=0)
+    enumeration: int = Field(default=0, ge=0)
+    generic_transition: int = Field(default=0, ge=0)
+    generic_epiphany: int = Field(default=0, ge=0)
+    generic_coda: int = Field(default=0, ge=0)
+    over_polite: int = Field(default=0, ge=0)
+
+
 class DeterministicDraftMetrics(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -169,6 +207,33 @@ class DeterministicDraftMetrics(BaseModel):
     filler_phrase_density_per_1000_chars: float = Field(ge=0)
     template_phrase_count: int
     not_but_pattern_count: int
+    rules_version: Literal[
+        "draft_quality_rules_v1",
+        "draft_quality_rules_v2_chinese_calibration",
+    ] = LEGACY_DRAFT_QUALITY_RULES_VERSION
+    chinese_style_heuristic_version: Literal["zh_podcast_style_v1"] | None = None
+    chinese_style_pattern_counts: ChineseStylePatternCounts = Field(
+        default_factory=ChineseStylePatternCounts
+    )
+    spoken_sentence_count: int = Field(default=0, ge=0)
+    spoken_nonempty_paragraph_count: int = Field(default=0, ge=0)
+    sentence_length_cv: float | None = Field(default=None, ge=0)
+    paragraph_length_cv: float | None = Field(default=None, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_pre_versioned_rules(cls, value: Any) -> Any:
+        """Distinguish historical M3.4 metrics from pre-release M3.5 metrics."""
+
+        if not isinstance(value, dict) or "rules_version" in value:
+            return value
+        normalized = dict(value)
+        normalized["rules_version"] = (
+            DRAFT_QUALITY_RULES_VERSION
+            if normalized.get("chinese_style_heuristic_version") == CHINESE_STYLE_HEURISTIC_VERSION
+            else LEGACY_DRAFT_QUALITY_RULES_VERSION
+        )
+        return normalized
 
 
 class DeterministicDraftQualityResult(BaseModel):
@@ -188,6 +253,44 @@ class DeterministicDraftQualityResult(BaseModel):
         return any(finding.status == "warning" for finding in self.findings)
 
 
+class DeterministicQualityFacts(BaseModel):
+    """Small, code-owned Reviewer bundle derived from the persisted metrics Artifact.
+
+    A caller cannot submit this bundle through the public Run API. The
+    Orchestrator constructs it only after loading the deterministic Artifact
+    associated with the exact Draft under review.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    facts_version: Literal["deterministic_quality_facts_v1"] = DETERMINISTIC_QUALITY_FACTS_VERSION
+    rules_version: Literal["draft_quality_rules_v2_chinese_calibration"] = (
+        DRAFT_QUALITY_RULES_VERSION
+    )
+    quality_profile: DraftQualityProfile
+    deterministic_score: int = Field(ge=0, le=100)
+    target_duration_minutes: int = Field(gt=0)
+    script_character_count: int = Field(ge=0)
+    estimated_duration_minutes: float = Field(ge=0)
+    duration_coverage_ratio: float = Field(ge=0)
+    duration_status: FindingStatus
+    duration_finding_code: str = Field(min_length=1, max_length=100)
+    paragraph_citation_coverage: float = Field(ge=0, le=1)
+    blocker_count: int = Field(ge=0)
+    warning_count: int = Field(ge=0)
+    chinese_style_heuristic_version: Literal["zh_podcast_style_v1"] = (
+        CHINESE_STYLE_HEURISTIC_VERSION
+    )
+    chinese_style_pattern_counts: ChineseStylePatternCounts = Field(
+        default_factory=ChineseStylePatternCounts
+    )
+    filler_phrase_count: int = Field(ge=0)
+    template_phrase_count: int = Field(ge=0)
+    not_but_pattern_count: int = Field(ge=0)
+
+    _normalize_duration_code = field_validator("duration_finding_code")(_normalize_required_text)
+
+
 class ReviewSourceSegment(BaseModel):
     """One source segment actually cited by the Draft and exposed to Reviewer."""
 
@@ -203,8 +306,18 @@ class ModelSelfReviewTaskInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    review_contract_version: Literal[
+        "model_self_review_task_v1",
+        "model_self_review_task_v2_deterministic_facts",
+    ]
     task_kind: Literal["review_podcast_draft"]
     draft_artifact_id: str = Field(min_length=1, max_length=200)
+    deterministic_metrics_artifact_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
+    deterministic_quality_facts: DeterministicQualityFacts | None = None
     creative_brief: CreativeBrief
     quality_config: DraftQualityConfig = Field(default_factory=DraftQualityConfig)
     podcast_draft: PodcastDraftOutput
@@ -216,10 +329,89 @@ class ModelSelfReviewTaskInput(BaseModel):
 
     _source_refs_are_unique = field_validator("allowed_source_refs")(_unique_references)
 
+    @model_validator(mode="before")
+    @classmethod
+    def infer_persisted_contract_version(cls, value: Any) -> Any:
+        """Read both pre-M3.5 v1 tasks and the explicit v2 task contract.
+
+        M3.4 persisted Reviewer Tasks before the deterministic facts fields
+        existed. They may still be queued or leased when a process restarts
+        after M3.5 is deployed, so absence of all new fields is a deliberate
+        legacy signal rather than an invalid payload.
+        """
+
+        if not isinstance(value, dict) or "review_contract_version" in value:
+            return value
+        normalized = dict(value)
+        has_metrics_id = normalized.get("deterministic_metrics_artifact_id") is not None
+        has_facts = normalized.get("deterministic_quality_facts") is not None
+        normalized["review_contract_version"] = (
+            MODEL_REVIEW_TASK_VERSION
+            if has_metrics_id or has_facts
+            else LEGACY_MODEL_REVIEW_TASK_VERSION
+        )
+        return normalized
+
     @model_validator(mode="after")
     def draft_references_must_be_allowed(self) -> ModelSelfReviewTaskInput:
         if not self.quality_config.enabled:
             raise ValueError("quality review task cannot use a disabled quality config")
+        if self.review_contract_version == LEGACY_MODEL_REVIEW_TASK_VERSION:
+            if (
+                self.deterministic_metrics_artifact_id is not None
+                or self.deterministic_quality_facts is not None
+            ):
+                raise ValueError("legacy review tasks cannot contain deterministic facts")
+        else:
+            if (
+                self.deterministic_metrics_artifact_id is None
+                or self.deterministic_quality_facts is None
+            ):
+                raise ValueError("current review tasks require deterministic facts")
+            facts = self.deterministic_quality_facts
+            if facts.quality_profile != self.quality_config.profile:
+                raise ValueError("deterministic facts must use the configured quality profile")
+            if facts.target_duration_minutes != self.creative_brief.target_duration_minutes:
+                raise ValueError("deterministic facts must use the Creative Brief duration")
+            spoken_texts = [
+                self.podcast_draft.podcast_script.opening.text,
+                *[
+                    paragraph.text
+                    for section in self.podcast_draft.podcast_script.sections
+                    for paragraph in section.paragraphs
+                ],
+                self.podcast_draft.podcast_script.closing.text,
+            ]
+            script_character_count = len("".join("".join(text.split()) for text in spoken_texts))
+            if facts.script_character_count != script_character_count:
+                raise ValueError("deterministic facts must describe the exact Draft spoken text")
+            expected_minutes = round(
+                script_character_count / self.creative_brief.speaking_rate_chars_per_minute,
+                2,
+            )
+            if facts.estimated_duration_minutes != expected_minutes:
+                raise ValueError("deterministic facts contain an inconsistent duration estimate")
+            expected_coverage = round(
+                expected_minutes / self.creative_brief.target_duration_minutes,
+                4,
+            )
+            if facts.duration_coverage_ratio != expected_coverage:
+                raise ValueError("deterministic facts contain an inconsistent duration coverage")
+            script_blocks = [
+                self.podcast_draft.podcast_script.opening,
+                *[
+                    paragraph
+                    for section in self.podcast_draft.podcast_script.sections
+                    for paragraph in section.paragraphs
+                ],
+                self.podcast_draft.podcast_script.closing,
+            ]
+            expected_citation_coverage = round(
+                sum(bool(block.source_refs) for block in script_blocks) / len(script_blocks),
+                4,
+            )
+            if facts.paragraph_citation_coverage != expected_citation_coverage:
+                raise ValueError("deterministic facts contain inconsistent citation coverage")
         allowed = {_reference_key(reference) for reference in self.allowed_source_refs}
         if any(
             _reference_key(reference) not in allowed
@@ -304,6 +496,37 @@ class ModelSelfReviewOutput(BaseModel):
         if set(names) != set(REVIEW_DIMENSIONS):
             raise ValueError("review must contain every fixed dimension exactly once")
         return self
+
+
+class QualityScoreCapReason(BaseModel):
+    """One non-compensatory rule applied after the raw weighted score."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=100)
+    cap: int = Field(ge=0, le=100)
+    explanation: RequiredText
+
+    _normalize_code = field_validator("code")(_normalize_required_text)
+    _normalize_explanation = field_validator("explanation")(_normalize_required_text)
+
+
+class ModelReviewConflict(BaseModel):
+    """An explainable disagreement without rewriting the model's raw card."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=100)
+    dimension: ReviewDimensionName
+    model_score: int = Field(ge=1, le=5)
+    deterministic_finding_codes: list[str] = Field(min_length=1, max_length=20)
+    explanation: RequiredText
+
+    _normalize_code = field_validator("code")(_normalize_required_text)
+    _normalize_finding_codes = field_validator("deterministic_finding_codes")(
+        _normalize_unique_required_texts
+    )
+    _normalize_explanation = field_validator("explanation")(_normalize_required_text)
 
 
 class ModelSelfReviewOutputError(ValueError):
@@ -404,13 +627,237 @@ class DraftQualityReport(BaseModel):
     )
     model_review_advisory: Literal[True] = True
     reviewer_relation: ReviewerRelation | None
-    scoring_formula_version: Literal["draft_quality_v1_60_40"] = DRAFT_QUALITY_FORMULA_VERSION
+    scoring_formula_version: Literal[
+        "draft_quality_v1_60_40",
+        "draft_quality_v2_non_compensatory_caps",
+    ] = LEGACY_DRAFT_QUALITY_FORMULA_VERSION
     deterministic_weight: Literal[0.6] = 0.6
     model_weight: Literal[0.4] = 0.4
     experimental_model_score: float | None = Field(default=None, ge=0, le=100)
+    experimental_uncapped_overall_score: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+    )
+    code_owned_score_cap: int | None = Field(default=None, ge=0, le=100)
+    score_cap_reasons: list[QualityScoreCapReason] = Field(default_factory=list)
+    model_review_conflicts: list[ModelReviewConflict] = Field(default_factory=list)
     experimental_overall_score: float | None = Field(default=None, ge=0, le=100)
     decision: DraftQualityDecision
     requires_human_review: Literal[True] = True
+
+    @model_validator(mode="after")
+    def report_state_and_scores_must_be_consistent(self) -> DraftQualityReport:
+        """Reject persisted reports whose cards, scores, caps, or decision disagree.
+
+        The report is read through public APIs and Markdown exporters long after
+        it was first produced. Validating only each field's type would allow an
+        impossible payload (for example, cap 39 with final score 80) to look
+        trustworthy after a bug, partial write, or manual database edit.
+        """
+
+        if self.profile != self.deterministic.profile:
+            raise ValueError("report profile must match the deterministic result")
+
+        if self.model_review_status == "completed":
+            if self.model_self_review is None:
+                raise ValueError("completed model review requires review cards")
+            if self.model_review_unavailable_reason is not None:
+                raise ValueError("completed model review cannot have an unavailable reason")
+            if self.reviewer_relation is None:
+                raise ValueError("completed model review requires a reviewer relation")
+        else:
+            if self.model_self_review is not None:
+                raise ValueError("unavailable model review cannot contain review cards")
+            if self.model_review_unavailable_reason is None:
+                raise ValueError("unavailable model review requires a reason")
+            if self.reviewer_relation is not None:
+                raise ValueError("unavailable model review cannot have a reviewer relation")
+
+        expected_model_score: float | None = None
+        if self.model_self_review is not None:
+            scores = [
+                dimension.score
+                for dimension in self.model_self_review.dimensions
+                if dimension.assessable and dimension.score is not None
+            ]
+            if len(scores) == len(REVIEW_DIMENSIONS):
+                expected_model_score = round(
+                    sum(scores) / len(REVIEW_DIMENSIONS) / 5 * 100,
+                    2,
+                )
+        self._require_optional_score(
+            actual=self.experimental_model_score,
+            expected=expected_model_score,
+            field_name="experimental_model_score",
+        )
+
+        expected_uncapped = (
+            None
+            if expected_model_score is None
+            else round(
+                0.6 * self.deterministic.deterministic_score + 0.4 * expected_model_score,
+                2,
+            )
+        )
+
+        # Historical v1 Artifacts remain readable and immutable, but their
+        # original aggregate and decision are still deterministic enough to
+        # validate. Only the later cap and conflict fields are absent.
+        if self.scoring_formula_version == LEGACY_DRAFT_QUALITY_FORMULA_VERSION:
+            if self.experimental_uncapped_overall_score is not None:
+                raise ValueError("legacy report cannot contain the v2 uncapped score field")
+            if self.code_owned_score_cap is not None:
+                raise ValueError("legacy report cannot contain a code-owned score cap")
+            if self.score_cap_reasons:
+                raise ValueError("legacy report cannot contain v2 score cap reasons")
+            if self.model_review_conflicts:
+                raise ValueError("legacy report cannot contain v2 model conflicts")
+            self._require_optional_score(
+                actual=self.experimental_overall_score,
+                expected=expected_uncapped,
+                field_name="experimental_overall_score",
+            )
+            if self.decision != self._expected_decision(
+                deterministic=self.deterministic,
+                model_self_review=self.model_self_review,
+                expected_model_score=expected_model_score,
+            ):
+                raise ValueError("decision is inconsistent with review evidence and findings")
+            return self
+
+        self._require_optional_score(
+            actual=self.experimental_uncapped_overall_score,
+            expected=expected_uncapped,
+            field_name="experimental_uncapped_overall_score",
+        )
+
+        expected_reasons: list[tuple[str, int]] = []
+        metrics = self.deterministic.metrics
+        duration_coverage = (
+            metrics.estimated_duration_minutes / metrics.target_duration_minutes
+            if metrics.target_duration_minutes
+            else 0.0
+        )
+        if self.deterministic.has_blocker:
+            expected_reasons.append(("deterministic_blocker_cap", 39))
+        if duration_coverage < 0.60:
+            expected_reasons.append(("duration_coverage_below_60_percent_cap", 59))
+        if self.deterministic.has_warning:
+            expected_reasons.append(("deterministic_warning_cap", 79))
+        expected_cap = min((cap for _, cap in expected_reasons), default=100)
+
+        if self.code_owned_score_cap != expected_cap:
+            raise ValueError("code_owned_score_cap is inconsistent with deterministic findings")
+        actual_reasons = [(reason.code, reason.cap) for reason in self.score_cap_reasons]
+        if actual_reasons != expected_reasons:
+            raise ValueError("score_cap_reasons are inconsistent with deterministic findings")
+
+        expected_conflicts: list[tuple[str, ReviewDimensionName, int, tuple[str, ...]]] = []
+        duration_finding = next(
+            (
+                finding
+                for finding in self.deterministic.findings
+                if finding.code == "draft.empty" or finding.code.startswith("duration.")
+            ),
+            None,
+        )
+        maximum_brief_score: int | None = None
+        if duration_finding is not None:
+            if duration_finding.status == "blocker" or duration_coverage < 0.60:
+                maximum_brief_score = 2
+            elif duration_finding.status == "warning":
+                maximum_brief_score = 3
+        if self.model_self_review is not None and maximum_brief_score is not None:
+            brief_card = next(
+                (
+                    dimension
+                    for dimension in self.model_self_review.dimensions
+                    if dimension.dimension == "brief_adherence"
+                ),
+                None,
+            )
+            if (
+                brief_card is not None
+                and brief_card.assessable
+                and brief_card.score is not None
+                and brief_card.score > maximum_brief_score
+                and duration_finding is not None
+            ):
+                expected_conflicts.append(
+                    (
+                        "duration_vs_brief_adherence_score",
+                        "brief_adherence",
+                        brief_card.score,
+                        (duration_finding.code,),
+                    )
+                )
+        actual_conflicts = [
+            (
+                conflict.code,
+                conflict.dimension,
+                conflict.model_score,
+                tuple(conflict.deterministic_finding_codes),
+            )
+            for conflict in self.model_review_conflicts
+        ]
+        if actual_conflicts != expected_conflicts:
+            raise ValueError(
+                "model_review_conflicts are inconsistent with model cards and findings"
+            )
+
+        expected_final = (
+            None if expected_uncapped is None else min(expected_uncapped, float(expected_cap))
+        )
+        self._require_optional_score(
+            actual=self.experimental_overall_score,
+            expected=expected_final,
+            field_name="experimental_overall_score",
+        )
+
+        expected_decision = self._expected_decision(
+            deterministic=self.deterministic,
+            model_self_review=self.model_self_review,
+            expected_model_score=expected_model_score,
+        )
+        if self.decision != expected_decision:
+            raise ValueError("decision is inconsistent with review evidence and findings")
+        return self
+
+    @staticmethod
+    def _expected_decision(
+        *,
+        deterministic: DeterministicDraftQualityResult,
+        model_self_review: ModelSelfReviewOutput | None,
+        expected_model_score: float | None,
+    ) -> DraftQualityDecision:
+        if deterministic.has_blocker:
+            return "blocked"
+        if model_self_review is None or expected_model_score is None:
+            return "automated_review_incomplete"
+        low_model_dimension = any(
+            dimension.assessable and dimension.score is not None and dimension.score <= 2
+            for dimension in model_self_review.dimensions
+        )
+        return (
+            "revision_recommended"
+            if deterministic.has_warning or low_model_dimension
+            else "candidate_ready_for_human_review"
+        )
+
+    @staticmethod
+    def _require_optional_score(
+        *,
+        actual: float | None,
+        expected: float | None,
+        field_name: str,
+    ) -> None:
+        if actual is None or expected is None:
+            if actual is not expected:
+                raise ValueError(f"{field_name} is inconsistent with its inputs")
+            return
+        if abs(actual - expected) > 0.005:
+            raise ValueError(f"{field_name} is inconsistent with its inputs")
 
 
 class DraftQualityReportRecord(BaseModel):

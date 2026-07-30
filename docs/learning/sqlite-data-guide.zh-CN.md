@@ -115,7 +115,7 @@ M3.4 没有增加新表。它把四种用途不同的数据继续放在 `artifac
 | `draft_quality_report` | 代码合成的 decision、Reviewer 状态、关系、实验性分数、确定性与模型结果 | 不是 AI 作者概率，也不替换 Run 的 Draft output |
 | `draft_user_feedback` | submission ID、human/synthetic origin、五项评分、是否愿意录、可选实际时长与评论 | `synthetic_test` 不是真人信号；评论不会复制进 Event 或 stdout |
 
-口播稿仍保存在 `build_podcast_draft_result`。成功 v6 Run 的
+口播稿仍保存在 `build_podcast_draft_result`。成功 v6/v7 质量 Run 的
 `runs.output_artifact_id` 继续指向这份 Draft；质量报告是可单独查询和导出的
 旁路 Artifact。
 
@@ -291,7 +291,7 @@ LEFT JOIN artifacts AS a ON a.id = r.output_artifact_id
 WHERE r.id = 'run_...';
 ```
 
-正常 v6 成功结果的 `output_kind` 应为
+正常 v6/v7 成功结果的 `output_kind` 应为
 `build_podcast_draft_result`，不是 `draft_quality_report`。
 
 输入下面命令退出：

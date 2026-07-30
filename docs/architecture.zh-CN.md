@@ -2,7 +2,7 @@
 
 状态：Draft
 
-日期：2026-07-29
+日期：2026-07-30
 
 ## 1. 目标
 
@@ -75,9 +75,10 @@ create_run
   -> validate strict structure and source scope
   -> render Podcast Draft / Show Notes
   -> evaluate deterministic Draft metrics
+  -> project + validate trusted deterministic facts
   -> review_podcast_draft (serial root Quality Reviewer)
   -> validate location + verbatim quote evidence
-  -> synthesize code-owned Draft Quality Report
+  -> synthesize code-owned Draft Quality Report + non-compensatory caps
   -> human final review
   -> complete
 ```
@@ -147,6 +148,41 @@ blocker 时 decision 仍为 `blocked`，否则为
 仍可导出。用户反馈通过独立 append-only Artifact 保存；当前 origin 是
 调用方自报的分类，E2E 的 `synthetic_test` 会明确标记为非真人信号。
 
+M3.5 为新质量 Run 使用 workflow v7，不增加 Task、Artifact 类型或
+migration。版本升级冻结了持久化语义：v6 继续使用 M3.4 的 Reviewer Task
+v1、Prompt v1、`draft_quality_rules_v1` 和报告公式 v1；v7 使用带可信
+确定性事实的 Task/Prompt v2、`draft_quality_rules_v2_chinese_calibration`
+和非补偿报告公式 v2。变化发生在质量边界内部：
+
+恢复时以持久 Reviewer Task 的合同为准，而不是只看 Run 的版本标签。这样既
+能恢复纯 M3.4 v6，也能正确恢复 M3.5 预发布期间曾写出的
+`workflow v6 + current deterministic facts` 过渡数据，后者不会丢失 v2
+评分上限与模型/代码冲突记录。
+
+1. `draft_metrics_report` 只统计 opening、section paragraph 与 closing 的
+   `text`；标题、章节标题、引用对象、来源索引、Show Notes 和 Markdown
+   渲染字符都不属于口播时长。
+2. Orchestrator 从持久化的 metrics Artifact 投影一份有版本的
+   `deterministic_quality_facts`，再与 Draft 一起写入 Reviewer Task 输入。
+   Task schema 会重新计算关键事实并核对，防止 stale/tampered fact 进入模型。
+3. Reviewer 只能解释这些可信事实，不能覆盖它们。`must_include` 字面 miss
+   是 `info`；是否已用同义表达覆盖，由 Reviewer 结合 Draft 和来源判断。
+4. 报告保存原始模型分和未封顶 60/40 加权分，再由普通代码应用 39 / 59 / 79
+   非补偿上限。确定性 blocker 上限 39，时长覆盖低于 60% 上限 59，任一
+   warning 上限 79；多个条件取最严格者。
+5. `DraftQualityReport` 在写入和读回时重新推导模型分、未封顶分、cap、
+   cap reasons、最终分和 decision，拒绝类型合法但彼此矛盾的 JSON。
+6. 中文启发式以 `zh_podcast_style_v1` 版本化。它只观察可复现的表达模式，
+   不是 AI 作者检测器。历史 `template_phrases` / `not_but_pattern` 与新分类
+   重叠时只保留 `info` 展示，避免重复扣分。
+
+配置可让 Reviewer 独立路由到另一个受支持的 DeepSeek tier。Worker 仅对
+可信 Task kind `review_podcast_draft` 选择 reviewer provider；其他 Task
+继续使用 primary provider。ModelCall 与 Artifact `_execution` 保存实际
+provider/model，报告将关系区分为 `same_model`、
+`cross_tier_same_family` 或 `different_model`。所谓“独立”只是执行与记账
+边界独立，跨 tier 仍不等于独立人工审核。
+
 为使升级时已经在途的 Run 仍可恢复，v1 保留原有语义：fan-in 后以
 `episode_research_bundle` 成功结束，不要求新增 `topic`，也不排队
 Interviewer；v2 仍在采访脚手架完成后成功；v3 Resume 后仍按 M3.1 语义
@@ -193,7 +229,9 @@ Editor 的同一个模型。它只读取 Draft 实际引用到的 SourceSegment�
 strict schema 返回六张证据卡。`assessable=true` 时必须带 1–5 分、稳定
 location 和存在于该 block 中的 exact quote；无法可靠评价时必须使用
 `assessable=false` 并说明 limitation，不能编造证据。最终 decision 和
-60/40 实验性分数由普通代码计算，且无论结果如何都要求人工审稿。
+60/40 实验性分数由普通代码计算，且无论结果如何都要求人工审稿。M3.5 又把
+确定性事实放进受校验的 Reviewer Task 输入，并在 60/40 结果之后应用
+代码所有的非补偿 cap；模型高分不能把 blocker 平均掉。
 
 ## 6. 持久化模型
 
@@ -413,9 +451,16 @@ M3.2 为 Editor 增加第三种独立输入边界和单独输出上限。默认�
 ```text
 EPIPHANY_DEEPSEEK_MAX_EDITOR_BUNDLE_CHARS=48000
 EPIPHANY_DEEPSEEK_EDITOR_MAX_TOKENS=20000
+# optional: EPIPHANY_DEEPSEEK_REVIEWER_MODEL=deepseek-v4-pro
 EPIPHANY_DEEPSEEK_MAX_QUALITY_BUNDLE_CHARS=80000
 EPIPHANY_DEEPSEEK_QUALITY_REVIEW_MAX_TOKENS=6000
 ```
+
+未设置 `EPIPHANY_DEEPSEEK_REVIEWER_MODEL` 时复用
+`EPIPHANY_DEEPSEEK_MODEL`；设置为 `deepseek-v4-flash` 或
+`deepseek-v4-pro` 时，只替换 Reviewer Task 的 Provider 实例。它不是一个
+“质量保证开关”，费用、耗时和 strict schema 成功率仍须通过 ModelCall 与
+实验记录观察。
 
 Editor 把 Scaffold、topic、初始片段与补充片段都视为不可信数据，并只允许
 原样复制输入白名单中的 SourceReference。Strict validator 要求 title 等于
@@ -423,17 +468,20 @@ topic，Podcast Script 同时使用初始与补充引用，Show Notes 也至少�
 补充引用。未知或越权引用、缺失补充证据和结构漂移都会在 Artifact 提交前
 失败。合法引用仍不是语义蕴含证明，候选稿必须由用户最终审核。
 
-Quality Reviewer 的输入由结构化 Draft、Creative Brief、质量 profile 和
-Draft 实际引用的 SourceSegment 组成。Prompt 中的正文一律按不可信数据
-处理。Strict validator 固定六个 dimension，逐一验证 assessable 状态、
-1–5 分、location、exact quote 和引用范围；模型不能返回最终 decision。
-本阶段不尝试判断文本的作者身份，也不生成“AI 概率”。
+Quality Reviewer 的输入由结构化 Draft、Creative Brief、质量 profile、
+Draft 实际引用的 SourceSegment，以及代码生成的 bounded
+`deterministic_quality_facts` 组成。Prompt 中的正文一律按不可信数据处理，
+而 facts 由 Task schema 对当前 Draft 重新计算后才信任。Strict validator
+固定六个 dimension，逐一验证 assessable 状态、1–5 分、location、
+exact quote 和引用范围；模型不能返回最终 decision。本阶段不尝试判断文本
+的作者身份，也不生成“AI 概率”。中文 pattern/count 只能说明哪些表达值得
+人工复核。
 
-正常 v4/v5 都需要四次 Provider 调用，正常 v6 需要五次。将单 Run 预算设为三时，Editor 调用会在
+正常 v4/v5 都需要四次 Provider 调用，正常 v6/v7 需要五次。将单 Run 预算设为三时，Editor 调用会在
 进入 Provider 以前以 `model_call_limit_exceeded` 被拒绝。Editor retry、
 timeout、lease、fencing、startup recovery 和 cancel 复用同一 Worker 机制；
 每个重试 attempt 单独记账，但 Artifact 通过稳定 idempotency key 只提交一次。
-若 v6 预算只够四次，Reviewer 会以 `model_call_limit_exceeded` 失败并触发
+若 v6/v7 预算只够四次，Reviewer 会以 `model_call_limit_exceeded` 失败并触发
 质量报告降级；已经生成的 Draft 不会因此变成失败产物。
 
 ## 11. API 和事件
@@ -478,6 +526,20 @@ Draft Quality Report 有单独 JSON 与 Markdown endpoint。它不替换
 Draft 的 Run。反馈采用稳定 `submission_id` 幂等追加，同 ID 不同内容返回
 409；`human_signal_eligible` 由服务端依据 `feedback_origin` 计算，调用方
 不能自行指定。
+
+M3.5 的 Flash/Pro 比较器是离线实验工具，不是产品 API。它从一个成功 Run
+加载唯一 Reviewer Task、精确 Draft 与 metrics Artifact，冻结输入 hash，
+按固定顺序各调用一次。默认保留历史 deterministic snapshot；显式
+`--recompute-current-rules` 则从同一 Draft 按当前规则重建 metrics/facts。
+两种模式都不重新生成 Editor Draft，也不把实验调用写进正式 Run 的
+ModelCall 账本；输出只含模型身份、schema 结果、分数、cap、token、耗时与
+本地估算费用，不含正文、来源或密钥。
+
+M3.6 目前只是架构计划：用户显式选择一组 feedback 和修改指令后，创建一个
+带 `parent_run_id` 的 Revision Run。旧 Draft、Report 和 Feedback 保持
+immutable；新 Run 排队一次独立 `revise_podcast_draft`，再重新计算 metrics
+和 Reviewer 报告，并使用自己的调用预算。不会由一个低分自动触发无限循环，
+也不会静默覆盖用户已经审核过的候选稿。
 
 Markdown 由已验证 JSON 确定性渲染。正文把原始 Source/Segment ID 显示为
 短标签 `[S1]`，文末通过数据库中的 Source 标题与 Segment 位置生成来源索引；
@@ -573,6 +635,12 @@ M3.4 新增 `workflow.draft_metrics.evaluated`、
 decision、blocker/warning 数量、错误码和反馈摘要，不记录 Draft、Source、
 模型 assessment 或用户 comment 正文。反馈网络重放只写操作日志，不重复写
 持久 Event。
+
+M3.5 没有新增持久 Event 类型。Reviewer 路由继续复用已有 Task/ModelCall
+事件，并在 `_execution` 中记录实际 provider/model。独立比较器只输出
+`quality_reviewer_compare.preflight/completed/blocked` 脱敏摘要，包含输入
+hash、版本、调用计数、schema 状态、tokens、耗时和费用，不输出 Draft、
+Prompt、模型 assessment 或 Source 文本。
 
 ## 13. 升级触发条件
 

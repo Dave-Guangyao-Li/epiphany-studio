@@ -47,6 +47,13 @@ class Settings(BaseSettings):
             "DEEPSEEK_MODEL",
         ),
     )
+    deepseek_reviewer_model: Literal["deepseek-v4-flash", "deepseek-v4-pro"] | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "EPIPHANY_DEEPSEEK_REVIEWER_MODEL",
+            "DEEPSEEK_REVIEWER_MODEL",
+        ),
+    )
     deepseek_billing_currency: Literal["CNY", "USD"] = Field(
         default="USD",
         validation_alias=AliasChoices(

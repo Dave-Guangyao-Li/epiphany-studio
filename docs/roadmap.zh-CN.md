@@ -1,6 +1,6 @@
 # MVP 路线图
 
-更新时间：2026-07-29
+更新时间：2026-07-30
 
 路线图按可演示的纵向切片推进，不按“先把所有基础设施搭完”推进。
 
@@ -316,6 +316,67 @@ Artifact。合计 26,618 input tokens、11,239 output tokens、61,669 ms 模型
 引用自检后，本次成功。前一次本地估算约 CNY 0.039696，属于单独的开发调试
 费用，不能并入成功 Run 的 CNY 0.049096。两者都是本地价格表估算；官方账单
 可能因计费口径、缓存处理或用量同步延迟而不同。
+
+### M3.5：中文质量校准与 Reviewer 对照实验
+
+- [x] 新质量 Run 升为 workflow v7，并保留持久化 v6 的旧合同恢复能力
+- [x] 口播字数只统计 opening / section paragraphs / closing 正文
+- [x] Reviewer 接收并校验代码所有的 deterministic facts
+- [x] 39 / 59 / 79 非补偿分数上限与模型/代码冲突记录
+- [x] Report 读写时校验分数、cap、reasons 与 decision 的跨字段一致性
+- [x] 版本化中文表达启发式，不输出“AI 写作概率”
+- [x] legacy 重叠规则与 must-include 字面 miss 改为 info
+- [x] Quality Reviewer 独立模型路由与实际 provider/model 记账
+- [x] 同一冻结 Draft 的 Flash / Pro 比较与 current-rules 重算模式
+- [x] 完整 Fake E2E、真实 DeepSeek Run、离线 harness 重验和实验记录
+
+时长计数边界现在是一个可以逐字段解释的合同：只数用户真正会说出的文字。
+标题、章节名、结构化 SourceReference、`[S1]`、来源索引、Show Notes 和
+最终 Markdown 的排版字符都排除。Reviewer Task 同时携带应用代码生成的
+目标/估算时长、字符数、覆盖率、引用覆盖、finding 数量和中文模式计数；
+validator 会从当前 Draft 重新计算关键事实，不一致就不进入模型。
+
+综合分保留模型原始六维分和未封顶 60/40 结果，再套用最严格的 code-owned
+cap：任一 blocker 最多 39，时长覆盖低于 60% 最多 59，任一 warning 最多
+79。这样“其他维度很好”不能补偿一个明确硬伤。中文启发式只用于定位可能
+需要改写的表达，不能判断作者是否为 AI。旧的 template / not-but 规则仅作
+兼容展示，不和新分类重复扣分；must-include 字面没出现只记 `info`，是否
+已经同义覆盖交给有 Draft/Source 证据的 Reviewer。
+
+验收记录：
+
+- 正式 v7 Fake Run `run_f41eac8520cd4b47b97cc1181acb3d63` 全流程通过，
+  并通过自动化重启回归验证升级前排队的纯 legacy v6 Reviewer Task 仍可完成，
+  以及预发布 `v6 + current facts` Task 仍保留 v2 cap 与 conflict；
+- DeepSeek Run `run_0af27a7596474a92ba79e298e912e35e` 是 M3.5 预发布
+  workflow-v6 开发快照；workflow 成功，
+  2,055 个口播字符、估算 7.34 / 15 分钟，五次调用本地估算
+  CNY 0.089433；
+- 该 Run 的旧报告出现两项 harness false negative：旧检查器仍假设 Editor /
+  Reviewer 同模型并只接受旧关系值。修复后对同一数据库离线重验，两项都为
+  true，没有为修 checker 再付费调用模型；
+- 当前规则重算 deterministic 62，包含 1 blocker、1 warning、2 info，
+  最严格 cap 为 39；
+- 第一轮历史快照冻结比较为 Flash 76.67、Pro 80，最终均为 39；
+- `--recompute-current-rules` 比较中 Flash strict schema 失败，Pro raw 70、
+  final 39；两次调用本地估算 CNY 0.013950 / 0.044008。
+
+这只是一个主题、一份合成材料和一份冻结 Draft。它能证明合同、路由、上限和
+错误呈现有效，不能证明 Pro 永远优于 Flash。模型选择需要继续积累不同主题、
+长度和真实用户评分。
+
+### M3.6：显式反馈驱动的 Revision Run（计划）
+
+- [ ] 为新修订 Run 保存 `parent_run_id`，旧 Draft/Report 不可变
+- [ ] 用户显式选择 feedback、修订目标和可选 Brief/Source 变更
+- [ ] 新增受限 `revise_podcast_draft` Task，不静默覆盖旧稿
+- [ ] 新候选重新执行确定性 metrics、Reviewer 与非补偿 cap
+- [ ] Revision 使用独立调用预算、幂等键、事件、日志和失败恢复
+- [ ] 对比旧稿/新稿及用户最终选择，不自动追逐分数或无限重写
+
+M3.6 尚未实现。当前 `quality-feedback` 仍是 append-only 记录，提交反馈不会
+触发模型调用或改变现有 Draft。下一步的核心人机边界是“用户明确按下修订”，
+而不是系统看到低分就自己循环生成。
 
 ## M4：可靠性与 Trace
 

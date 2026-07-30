@@ -6,10 +6,17 @@ import pytest
 
 from epiphany.draft_quality import (
     analyze_podcast_draft,
+    build_deterministic_quality_facts,
     build_draft_quality_report,
 )
 from epiphany.draft_quality_schemas import (
+    CHINESE_STYLE_HEURISTIC_VERSION,
+    DRAFT_QUALITY_RULES_VERSION,
+    LEGACY_DRAFT_QUALITY_FORMULA_VERSION,
+    LEGACY_DRAFT_QUALITY_RULES_VERSION,
     REVIEW_DIMENSIONS,
+    DeterministicDraftMetrics,
+    DraftQualityReport,
     InvalidModelReviewEvidence,
     InvalidModelReviewSourceReference,
     ModelSelfReviewOutput,
@@ -107,9 +114,17 @@ def _brief() -> CreativeBrief:
 def _task_input(draft: PodcastDraftOutput | None = None) -> dict[str, object]:
     selected = draft or _good_draft()
     references = [_reference(index) for index in range(4)]
+    deterministic = analyze_podcast_draft(
+        draft=selected,
+        creative_brief=_brief(),
+    )
     return {
         "task_kind": "review_podcast_draft",
         "draft_artifact_id": "art_draft",
+        "deterministic_metrics_artifact_id": "art_metrics",
+        "deterministic_quality_facts": build_deterministic_quality_facts(deterministic).model_dump(
+            mode="json"
+        ),
         "creative_brief": _brief().model_dump(mode="json"),
         "quality_config": DraftQualityConfig().model_dump(mode="json"),
         "podcast_draft": selected.model_dump(mode="json"),
@@ -204,6 +219,59 @@ def test_duration_metric_honors_each_supported_target(target_minutes: int) -> No
     assert result.findings[0].status == "pass"
 
 
+def test_duration_counts_only_spoken_text_not_metadata_references_or_rendered_markdown() -> None:
+    baseline_content = _good_draft().model_dump(mode="python")
+    baseline = analyze_podcast_draft(
+        draft=baseline_content,
+        creative_brief=_brief(),
+    )
+    metadata_heavy = deepcopy(baseline_content)
+    metadata_heavy["title"] = "首先，值得注意的是。" * 500
+    spoken_blocks = [
+        metadata_heavy["podcast_script"]["opening"],
+        *[
+            paragraph
+            for section in metadata_heavy["podcast_script"]["sections"]
+            for paragraph in section["paragraphs"]
+        ],
+        metadata_heavy["podcast_script"]["closing"],
+    ]
+    for block_index, block in enumerate(spoken_blocks):
+        block["source_refs"] = [
+            {
+                "source_id": f"src_{block_index}_" + ("让我们一起" * 500),
+                "source_segment_id": f"seg_{block_index}_" + ("我突然意识到" * 500),
+            }
+        ]
+    for section in metadata_heavy["podcast_script"]["sections"]:
+        section["title"] = "不是标题而是元数据。" * 300
+        for reference in section["source_refs"]:
+            reference["source_id"] = "src_" + ("来源索引" * 500)
+    metadata_heavy["show_notes"]["summary"]["text"] = "让我们一起。" * 1_000
+    for point in metadata_heavy["show_notes"]["key_points"]:
+        point["text"] = "我突然意识到。" * 1_000
+    metadata_heavy["rendered_markdown"] = (
+        "# 标题\n\n来源：[S1]\n\n## 来源索引\n- [S1] 很长的渲染引用\n" * 1_000
+    )
+
+    result = analyze_podcast_draft(
+        draft=metadata_heavy,
+        creative_brief=_brief(),
+    )
+
+    assert result.metrics.script_character_count == baseline.metrics.script_character_count
+    assert result.metrics.estimated_duration_minutes == baseline.metrics.estimated_duration_minutes
+    assert result.metrics.chinese_style_pattern_counts.model_dump() == {
+        "parallel_contrast": 0,
+        "escalation": 0,
+        "enumeration": 0,
+        "generic_transition": 0,
+        "generic_epiphany": 0,
+        "generic_coda": 0,
+        "over_polite": 0,
+    }
+
+
 def test_short_or_uncited_draft_is_an_objective_blocker() -> None:
     content = _good_draft().model_dump(mode="python")
     content["podcast_script"]["opening"]["text"] = "太短了。"
@@ -221,7 +289,7 @@ def test_short_or_uncited_draft_is_an_objective_blocker() -> None:
     assert result.deterministic_score < 50
 
 
-def test_duplicate_windows_templates_and_brief_literals_are_warnings() -> None:
+def test_duplicate_windows_brief_literals_and_canonical_style_rules_are_warnings() -> None:
     content = _good_draft().model_dump(mode="python")
     repeated = (
         "在这个快节奏的时代，值得注意的是，这不是结论而是开场。总而言之，让我们一起继续。"
@@ -242,8 +310,188 @@ def test_duplicate_windows_templates_and_brief_literals_are_warnings() -> None:
     assert "repetition.exact_normalized_paragraphs" in warnings
     assert "repetition.eight_character_windows" in warnings
     assert "brief.avoid_patterns" in warnings
-    assert "style.template_phrases" in warnings
-    assert "style.not_but_pattern" in warnings
+    assert "style.zh.generic_transition" in warnings
+    assert "style.zh.generic_coda" in warnings
+    assert "style.zh.parallel_contrast" in warnings
+
+    findings = {finding.code: finding for finding in result.findings}
+    assert "literal substring hits" in str(findings["brief.avoid_patterns"].threshold)
+    assert findings["style.template_phrases"].status == "info"
+    assert findings["style.not_but_pattern"].status == "info"
+
+
+def test_missing_must_include_literal_is_informational_not_semantic_failure() -> None:
+    content = _good_draft()
+    baseline = analyze_podcast_draft(
+        draft=content,
+        creative_brief=CreativeBrief(
+            target_duration_minutes=10,
+            speaking_rate_chars_per_minute=280,
+        ),
+    )
+    observed = analyze_podcast_draft(
+        draft=content,
+        creative_brief=CreativeBrief(
+            target_duration_minutes=10,
+            speaking_rate_chars_per_minute=280,
+            must_include=["允许自己在没有答案时继续表达"],
+        ),
+    )
+
+    finding = next(finding for finding in observed.findings if finding.code == "brief.must_include")
+    assert observed.metrics.must_include_missing_count == 1
+    assert finding.status == "info"
+    assert "semantic coverage is model-reviewed" in str(finding.threshold)
+    assert observed.deterministic_score == baseline.deterministic_score
+    assert observed.has_warning == baseline.has_warning
+
+
+def test_versioned_chinese_style_categories_report_counts_quotes_and_locations() -> None:
+    content = _good_draft().model_dump(mode="python")
+    location = "podcast_script.sections[0].paragraphs[0]"
+    content["podcast_script"]["sections"][0]["paragraphs"][0]["text"] += (
+        "不是为了证明而是为了记录。" * 3
+        + "不仅要写还要说。" * 3
+        + "首先，回忆。其次，理解。最后，继续。"
+        + "值得注意的是，先停一下。" * 3
+        + "我突然意识到，声音还在。" * 3
+        + "让我们一起继续记录。" * 3
+        + "非常荣幸和你分享。" * 2
+    )
+
+    result = analyze_podcast_draft(draft=content, creative_brief=_brief())
+    counts = result.metrics.chinese_style_pattern_counts
+
+    assert result.metrics.chinese_style_heuristic_version == CHINESE_STYLE_HEURISTIC_VERSION
+    assert result.metrics.rules_version == DRAFT_QUALITY_RULES_VERSION
+    assert counts.parallel_contrast == 3
+    assert counts.escalation == 3
+    assert counts.enumeration == 3
+    assert counts.generic_transition == 3
+    assert counts.generic_epiphany == 3
+    assert counts.generic_coda == 3
+    assert counts.over_polite == 2
+    categorized_findings = {
+        finding.code: finding for finding in result.findings if finding.code.startswith("style.zh.")
+    }
+    assert len(categorized_findings) == 7
+    assert all(finding.status == "warning" for finding in categorized_findings.values())
+    assert all(finding.location == location for finding in categorized_findings.values())
+    assert all(finding.exact_quote for finding in categorized_findings.values())
+
+
+def test_sentence_and_paragraph_cv_warn_only_with_enough_samples() -> None:
+    uniform = _good_draft().model_dump(mode="python")
+    uniform["podcast_script"]["opening"]["text"] = "甲乙丙丁。"
+    uniform["podcast_script"]["closing"]["text"] = "戊己庚辛。"
+    for section in uniform["podcast_script"]["sections"]:
+        for paragraph in section["paragraphs"]:
+            paragraph["text"] = "壬癸子丑。"
+
+    measured = analyze_podcast_draft(draft=uniform, creative_brief=_brief())
+    measured_findings = {finding.code: finding for finding in measured.findings}
+
+    assert measured.metrics.spoken_sentence_count == 6
+    assert measured.metrics.spoken_nonempty_paragraph_count == 6
+    assert measured.metrics.sentence_length_cv == 0
+    assert measured.metrics.paragraph_length_cv == 0
+    assert measured_findings["style.sentence_length_cv"].status == "warning"
+    assert measured_findings["style.paragraph_length_cv"].status == "warning"
+
+    insufficient = deepcopy(uniform)
+    insufficient["podcast_script"]["sections"] = []
+    insufficient["podcast_script"]["closing"]["text"] = ""
+    not_measured = analyze_podcast_draft(draft=insufficient, creative_brief=_brief())
+    not_measured_codes = {finding.code for finding in not_measured.findings}
+
+    assert not_measured.metrics.spoken_sentence_count == 1
+    assert not_measured.metrics.spoken_nonempty_paragraph_count == 1
+    assert not_measured.metrics.sentence_length_cv is None
+    assert not_measured.metrics.paragraph_length_cv is None
+    assert "style.sentence_length_cv" not in not_measured_codes
+    assert "style.paragraph_length_cv" not in not_measured_codes
+
+
+def test_legacy_deterministic_metrics_gain_safe_defaults_for_new_style_fields() -> None:
+    current = analyze_podcast_draft(
+        draft=_good_draft(),
+        creative_brief=_brief(),
+    ).metrics.model_dump(mode="python")
+    for field in (
+        "rules_version",
+        "chinese_style_heuristic_version",
+        "chinese_style_pattern_counts",
+        "spoken_sentence_count",
+        "spoken_nonempty_paragraph_count",
+        "sentence_length_cv",
+        "paragraph_length_cv",
+    ):
+        current.pop(field)
+
+    restored = DeterministicDraftMetrics.model_validate(current)
+
+    assert restored.rules_version == LEGACY_DRAFT_QUALITY_RULES_VERSION
+    assert restored.chinese_style_heuristic_version is None
+    assert restored.chinese_style_pattern_counts.model_dump() == {
+        "parallel_contrast": 0,
+        "escalation": 0,
+        "enumeration": 0,
+        "generic_transition": 0,
+        "generic_epiphany": 0,
+        "generic_coda": 0,
+        "over_polite": 0,
+    }
+    assert restored.sentence_length_cv is None
+    assert restored.paragraph_length_cv is None
+
+
+def test_pre_release_chinese_metrics_without_rules_field_infer_current_rules() -> None:
+    current = analyze_podcast_draft(
+        draft=_good_draft(),
+        creative_brief=_brief(),
+    ).metrics.model_dump(mode="python")
+    current.pop("rules_version")
+
+    restored = DeterministicDraftMetrics.model_validate(current)
+
+    assert restored.rules_version == DRAFT_QUALITY_RULES_VERSION
+    assert restored.chinese_style_heuristic_version == CHINESE_STYLE_HEURISTIC_VERSION
+
+
+def test_legacy_rules_preserve_m3_4_literal_and_template_penalties() -> None:
+    content = _good_draft().model_dump(mode="python")
+    content["podcast_script"]["opening"]["text"] += (
+        "总而言之，总而言之，总而言之。不是为了展示而是为了说明。" * 3
+    )
+    brief = CreativeBrief(
+        target_duration_minutes=10,
+        must_include=["必须逐字出现但实际没有"],
+    )
+
+    legacy = analyze_podcast_draft(
+        draft=content,
+        creative_brief=brief,
+        rules_version=LEGACY_DRAFT_QUALITY_RULES_VERSION,
+    )
+    current = analyze_podcast_draft(
+        draft=content,
+        creative_brief=brief,
+        rules_version=DRAFT_QUALITY_RULES_VERSION,
+    )
+    legacy_findings = {finding.code: finding for finding in legacy.findings}
+    current_findings = {finding.code: finding for finding in current.findings}
+
+    assert legacy.metrics.rules_version == LEGACY_DRAFT_QUALITY_RULES_VERSION
+    assert legacy.metrics.chinese_style_heuristic_version is None
+    assert legacy_findings["brief.must_include"].status == "warning"
+    assert legacy_findings["style.template_phrases"].status == "warning"
+    assert legacy_findings["style.not_but_pattern"].status == "warning"
+    assert all(not code.startswith("style.zh.") for code in legacy_findings)
+    assert current.metrics.rules_version == DRAFT_QUALITY_RULES_VERSION
+    assert current_findings["brief.must_include"].status == "info"
+    assert current_findings["style.template_phrases"].status == "info"
+    assert current_findings["style.not_but_pattern"].status == "info"
+    assert any(code.startswith("style.zh.") for code in current_findings)
 
 
 def test_disabled_analysis_is_an_explicit_opt_out_not_a_pass() -> None:
@@ -271,6 +519,17 @@ def test_model_review_requires_fixed_unique_dimension_cards() -> None:
         validate_model_self_review_output(
             task_input=_task_input(),
             content=review,
+        )
+
+
+def test_model_review_task_rejects_facts_that_do_not_describe_the_exact_draft() -> None:
+    task_input = _task_input()
+    task_input["deterministic_quality_facts"]["script_character_count"] += 1  # type: ignore[index,operator]
+
+    with pytest.raises(ModelSelfReviewSchemaError):
+        validate_model_self_review_output(
+            task_input=task_input,
+            content=_model_review(),
         )
 
 
@@ -360,14 +619,242 @@ def test_report_is_code_owned_advisory_and_same_model_relation_is_visible() -> N
 
     assert report.model_review_advisory is True
     assert report.reviewer_relation == "same_model"
-    assert report.scoring_formula_version == "draft_quality_v1_60_40"
+    assert report.scoring_formula_version == "draft_quality_v2_non_compensatory_caps"
     assert report.experimental_model_score == 80
+    assert report.experimental_uncapped_overall_score == round(
+        deterministic.deterministic_score * 0.6 + 80 * 0.4,
+        2,
+    )
+    assert report.code_owned_score_cap == 100
+    assert report.score_cap_reasons == []
     assert report.experimental_overall_score == round(
         deterministic.deterministic_score * 0.6 + 80 * 0.4,
         2,
     )
     assert report.decision == "candidate_ready_for_human_review"
     assert report.requires_human_review is True
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("experimental_model_score", 99.0),
+        ("experimental_uncapped_overall_score", 99.0),
+        ("code_owned_score_cap", 39),
+        ("experimental_overall_score", 80.0),
+        ("decision", "blocked"),
+    ],
+)
+def test_v2_report_rejects_inconsistent_scores_caps_and_decision(
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    deterministic = analyze_podcast_draft(
+        draft=_good_draft(),
+        creative_brief=_brief(),
+    )
+    payload = build_draft_quality_report(
+        deterministic=deterministic,
+        model_self_review=ModelSelfReviewOutput.model_validate(_model_review(score=4)),
+        editor_provider="deepseek",
+        editor_model="deepseek-v4-flash",
+        reviewer_provider="deepseek",
+        reviewer_model="deepseek-v4-pro",
+    ).model_dump(mode="python")
+    payload[field_name] = invalid_value
+
+    with pytest.raises(ValueError):
+        DraftQualityReport.model_validate(payload)
+
+
+def test_v2_report_rejects_cap_reasons_that_do_not_match_findings() -> None:
+    deterministic = analyze_podcast_draft(
+        draft=_good_draft(),
+        creative_brief=_brief(),
+    )
+    payload = build_draft_quality_report(
+        deterministic=deterministic,
+        model_self_review=ModelSelfReviewOutput.model_validate(_model_review(score=4)),
+    ).model_dump(mode="python")
+    payload["score_cap_reasons"] = [
+        {
+            "code": "deterministic_blocker_cap",
+            "cap": 39,
+            "explanation": "伪造的上限原因。",
+        }
+    ]
+
+    with pytest.raises(ValueError):
+        DraftQualityReport.model_validate(payload)
+
+
+def test_v2_report_rejects_fabricated_model_conflict() -> None:
+    deterministic = analyze_podcast_draft(
+        draft=_good_draft(),
+        creative_brief=_brief(),
+    )
+    payload = build_draft_quality_report(
+        deterministic=deterministic,
+        model_self_review=ModelSelfReviewOutput.model_validate(_model_review(score=4)),
+    ).model_dump(mode="python")
+    payload["model_review_conflicts"] = [
+        {
+            "code": "duration_vs_brief_adherence_score",
+            "dimension": "brief_adherence",
+            "model_score": 4,
+            "deterministic_finding_codes": ["duration.within_target_range"],
+            "explanation": "伪造的模型与代码冲突。",
+        }
+    ]
+
+    with pytest.raises(ValueError):
+        DraftQualityReport.model_validate(payload)
+
+
+def test_report_distinguishes_cross_tier_review_within_deepseek_v4() -> None:
+    deterministic = analyze_podcast_draft(
+        draft=_good_draft(),
+        creative_brief=_brief(),
+    )
+    review = ModelSelfReviewOutput.model_validate(_model_review(score=4))
+
+    report = build_draft_quality_report(
+        deterministic=deterministic,
+        model_self_review=review,
+        editor_provider="deepseek",
+        editor_model="deepseek-v4-flash",
+        reviewer_provider="deepseek",
+        reviewer_model="deepseek-v4-pro",
+    )
+
+    assert report.reviewer_relation == "cross_tier_same_family"
+
+
+def test_short_ten_minute_draft_with_all_fives_is_capped_and_conflict_is_visible() -> None:
+    content = _good_draft().model_dump(mode="python")
+    blocks = [
+        content["podcast_script"]["opening"],
+        *[
+            paragraph
+            for section in content["podcast_script"]["sections"]
+            for paragraph in section["paragraphs"]
+        ],
+        content["podcast_script"]["closing"],
+    ]
+    lengths = [80, 140, 210, 300, 400, 299]
+    offset = 4_000
+    for block, length in zip(blocks, lengths, strict=True):
+        block["text"] = _unique_chinese(offset, length)
+        offset += length + 50
+    blocks[0]["text"] = "旧录音" + blocks[0]["text"][3:]
+    blocks[-1]["text"] = "重新开始" + blocks[-1]["text"][4:]
+
+    deterministic = analyze_podcast_draft(draft=content, creative_brief=_brief())
+    report = build_draft_quality_report(
+        deterministic=deterministic,
+        model_self_review=ModelSelfReviewOutput.model_validate(_model_review(score=5)),
+        editor_provider="deepseek",
+        editor_model="deepseek-v4-flash",
+        reviewer_provider="deepseek",
+        reviewer_model="deepseek-v4-flash",
+    )
+
+    assert deterministic.metrics.script_character_count == 1_429
+    assert deterministic.metrics.estimated_duration_minutes == 5.1
+    assert deterministic.has_blocker is False
+    assert deterministic.has_warning is True
+    assert report.experimental_model_score == 100
+    assert report.experimental_uncapped_overall_score is not None
+    assert report.experimental_uncapped_overall_score >= 80
+    assert report.code_owned_score_cap == 59
+    assert report.experimental_overall_score == 59
+    assert report.experimental_overall_score < 80
+    assert report.decision == "revision_recommended"
+    assert [reason.code for reason in report.score_cap_reasons] == [
+        "duration_coverage_below_60_percent_cap",
+        "deterministic_warning_cap",
+    ]
+    assert len(report.model_review_conflicts) == 1
+    conflict = report.model_review_conflicts[0]
+    assert conflict.code == "duration_vs_brief_adherence_score"
+    assert conflict.dimension == "brief_adherence"
+    assert conflict.model_score == 5
+    assert conflict.deterministic_finding_codes == ["duration.outside_target_range"]
+
+    missing_conflict = report.model_dump(mode="python")
+    missing_conflict["model_review_conflicts"] = []
+    with pytest.raises(ValueError):
+        DraftQualityReport.model_validate(missing_conflict)
+
+
+@pytest.mark.parametrize(
+    ("character_count", "model_score", "expected_status", "maximum_allowed"),
+    [
+        (1_000, 3, "blocker", 2),
+        (2_100, 4, "warning", 3),
+    ],
+)
+def test_duration_conflict_threshold_matches_reviewer_prompt(
+    character_count: int,
+    model_score: int,
+    expected_status: str,
+    maximum_allowed: int,
+) -> None:
+    deterministic = analyze_podcast_draft(
+        draft=_draft_with_script_character_count(character_count),
+        creative_brief=CreativeBrief(
+            target_duration_minutes=10,
+            speaking_rate_chars_per_minute=280,
+        ),
+    )
+    report = build_draft_quality_report(
+        deterministic=deterministic,
+        model_self_review=ModelSelfReviewOutput.model_validate(_model_review(score=model_score)),
+    )
+
+    duration_finding = next(
+        finding for finding in deterministic.findings if finding.code.startswith("duration.")
+    )
+    assert duration_finding.status == expected_status
+    assert len(report.model_review_conflicts) == 1
+    conflict = report.model_review_conflicts[0]
+    assert conflict.model_score == model_score
+    assert f"最多支持 {maximum_allowed}/5" in conflict.explanation
+
+
+def test_legacy_v1_quality_report_still_deserializes_without_v2_calibration_fields() -> None:
+    deterministic = analyze_podcast_draft(
+        draft=_good_draft(),
+        creative_brief=_brief(),
+    )
+    legacy = build_draft_quality_report(
+        deterministic=deterministic,
+        model_self_review=ModelSelfReviewOutput.model_validate(_model_review(score=4)),
+        scoring_formula_version=LEGACY_DRAFT_QUALITY_FORMULA_VERSION,
+    ).model_dump(mode="python")
+    for field in (
+        "experimental_uncapped_overall_score",
+        "code_owned_score_cap",
+        "score_cap_reasons",
+        "model_review_conflicts",
+    ):
+        legacy.pop(field)
+
+    restored = DraftQualityReport.model_validate(legacy)
+
+    assert restored.scoring_formula_version == LEGACY_DRAFT_QUALITY_FORMULA_VERSION
+    assert restored.experimental_uncapped_overall_score is None
+    assert restored.code_owned_score_cap is None
+    assert restored.score_cap_reasons == []
+    assert restored.model_review_conflicts == []
+    assert restored.experimental_overall_score == round(
+        deterministic.deterministic_score * 0.6 + 80 * 0.4,
+        2,
+    )
+
+    legacy["experimental_overall_score"] = 99
+    with pytest.raises(ValueError, match="experimental_overall_score"):
+        DraftQualityReport.model_validate(legacy)
 
 
 def test_objective_blocker_cannot_be_overridden_by_model_and_failure_degrades() -> None:

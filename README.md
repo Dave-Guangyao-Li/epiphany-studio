@@ -116,6 +116,12 @@ balance. Live summaries keep totals grouped by currency instead of adding
 unlike amounts. No database migration is required, and existing USD traces
 remain historical USD estimates.
 
+M3.5 can route only `review_podcast_draft` to
+`EPIPHANY_DEEPSEEK_REVIEWER_MODEL=deepseek-v4-flash|deepseek-v4-pro`; leaving
+the variable unset reuses the primary model. This changes the Reviewer call's
+price and latency, not the code-owned quality rules. Editor and Reviewer
+attempts are still recorded separately in the ModelCall ledger.
+
 No key or personal source material belongs in Git.
 
 Official references:
@@ -345,7 +351,9 @@ append-only and separate. The unauthenticated MVP treats `feedback_origin` as a
 caller-declared marker, not verified human identity; its own E2E always uses
 `synthetic_test`, which is stored with `human_signal_eligible=false`.
 
-The guarded v6 E2E can run end to end with Fake or DeepSeek:
+At M3.4 this guarded E2E created workflow `v6`. The current M3.5 code creates
+`v7`, while persisted v6 Runs remain resumable under their frozen task, prompt,
+deterministic-rule, and report contracts:
 
 ```bash
 cd backend
@@ -382,6 +390,85 @@ See the
 [M3.3 learning chapter](docs/learning/m3-3-creative-brief-material-readiness.zh-CN.md)
 and
 [M3.4 Draft Quality Report chapter](docs/learning/m3-4-draft-quality-report.zh-CN.md).
+
+M3.5 calibrates that quality boundary instead of treating a higher model score
+as permission to ignore a measurable defect. Duration counts only the actual
+spoken fields—opening text, section paragraph text, and closing text. Titles,
+section headings, source references, `[S1]` labels, source indexes, Show Notes,
+and rendered Markdown are excluded.
+
+Because the persisted Reviewer Task input, Prompt, deterministic rules, and
+report semantics changed, new quality-enabled Runs use workflow `v7`. A v6 Run
+already waiting for material, queued for review, or recovering a lease continues
+with M3.4's v1 contracts; it is never silently converted to v7.
+For the narrower pre-release case where a v6 Run already persisted a
+current-contract Reviewer Task with deterministic facts, recovery follows that
+durable Task contract and keeps the v2 cap/conflict semantics.
+
+The Reviewer now receives a bounded set of **trusted deterministic facts**
+derived by application code from the exact persisted Draft: target and
+estimated duration, character count, duration coverage/status, citation
+coverage, finding counts, and versioned Chinese-style counts. Its input
+validator recomputes the exact spoken-text facts, so stale or altered facts are
+rejected. The model may explain those facts, but it cannot recalculate or
+overrule them.
+
+The aggregate is now non-compensatory. Application code first preserves the
+raw six-dimension model score and uncapped weighted score, then applies the
+strictest applicable cap:
+
+- any deterministic blocker: at most 39;
+- estimated duration below 60% of the target: at most 59;
+- any deterministic warning: at most 79.
+
+This makes a report with a serious duration gap visibly fail even when the
+Reviewer is generous. Chinese wording heuristics report observable patterns,
+not an "AI detector." Versioned categories such as parallel contrast,
+escalation, generic transitions/codas, and over-politeness can warn only after
+conservative repetition thresholds. Legacy overlapping
+`style.template_phrases` and `style.not_but_pattern` findings remain
+informational for report compatibility and do not deduct twice. A
+`must_include` literal miss is also informational: semantic coverage belongs
+to the evidence-bearing Reviewer rather than a substring search.
+
+The frozen-input comparison command can evaluate Flash and Pro on the same
+Draft without regenerating it. Passing `--recompute-current-rules` rebuilds the
+deterministic snapshot under the current rule version before both calls. One
+sample cannot establish that one tier is generally better; it only exposes
+score, schema, latency, and cost differences for that exact input.
+
+The realistic M3.5 fixture now passes the released v7 path end to end with Fake
+Provider as `run_f41eac8520cd4b47b97cc1181acb3d63`: all checks passed across
+6 Tasks, 11 pre-feedback Artifacts, 5 zero-cost calls, two process restarts,
+and one idempotent feedback replay. The live DeepSeek workflow
+`run_0af27a7596474a92ba79e298e912e35e` was a pre-release M3.5 workflow-v6
+development snapshot and also reached `succeeded`; its 2,055
+spoken characters support an estimated 7.34 of the requested 15 minutes, and
+the five calls cost a locally estimated CNY 0.089433. The first report file
+showed two false harness checks because the checker still assumed one model
+for both Editor and Reviewer and the old report contract. Offline validation
+under the routed-model/current contract makes both checks true; the product
+workflow itself had already succeeded.
+
+Current-rule reanalysis gives deterministic 62 with 1 blocker, 1 warning, and
+2 informational observations, so the final score remains capped at 39. On the
+first frozen historical snapshot, Flash scored 76.67 and Pro 80, but both
+finished at 39. Under current rules, Flash returned a strict-schema failure;
+Pro scored 70 raw and again finished at 39. Estimated comparison-call costs
+were CNY 0.013950 and CNY 0.044008 respectively. These are one synthetic
+calibration case and local estimates, not a general model benchmark or a
+provider invoice.
+
+Append-only user feedback still does not rewrite a Draft. M3.6 is only the
+next planned slice: an explicit feedback-driven child Revision Run will keep
+the original Draft/report immutable, select feedback deliberately, generate a
+new candidate, and run quality evaluation again. No automatic score-chasing
+loop is implemented.
+
+See the
+[M3.5 learning chapter](docs/learning/m3-5-chinese-quality-calibration.zh-CN.md)
+and
+[Chinese podcast style research note](docs/research/chinese-podcast-style-signals.zh-CN.md).
 
 ## License
 

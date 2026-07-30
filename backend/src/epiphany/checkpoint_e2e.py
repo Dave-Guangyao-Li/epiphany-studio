@@ -181,7 +181,7 @@ def load_fixture(path: Path) -> dict[str, Any]:
     ):
         raise E2EFlowError(stage="fixture", code="fixture_required_field_invalid")
     initial_sources = payload.get("initial_sources")
-    if not isinstance(initial_sources, list) or len(initial_sources) != 3:
+    if not isinstance(initial_sources, list) or not 3 <= len(initial_sources) <= 5:
         raise E2EFlowError(stage="fixture", code="fixture_initial_sources_invalid")
     supplemental_source = payload.get("supplemental_source")
     if not isinstance(supplemental_source, dict):
@@ -218,12 +218,13 @@ def build_provider(
     provider_name: Literal["fake", "deepseek"],
     settings: Settings,
     api_key: str,
+    model: Literal["deepseek-v4-flash", "deepseek-v4-pro"] = LIVE_MODEL,
 ) -> ModelProvider:
     if provider_name == "fake":
         return FakeProvider()
     return DeepSeekProvider(
         api_key=api_key,
-        model=LIVE_MODEL,
+        model=model,
         billing_currency=settings.deepseek_billing_currency,
         base_url=settings.deepseek_base_url,
         max_tokens=MAX_OUTPUT_TOKENS_PER_CALL,
@@ -973,7 +974,7 @@ async def execute_e2e(
     ]
     checks = {
         "initial_sources_imported": (
-            len(imported_initial) == 3
+            len(imported_initial) == len(fixture["initial_sources"])
             and all(imported["source"]["segment_count"] >= 1 for imported in imported_initial)
         ),
         "waiting_checkpoint_reached": (

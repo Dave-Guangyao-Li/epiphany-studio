@@ -9,9 +9,16 @@ from sqlalchemy.orm import selectinload
 
 from epiphany.draft_quality import (
     analyze_podcast_draft,
+    build_deterministic_quality_facts,
     build_draft_quality_report,
 )
 from epiphany.draft_quality_schemas import (
+    DRAFT_QUALITY_FORMULA_VERSION,
+    DRAFT_QUALITY_RULES_VERSION,
+    LEGACY_DRAFT_QUALITY_FORMULA_VERSION,
+    LEGACY_DRAFT_QUALITY_RULES_VERSION,
+    LEGACY_MODEL_REVIEW_TASK_VERSION,
+    MODEL_REVIEW_TASK_VERSION,
     REVIEW_PODCAST_DRAFT,
     DeterministicDraftQualityResult,
     ModelSelfReviewOutput,
@@ -48,7 +55,12 @@ SCAFFOLD_RESEARCH_WORKFLOW_VERSION = "v2"
 INTERVIEW_RESEARCH_WORKFLOW_VERSION = "v3"
 EDITOR_RESEARCH_WORKFLOW_VERSION = "v4"
 MATERIAL_READINESS_WORKFLOW_VERSION = "v5"
-QUALITY_REVIEW_WORKFLOW_VERSION = "v6"
+LEGACY_QUALITY_REVIEW_WORKFLOW_VERSION = "v6"
+QUALITY_REVIEW_WORKFLOW_VERSION = "v7"
+QUALITY_REVIEW_WORKFLOW_VERSIONS = (
+    LEGACY_QUALITY_REVIEW_WORKFLOW_VERSION,
+    QUALITY_REVIEW_WORKFLOW_VERSION,
+)
 
 
 class Orchestrator:
@@ -113,11 +125,11 @@ class Orchestrator:
             not in {
                 EDITOR_RESEARCH_WORKFLOW_VERSION,
                 MATERIAL_READINESS_WORKFLOW_VERSION,
-                QUALITY_REVIEW_WORKFLOW_VERSION,
+                *QUALITY_REVIEW_WORKFLOW_VERSIONS,
             }
             or run.status != RunStatus.RUNNING
         ):
-            raise ValueError("editor can only be queued for a running v4/v5/v6 episode workflow")
+            raise ValueError("editor can only be queued for a running v4/v5/v6/v7 episode workflow")
 
         task = await self._enqueue_task(
             session,
@@ -159,7 +171,7 @@ class Orchestrator:
     ) -> None:
         if (
             run.workflow_type == "episode-research"
-            and run.workflow_version == QUALITY_REVIEW_WORKFLOW_VERSION
+            and run.workflow_version in QUALITY_REVIEW_WORKFLOW_VERSIONS
             and failed_task.kind == REVIEW_PODCAST_DRAFT
         ):
             await self._complete_quality_review_unavailable(
@@ -501,7 +513,7 @@ class Orchestrator:
             INTERVIEW_RESEARCH_WORKFLOW_VERSION,
             EDITOR_RESEARCH_WORKFLOW_VERSION,
             MATERIAL_READINESS_WORKFLOW_VERSION,
-            QUALITY_REVIEW_WORKFLOW_VERSION,
+            *QUALITY_REVIEW_WORKFLOW_VERSIONS,
         }:
             raise ValueError(
                 f"unsupported episode-research workflow version: {run.workflow_version}"
@@ -634,7 +646,7 @@ class Orchestrator:
             )
         elif run.workflow_version in {
             MATERIAL_READINESS_WORKFLOW_VERSION,
-            QUALITY_REVIEW_WORKFLOW_VERSION,
+            *QUALITY_REVIEW_WORKFLOW_VERSIONS,
         }:
             await self._pause_for_material_readiness(
                 session,
@@ -668,9 +680,9 @@ class Orchestrator:
         if run.workflow_version not in {
             EDITOR_RESEARCH_WORKFLOW_VERSION,
             MATERIAL_READINESS_WORKFLOW_VERSION,
-            QUALITY_REVIEW_WORKFLOW_VERSION,
+            *QUALITY_REVIEW_WORKFLOW_VERSIONS,
         }:
-            raise ValueError("editor task is only supported by the v4/v5/v6 episode workflow")
+            raise ValueError("editor task is only supported by the v4/v5/v6/v7 episode workflow")
         if completed_task.parent_task_id is not None:
             raise ValueError("editor task must be a sequential root task")
         if completed_task.output_artifact_id is None:
@@ -701,7 +713,7 @@ class Orchestrator:
             },
         )
         run.output_artifact_id = artifact.id
-        if run.workflow_version == QUALITY_REVIEW_WORKFLOW_VERSION:
+        if run.workflow_version in QUALITY_REVIEW_WORKFLOW_VERSIONS:
             await self._enqueue_draft_quality_review(
                 session,
                 run=run,
@@ -735,8 +747,16 @@ class Orchestrator:
             draft=draft_content,
             creative_brief=run.input_json["creative_brief"],
             config=run.input_json["draft_quality"],
+            rules_version=(
+                LEGACY_DRAFT_QUALITY_RULES_VERSION
+                if run.workflow_version == LEGACY_QUALITY_REVIEW_WORKFLOW_VERSION
+                else DRAFT_QUALITY_RULES_VERSION
+            ),
         )
-        metrics_key = f"draft-metrics:{run.id}:{draft_artifact.id}:v1"
+        metrics_key_suffix = (
+            "v1" if run.workflow_version == LEGACY_QUALITY_REVIEW_WORKFLOW_VERSION else "v2"
+        )
+        metrics_key = f"draft-metrics:{run.id}:{draft_artifact.id}:{metrics_key_suffix}"
         metrics_artifact = (
             await session.execute(select(Artifact).where(Artifact.idempotency_key == metrics_key))
         ).scalar_one_or_none()
@@ -784,6 +804,9 @@ class Orchestrator:
                     ),
                 },
             )
+        deterministic = DeterministicDraftQualityResult.model_validate(
+            metrics_artifact.content_json
+        )
 
         allowed_keys = set(editor_output_reference_keys(draft_content))
         segment_candidates = [
@@ -801,30 +824,54 @@ class Orchestrator:
         if missing_keys:
             raise ValueError("draft quality review source material is unavailable")
         sorted_keys = sorted(allowed_keys)
-        review_input = ModelSelfReviewTaskInput.model_validate(
-            {
-                "task_kind": REVIEW_PODCAST_DRAFT,
-                "draft_artifact_id": draft_artifact.id,
-                "creative_brief": run.input_json["creative_brief"],
-                "quality_config": run.input_json["draft_quality"],
-                "podcast_draft": draft_content,
-                "allowed_source_refs": [
-                    {
-                        "source_id": source_id,
-                        "source_segment_id": segment_id,
-                    }
-                    for source_id, segment_id in sorted_keys
-                ],
-                "referenced_source_segments": [
-                    {
-                        "source_id": source_id,
-                        "source_segment_id": segment_id,
-                        "text": str(segments_by_key[(source_id, segment_id)]["text"]),
-                    }
-                    for source_id, segment_id in sorted_keys
-                ],
-            }
-        ).model_dump(mode="json")
+        review_payload: dict[str, Any] = {
+            "task_kind": REVIEW_PODCAST_DRAFT,
+            "draft_artifact_id": draft_artifact.id,
+            "creative_brief": run.input_json["creative_brief"],
+            "quality_config": run.input_json["draft_quality"],
+            "podcast_draft": draft_content,
+            "allowed_source_refs": [
+                {
+                    "source_id": source_id,
+                    "source_segment_id": segment_id,
+                }
+                for source_id, segment_id in sorted_keys
+            ],
+            "referenced_source_segments": [
+                {
+                    "source_id": source_id,
+                    "source_segment_id": segment_id,
+                    "text": str(segments_by_key[(source_id, segment_id)]["text"]),
+                }
+                for source_id, segment_id in sorted_keys
+            ],
+        }
+        if run.workflow_version == QUALITY_REVIEW_WORKFLOW_VERSION:
+            review_payload.update(
+                {
+                    "review_contract_version": MODEL_REVIEW_TASK_VERSION,
+                    "deterministic_metrics_artifact_id": metrics_artifact.id,
+                    "deterministic_quality_facts": build_deterministic_quality_facts(
+                        deterministic
+                    ).model_dump(mode="json"),
+                }
+            )
+        else:
+            review_payload["review_contract_version"] = LEGACY_MODEL_REVIEW_TASK_VERSION
+
+        parsed_review_input = ModelSelfReviewTaskInput.model_validate(review_payload)
+        review_input = parsed_review_input.model_dump(
+            mode="json",
+            exclude=(
+                {
+                    "review_contract_version",
+                    "deterministic_metrics_artifact_id",
+                    "deterministic_quality_facts",
+                }
+                if run.workflow_version == LEGACY_QUALITY_REVIEW_WORKFLOW_VERSION
+                else None
+            ),
+        )
         review_task = await self._enqueue_task(
             session,
             run=run,
@@ -870,11 +917,11 @@ class Orchestrator:
         completed_task: Task,
     ) -> None:
         if (
-            run.workflow_version != QUALITY_REVIEW_WORKFLOW_VERSION
+            run.workflow_version not in QUALITY_REVIEW_WORKFLOW_VERSIONS
             or completed_task.parent_task_id is not None
             or completed_task.output_artifact_id is None
         ):
-            raise ValueError("quality Reviewer is only supported by a sequential v6 workflow")
+            raise ValueError("quality Reviewer is only supported by a sequential v6/v7 workflow")
 
         review_artifact = await session.get(Artifact, completed_task.output_artifact_id)
         if (
@@ -891,9 +938,10 @@ class Orchestrator:
             or draft_artifact.kind != f"{BUILD_PODCAST_DRAFT}_result"
         ):
             raise ValueError("quality Reviewer draft artifact is missing or invalid")
-        deterministic = await self._load_deterministic_quality(
+        deterministic, review_contract_version = await self._load_deterministic_quality(
             session,
             run=run,
+            reviewer_task=completed_task,
             draft_artifact_id=draft_artifact.id,
         )
         review = ModelSelfReviewOutput.model_validate(
@@ -907,6 +955,7 @@ class Orchestrator:
             model_self_review=review,
             reviewer_artifact=review_artifact,
             reviewer_task_id=completed_task.id,
+            review_contract_version=review_contract_version,
         )
         await append_event(
             session,
@@ -954,9 +1003,10 @@ class Orchestrator:
             or draft_artifact.kind != f"{BUILD_PODCAST_DRAFT}_result"
         ):
             raise ValueError("failed quality Reviewer has no valid Draft to preserve")
-        deterministic = await self._load_deterministic_quality(
+        deterministic, review_contract_version = await self._load_deterministic_quality(
             session,
             run=run,
+            reviewer_task=failed_task,
             draft_artifact_id=draft_artifact.id,
         )
         report_artifact = await self._persist_draft_quality_report(
@@ -968,6 +1018,7 @@ class Orchestrator:
             reviewer_artifact=None,
             reviewer_task_id=failed_task.id,
             unavailable_reason=failed_task.error_code or "model_self_review_unavailable",
+            review_contract_version=review_contract_version,
         )
         await append_event(
             session,
@@ -992,18 +1043,55 @@ class Orchestrator:
         session: AsyncSession,
         *,
         run: Run,
+        reviewer_task: Task,
         draft_artifact_id: str,
-    ) -> DeterministicDraftQualityResult:
-        metrics_artifact = (
-            await session.execute(
-                select(Artifact).where(
-                    Artifact.idempotency_key == f"draft-metrics:{run.id}:{draft_artifact_id}:v1"
-                )
+    ) -> tuple[DeterministicDraftQualityResult, str]:
+        """Load metrics using the persisted Reviewer contract, not only the Run label.
+
+        An M3.5 pre-release process could persist a workflow-v6 Run whose
+        Reviewer Task already contained the current deterministic-facts
+        contract. The Task payload is the durable execution instruction, so a
+        restart must not silently downgrade it to the M3.4 formula.
+        """
+
+        review_input = ModelSelfReviewTaskInput.model_validate(reviewer_task.input_json)
+        if review_input.draft_artifact_id != draft_artifact_id:
+            raise ValueError("quality Reviewer task references a different Draft")
+
+        if review_input.review_contract_version == MODEL_REVIEW_TASK_VERSION:
+            metrics_artifact = await session.get(
+                Artifact,
+                review_input.deterministic_metrics_artifact_id,
             )
-        ).scalar_one_or_none()
-        if metrics_artifact is None or metrics_artifact.kind != "draft_metrics_report":
+        else:
+            metrics_artifact = (
+                await session.execute(
+                    select(Artifact).where(
+                        Artifact.idempotency_key == f"draft-metrics:{run.id}:{draft_artifact_id}:v1"
+                    )
+                )
+            ).scalar_one_or_none()
+        if (
+            metrics_artifact is None
+            or metrics_artifact.run_id != run.id
+            or metrics_artifact.kind != "draft_metrics_report"
+        ):
             raise ValueError("deterministic Draft metrics are missing")
-        return DeterministicDraftQualityResult.model_validate(metrics_artifact.content_json)
+        deterministic = DeterministicDraftQualityResult.model_validate(
+            metrics_artifact.content_json
+        )
+        if review_input.review_contract_version == MODEL_REVIEW_TASK_VERSION:
+            if (
+                deterministic.metrics.rules_version != DRAFT_QUALITY_RULES_VERSION
+                or build_deterministic_quality_facts(deterministic)
+                != review_input.deterministic_quality_facts
+            ):
+                raise ValueError(
+                    "current quality Reviewer facts differ from persisted Draft metrics"
+                )
+        elif deterministic.metrics.rules_version != LEGACY_DRAFT_QUALITY_RULES_VERSION:
+            raise ValueError("legacy quality Reviewer must use legacy Draft metrics")
+        return deterministic, review_input.review_contract_version
 
     async def _persist_draft_quality_report(
         self,
@@ -1016,8 +1104,17 @@ class Orchestrator:
         reviewer_artifact: Artifact | None,
         reviewer_task_id: str,
         unavailable_reason: str | None = None,
+        review_contract_version: str,
     ) -> Artifact:
-        report_key = f"draft-quality:{run.id}:{draft_artifact.id}:v1"
+        scoring_formula_version = (
+            LEGACY_DRAFT_QUALITY_FORMULA_VERSION
+            if review_contract_version == LEGACY_MODEL_REVIEW_TASK_VERSION
+            else DRAFT_QUALITY_FORMULA_VERSION
+        )
+        report_key_suffix = (
+            "v1" if scoring_formula_version == LEGACY_DRAFT_QUALITY_FORMULA_VERSION else "v2"
+        )
+        report_key = f"draft-quality:{run.id}:{draft_artifact.id}:{report_key_suffix}"
         existing = (
             await session.execute(select(Artifact).where(Artifact.idempotency_key == report_key))
         ).scalar_one_or_none()
@@ -1038,6 +1135,7 @@ class Orchestrator:
             reviewer_provider=reviewer_execution.get("provider"),
             reviewer_model=reviewer_execution.get("model"),
             unavailable_reason=unavailable_reason,
+            scoring_formula_version=scoring_formula_version,
         )
         artifact = Artifact(
             run_id=run.id,
@@ -1057,7 +1155,10 @@ class Orchestrator:
                 "draft_artifact_id": draft_artifact.id,
                 "quality_report_id": artifact.id,
                 "quality_decision": report.decision,
+                "experimental_uncapped_overall_score": (report.experimental_uncapped_overall_score),
                 "experimental_overall_score": report.experimental_overall_score,
+                "code_owned_score_cap": report.code_owned_score_cap,
+                "model_review_conflict_count": len(report.model_review_conflicts),
                 "hard_blocker_count": sum(
                     finding.status == "blocker" for finding in deterministic.findings
                 ),
@@ -1098,8 +1199,15 @@ class Orchestrator:
                 "artifact_id": draft_artifact.id,
                 "quality_report_id": report_artifact.id,
                 "quality_decision": report_artifact.content_json["decision"],
+                "experimental_uncapped_overall_score": report_artifact.content_json.get(
+                    "experimental_uncapped_overall_score"
+                ),
                 "experimental_overall_score": report_artifact.content_json.get(
                     "experimental_overall_score"
+                ),
+                "code_owned_score_cap": report_artifact.content_json.get("code_owned_score_cap"),
+                "model_review_conflict_count": len(
+                    report_artifact.content_json.get("model_review_conflicts", [])
                 ),
             },
         )

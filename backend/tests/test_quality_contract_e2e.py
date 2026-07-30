@@ -7,9 +7,13 @@ from pathlib import Path
 
 from epiphany.quality_contract_e2e import (
     DEFAULT_FIXTURE_PATH,
+    _expected_reviewer_relation,
+    _model_calls_match_routed_providers,
+    _quality_report_contract_valid,
     load_quality_contract_fixture,
     main,
 )
+from epiphany.runtime.orchestrator import QUALITY_REVIEW_WORKFLOW_VERSION
 
 
 def _runtime_counts(database_path: Path) -> dict[str, int]:
@@ -51,6 +55,21 @@ def test_quality_contract_fixture_is_synthetic_and_crosses_threshold() -> None:
     assert all(source["metadata"]["synthetic"] is True for source in sources)
     assert all(source["metadata"]["contains_personal_data"] is False for source in sources)
     assert len({sha256(source["text"].encode()).hexdigest() for source in sources}) == len(sources)
+
+
+def test_m3_5_fixture_supports_four_initial_sources_and_a_fifteen_minute_brief() -> None:
+    fixture = load_quality_contract_fixture(
+        DEFAULT_FIXTURE_PATH.parent / "m3-5-chinese-quality-calibration.zh-CN.json"
+    )
+    sources = [*fixture["initial_sources"], fixture["supplemental_source"]]
+
+    assert fixture["fixture_id"] == "m3-5-chinese-quality-calibration-first-solo-home"
+    assert fixture["creative_brief"]["target_duration_minutes"] == 15
+    assert len(fixture["initial_sources"]) == 4
+    assert fixture["raw_fixture_readiness"]["initial"]["status"] == "needs_more_material"
+    assert fixture["raw_fixture_readiness"]["final"]["status"] == "ready"
+    assert all(source["metadata"]["synthetic"] is True for source in sources)
+    assert all(source["metadata"]["contains_personal_data"] is False for source in sources)
 
 
 def test_quality_contract_e2e_dry_run_creates_no_runtime_files(
@@ -104,6 +123,141 @@ def test_quality_contract_e2e_dry_run_creates_no_runtime_files(
     assert secret not in captured.err
     assert not database_path.exists()
     assert not output_dir.exists()
+
+
+def test_quality_review_preflight_exposes_trusted_flash_and_pro_routes(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    database_path = tmp_path / "review-model-routes.db"
+    output_dir = tmp_path / "review-model-routes-output"
+    monkeypatch.setenv("EPIPHANY_DEEPSEEK_API_KEY", "synthetic-preflight-key")
+
+    exit_code = main(
+        [
+            "--provider",
+            "deepseek",
+            "--quality-review",
+            "--editor-model",
+            "deepseek-v4-flash",
+            "--reviewer-model",
+            "deepseek-v4-pro",
+            "--database",
+            str(database_path),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    preflight = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert preflight["mode"] == "dry-run"
+    assert preflight["model"] == "deepseek-v4-flash"
+    assert preflight["reviewer_model"] == "deepseek-v4-pro"
+    assert preflight["quality_review_enabled"] is True
+    assert preflight["max_model_calls_per_run"] == 5
+    assert preflight["expected_cost"]["planning_ceiling"] == "0.25"
+    assert preflight["network_enabled"] is False
+    assert not database_path.exists()
+    assert not output_dir.exists()
+
+
+def test_cross_tier_reviewer_is_validated_against_its_own_model_route() -> None:
+    class ProviderIdentity:
+        name = "deepseek"
+        billing_currency = "CNY"
+
+        def __init__(self, model: str) -> None:
+            self.model = model
+
+    editor = ProviderIdentity("deepseek-v4-flash")
+    reviewer = ProviderIdentity("deepseek-v4-pro")
+    tasks = [
+        {"id": "task_editor", "kind": "build_podcast_draft"},
+        {"id": "task_reviewer", "kind": "review_podcast_draft"},
+    ]
+    calls = [
+        {
+            "task_id": "task_editor",
+            "status": "succeeded",
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "cost_currency": "CNY",
+        },
+        {
+            "task_id": "task_reviewer",
+            "status": "succeeded",
+            "provider": "deepseek",
+            "model": "deepseek-v4-pro",
+            "cost_currency": "CNY",
+        },
+    ]
+
+    relation = _expected_reviewer_relation(editor, reviewer)  # type: ignore[arg-type]
+
+    assert relation == "cross_tier_same_family"
+    assert _model_calls_match_routed_providers(
+        model_calls=calls,
+        tasks=tasks,
+        primary_provider=editor,  # type: ignore[arg-type]
+        reviewer_provider=reviewer,  # type: ignore[arg-type]
+        expected_model_calls=2,
+    )
+
+
+def test_quality_report_e2e_check_rejects_inconsistent_score_and_decision(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    database_path = tmp_path / "quality-report-integrity.db"
+    output_dir = tmp_path / "quality-report-integrity-output"
+
+    exit_code = main(
+        [
+            "--provider",
+            "fake",
+            "--quality-review",
+            "--execute",
+            "--database",
+            str(database_path),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    record = json.loads((output_dir / "draft-quality-report.json").read_text(encoding="utf-8"))
+    journey = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    report = record["report"]
+    assert exit_code == 0, captured.err
+    assert journey["passed"] is True
+    assert journey["waiting_run"]["workflow_version"] == QUALITY_REVIEW_WORKFLOW_VERSION
+    assert journey["final_run"]["workflow_version"] == QUALITY_REVIEW_WORKFLOW_VERSION
+    assert _quality_report_contract_valid(
+        report,
+        expected_reviewer_relation="same_model",
+    )
+
+    invalid_score = json.loads(json.dumps(report))
+    invalid_score["experimental_overall_score"] = (
+        0.0 if report["experimental_overall_score"] != 0.0 else 1.0
+    )
+    assert not _quality_report_contract_valid(
+        invalid_score,
+        expected_reviewer_relation="same_model",
+    )
+
+    invalid_decision = json.loads(json.dumps(report))
+    invalid_decision["decision"] = (
+        "candidate_ready_for_human_review"
+        if report["decision"] != "candidate_ready_for_human_review"
+        else "blocked"
+    )
+    assert not _quality_report_contract_valid(
+        invalid_decision,
+        expected_reviewer_relation="same_model",
+    )
 
 
 def test_quality_contract_e2e_fake_provider_runs_restart_and_resume_journey(
