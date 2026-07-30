@@ -9,6 +9,7 @@ import re
 import secrets
 import sys
 from collections.abc import Mapping, Sequence
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,9 +23,9 @@ from epiphany.editor_schemas import PodcastDraftOutput
 from epiphany.episode_markdown import contains_internal_source_identifier
 from epiphany.writing_style_ab_execute import EXECUTION_RESULT_VERSION
 
-BLIND_MANIFEST_VERSION = "writing_style_ab_blind_v1"
+BLIND_MANIFEST_VERSION = "writing_style_ab_blind_v2"
 BLIND_RATING_VERSION = "writing_style_ab_blind_rating_v1"
-BLIND_REVEAL_VERSION = "writing_style_ab_blind_reveal_v1"
+BLIND_REVEAL_VERSION = "writing_style_ab_blind_reveal_v2"
 ARMS = ("without_sample", "with_sample")
 CANDIDATES = ("A", "B")
 _MARKDOWN_CONTROL = re.compile(r"([\\`*_[\]{}()#+!|>\-])")
@@ -241,18 +242,81 @@ def _render_script(candidate: str, draft: PodcastDraftOutput) -> str:
     return markdown
 
 
+def _spoken_units(draft: PodcastDraftOutput) -> tuple[str, ...]:
+    return (
+        draft.podcast_script.opening.text,
+        *(
+            paragraph.text
+            for section in draft.podcast_script.sections
+            for paragraph in section.paragraphs
+        ),
+        draft.podcast_script.closing.text,
+    )
+
+
+def _normalized_spoken_text(value: str) -> str:
+    return "".join(value.split()).casefold()
+
+
+def _draft_distinctness(drafts: Mapping[str, PodcastDraftOutput]) -> dict[str, Any]:
+    units = {
+        arm: tuple(_normalized_spoken_text(text) for text in _spoken_units(drafts[arm]))
+        for arm in ARMS
+    }
+    left, right = (units[arm] for arm in ARMS)
+    maximum_count = max(len(left), len(right))
+    exact_match_count = sum(
+        index < len(left) and index < len(right) and left[index] == right[index]
+        for index in range(maximum_count)
+    )
+    exact_overlap = exact_match_count / maximum_count if maximum_count else 1.0
+    similarity = SequenceMatcher(
+        None,
+        "\n".join(left),
+        "\n".join(right),
+        autojunk=False,
+    ).ratio()
+    return {
+        "minimum_unit_count": min(len(left), len(right)),
+        "maximum_unit_count": maximum_count,
+        "aligned_exact_match_count": exact_match_count,
+        "exact_overlap_ratio": round(exact_overlap, 4),
+        "normalized_character_similarity": round(similarity, 4),
+        "different_unit_count": maximum_count - exact_match_count,
+    }
+
+
+def _distinctness_policy(distinctness: Mapping[str, Any]) -> tuple[str, str]:
+    try:
+        exact_overlap = float(distinctness["exact_overlap_ratio"])
+        character_similarity = float(distinctness["normalized_character_similarity"])
+        different_count = int(distinctness["different_unit_count"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise BlindSourceInvalid("Draft distinctness metrics are invalid") from error
+    if not 0 <= exact_overlap <= 1 or not 0 <= character_similarity <= 1 or different_count < 0:
+        raise BlindSourceInvalid("Draft distinctness metrics are out of range")
+    low_distinctness = exact_overlap >= 0.70 or character_similarity >= 0.90
+    return (
+        ("inconclusive_low_distinctness", "directional_only")
+        if low_distinctness
+        else ("distinguishable", "blind_comparison")
+    )
+
+
 def _commitment_payload(
     *,
     mapping: Mapping[str, str],
     salt: str,
     source_manifest_sha256: str,
     candidate_sha256: Mapping[str, str],
+    distinctness: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
         "mapping": dict(mapping),
         "salt": salt,
         "source_manifest_sha256": source_manifest_sha256,
         "candidate_sha256": dict(candidate_sha256),
+        "distinctness": dict(distinctness),
     }
 
 
@@ -282,6 +346,8 @@ def prepare_blind_experiment(
         candidate: hashlib.sha256(text.encode("utf-8")).hexdigest()
         for candidate, text in markdown.items()
     }
+    distinctness = _draft_distinctness(drafts)
+    decision, interpretation = _distinctness_policy(distinctness)
     source_manifest_hash = _json_sha256(source_manifest)
     salt = secrets.token_hex(32)
     commitment = _json_sha256(
@@ -290,6 +356,7 @@ def prepare_blind_experiment(
             salt=salt,
             source_manifest_sha256=source_manifest_hash,
             candidate_sha256=candidate_hashes,
+            distinctness=distinctness,
         )
     )
     public_manifest = {
@@ -304,6 +371,9 @@ def prepare_blind_experiment(
         },
         "mapping_commitment_sha256": commitment,
         "source_manifest_sha256": source_manifest_hash,
+        "distinctness": distinctness,
+        "decision": decision,
+        "human_rating_interpretation": interpretation,
         "treatment_hidden": True,
     }
     private_mapping = {
@@ -313,6 +383,7 @@ def prepare_blind_experiment(
         "mapping_commitment_sha256": commitment,
         "source_manifest_sha256": source_manifest_hash,
         "candidate_sha256": candidate_hashes,
+        "distinctness": distinctness,
     }
     rating_template = {
         "candidate_ratings": {
@@ -353,6 +424,12 @@ def _load_public_state(blind_dir: Path) -> tuple[dict[str, Any], dict[str, str]]
     manifest = _read_json(paths["manifest"])
     if manifest.get("schema_version") != BLIND_MANIFEST_VERSION:
         raise BlindSourceInvalid("blind manifest has an unsupported version")
+    decision, interpretation = _distinctness_policy(manifest.get("distinctness", {}))
+    if (
+        manifest.get("decision") != decision
+        or manifest.get("human_rating_interpretation") != interpretation
+    ):
+        raise BlindSourceInvalid("blind manifest distinctness policy is inconsistent")
     hashes: dict[str, str] = {}
     try:
         for candidate in CANDIDATES:
@@ -411,6 +488,7 @@ def _verify_private_mapping(
         salt=str(private.get("salt", "")),
         source_manifest_sha256=str(public.get("source_manifest_sha256", "")),
         candidate_sha256=candidate_hashes,
+        distinctness=public.get("distinctness", {}),
     )
     commitment = _json_sha256(payload)
     if commitment != public.get("mapping_commitment_sha256") or commitment != private.get(
@@ -435,9 +513,13 @@ def reveal_blind_experiment(
         private=private,
         candidate_hashes=candidate_hashes,
     )
-    source_manifest, _, qualities = _load_experiment(experiment_dir)
+    source_manifest, drafts, qualities = _load_experiment(experiment_dir)
     if _json_sha256(source_manifest) != public.get("source_manifest_sha256"):
         raise BlindCandidateTampered("M3.7b manifest changed after blind preparation")
+    distinctness = _draft_distinctness(drafts)
+    if distinctness != public.get("distinctness") or distinctness != private.get("distinctness"):
+        raise BlindCandidateTampered("Draft distinctness changed after blind preparation")
+    decision, interpretation = _distinctness_policy(distinctness)
     rating = _read_json(paths["rating"])
     if (
         rating.get("schema_version") != BLIND_RATING_VERSION
@@ -488,6 +570,13 @@ def reveal_blind_experiment(
         "mapping": mapping,
         "human_rating": human_rating,
         "candidate_summaries": summaries,
+        "distinctness": distinctness,
+        "human_rating_interpretation": interpretation,
+        "experiment_conclusion": (
+            "inconclusive"
+            if decision == "inconclusive_low_distinctness"
+            else "directional_human_evidence"
+        ),
         "winner_selected": False,
     }
     if paths["reveal"].exists():

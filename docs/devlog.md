@@ -44,10 +44,26 @@
   experiment mechanism, not the effectiveness of a user's private writing
   Sample. A blind human can still assess naturalness and recordability, while
   genuine personal-style validation is deferred until consented UI onboarding.
-- Prepared two private Candidate A/B files and a salted mapping commitment
-  without revealing treatment. One human blind rating and post-rating reveal
-  remain the hard M3 exit criterion; general benchmarking and blind-rating UI
-  are out of scope.
+- Stored the human rating before reveal. Candidate A received voice-match 3/5
+  and recordability 3/5; Candidate B received 2/5 and 3/5. The user made a
+  low-confidence forced choice for A, noting that its opening was slightly
+  closer but still needed more concrete lived detail and that the latter parts
+  of both Drafts were nearly identical.
+- Revealed A as `with_sample` and B as `without_sample`, but did not report a
+  winner. Deterministic comparison found 9 of 10 spoken units exactly equal,
+  exact overlap 0.90, normalized character similarity 0.9638, and only the
+  opening as a different spoken unit.
+- Versioned the blind manifest and reveal as v2. Distinctness is committed with
+  the mapping and candidate hashes; exact overlap >= 0.70 or normalized
+  character similarity >= 0.90 produces
+  `inconclusive_low_distinctness / directional_only`. The original v1 rating
+  evidence was preserved rather than rewritten or regenerated.
+- Passed all 310 backend tests, focused experiment tests, Ruff lint/format,
+  diff check, a clean Alembic upgrade through `0004_run_lineage`, and
+  `alembic check`.
+- Closed and froze M3. General benchmarking, automatic winner selection, more
+  paid pairs, and a blind-rating UI remain out of scope. The next slice is
+  M4.1 replayable SSE, followed by the M5.1 minimal Run Trace UI.
 
 ### M3.7a frozen-input writing-style A/B preflight
 

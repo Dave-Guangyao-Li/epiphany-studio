@@ -81,7 +81,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M3.5 | 只按口播正文估时、校准中文风格信号，并阻止模型高分掩盖硬性问题 | 已完成并合并 | `1fc84de` |
 | M3.6 | 用授权写作样本约束风格，并由用户显式创建可追溯 Revision 子 Run | 292 tests + Fake E2E 已验证；真实 DeepSeek E2E 待执行 | `f418331`、`ab55b6b`、`53bb478` |
 | M3.7a | 冻结同一份 v8 Editor 输入，证明 Sample A/B 只改变写作风格上下文 | 308 tests + Fake v8 手动预检通过；零模型调用 | 本次 focused commit |
-| M3.7b/c | 有界生成两稿、同条件 Reviewer、匿名真人盲评与揭盲 | 309 tests + DeepSeek 4/4 调用通过；等待真人盲评 | 本次 focused commit |
+| M3.7b/c | 有界生成两稿、同条件 Reviewer、匿名真人盲评与揭盲 | 310 tests + DeepSeek 4/4 调用 + 真人揭盲通过；因区分度不足结论为 inconclusive，M3 已冻结 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -235,6 +235,12 @@ M3.7b/c 在同一冻结输入上最多执行两次 Editor 和两次 Reviewer。�
 个人实验，不修改原 Run，也不扩展生产 API 或数据库。完整操作与故障判断见
 [M3.7b/c 学习章节](m3-7bc-controlled-writing-style-experiment.zh-CN.md)。
 
+首个 pair 已完成真人评分和揭盲：有 Sample 的 A 获得 3/5 声音匹配，无
+Sample 的 B 为 2/5，两稿可录性均为 3/5。但 10 个口播单元中 9 个逐字相同，
+字符相似度 0.9638，因此结果只能是
+`inconclusive_low_distinctness / directional_only`。blind v2 会在未来的
+盲评中自动执行这项检查，避免从几乎相同的候选中制造“赢家”。
+
 用户反馈与自动报告分开保存。自动 E2E 使用的 `synthetic_test` 永远是
 `human_signal_eligible=false`。当前无鉴权 MVP 的 origin 是调用方自报标签，
 不是已验证真人身份。详细原理、Swagger 和测试命令见
@@ -292,8 +298,8 @@ Run 使用 16,667 input tokens、9,468 output tokens、73,018 ms Provider
 - Flash 与 Pro 属于同一 DeepSeek 家族，不等于跨家族独立裁判；
 - 已能显式生成 Revision 子 Run，但尚未做真实 DeepSeek M3.6 E2E 与本人
   写作样本内容复核；
-- M3.7b/c 的执行与盲评工具及一次真实 DeepSeek 单 pair 已完成，但尚未保存
-  本人盲评和揭盲结论；单 pair 也不能证明对所有主题有效；
+- M3.7b/c 的一次真实 DeepSeek 单 pair、本人盲评和揭盲均已完成，但候选区分
+  度不足，不能证明合成 Sample 有效，更不能代表真实个人写作 Sample；
 - comparison 只给出差异证据，不会替用户选择最终稿；
 - 尚未提供可视化采访脚手架和播客稿 editor；
 - M3.2 的 Editor 已通过合成素材真实调用，但尚未使用个人隐私素材验收；

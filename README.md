@@ -533,10 +533,20 @@ be reconciled with the provider dashboard before any rerun.
 
 The first bounded live pair completed all four calls without retry: 42,503
 input tokens, 9,579 output tokens, and an estimated CNY 0.117905. Both Drafts
-remained duration-blocked despite high model-review scores. Candidate A/B are
-prepared, but treatment stays hidden until the human blind rating is stored.
-The Source and writing Sample are synthetic fixtures, so this proves the live
-experiment mechanism rather than the effectiveness of a user's private Sample.
+remained duration-blocked despite high model-review scores. The stored human
+blind rating weakly preferred Candidate A; reveal showed A used the Sample and
+B did not. Voice-match ratings were 3/5 versus 2/5, while both recordability
+ratings were 3/5.
+
+That preference is intentionally **not** reported as a win. Nine of ten spoken
+units were exactly identical and normalized character similarity was 0.9638,
+so the experiment conclusion is `inconclusive_low_distinctness`. Blind v2 now
+commits deterministic distinctness metrics and treats exact overlap >= 0.70 or
+character similarity >= 0.90 as directional-only human evidence. The Source
+and writing Sample are synthetic fixtures, so this validates the live
+mechanism but not the effectiveness of a user's private Sample. M3 is complete
+and frozen; the next slice is M4.1 replayable SSE, followed by the M5.1 minimal
+Run Trace UI.
 
 See the
 [M3.6 learning chapter](docs/learning/m3-6-guided-revision-writing-style.zh-CN.md)

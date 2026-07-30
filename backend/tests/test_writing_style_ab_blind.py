@@ -43,14 +43,34 @@ def _rating() -> dict[str, object]:
     }
 
 
-async def _prepared_pair(tmp_path: Path) -> tuple[Path, Path]:
+def _replace_spoken_units(draft: dict[str, object], prefix: str) -> None:
+    script = draft["podcast_script"]  # type: ignore[index]
+    script["opening"]["text"] = f"{prefix}开场"  # type: ignore[index]
+    for section_index, section in enumerate(script["sections"]):  # type: ignore[index]
+        for paragraph_index, paragraph in enumerate(section["paragraphs"]):
+            paragraph["text"] = f"{prefix}段落{section_index}-{paragraph_index}"
+    script["closing"]["text"] = f"{prefix}收束"  # type: ignore[index]
+
+
+async def _prepared_pair(
+    tmp_path: Path,
+    *,
+    identical: bool = False,
+) -> tuple[Path, Path]:
     first_draft = _editor_draft("第一份")
-    first_draft["podcast_script"]["opening"]["text"] = (  # type: ignore[index]
-        "<script>alert('x')</script>\n# 模型注入的标题"
-    )
+    second_draft = _editor_draft("第二份")
+    if identical:
+        first_draft = _editor_draft("同一份")
+        second_draft = deepcopy(first_draft)
+    else:
+        _replace_spoken_units(first_draft, "甲完全不同的叙述")
+        _replace_spoken_units(second_draft, "乙另一套表达")
+        first_draft["podcast_script"]["opening"]["text"] = (  # type: ignore[index]
+            "<script>alert('x')</script>\n# 模型注入的标题"
+        )
     editor = ScriptedProvider(
         model="deepseek-v4-flash",
-        outputs=[first_draft, _editor_draft("第二份")],
+        outputs=[first_draft, second_draft],
     )
     reviewer = ScriptedProvider(model="deepseek-v4-pro")
     await _execute(
@@ -100,6 +120,9 @@ async def test_prepare_is_anonymous_and_tampering_blocks_rating_and_reveal(
         assert forbidden not in public_text
     private = json.loads((blind_dir / "private" / "mapping.json").read_text(encoding="utf-8"))
     assert set(private["mapping"].values()) == {"without_sample", "with_sample"}
+    public_manifest = json.loads((blind_dir / "blind-manifest.json").read_text(encoding="utf-8"))
+    assert public_manifest["schema_version"] == "writing_style_ab_blind_v2"
+    assert public_manifest["decision"] == "distinguishable"
     assert stat.S_IMODE(blind_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE((blind_dir / "private").stat().st_mode) == 0o700
     for path in [*public_files, blind_dir / "private" / "mapping.json"]:
@@ -156,7 +179,9 @@ async def test_rating_is_idempotent_conflicts_are_blocked_and_reveal_is_verified
     assert {
         candidate: summary["arm"] for candidate, summary in reveal["candidate_summaries"].items()
     } == original_mapping["mapping"]
+    assert reveal["schema_version"] == "writing_style_ab_blind_reveal_v2"
     assert reveal["winner_selected"] is False
+    assert reveal["experiment_conclusion"] == "directional_human_evidence"
     assert "winner" not in reveal
     assert (
         reveal_blind_experiment(
@@ -165,3 +190,24 @@ async def test_rating_is_idempotent_conflicts_are_blocked_and_reveal_is_verified
         )
         == reveal
     )
+
+
+async def test_nearly_identical_candidates_are_explicitly_inconclusive(
+    tmp_path: Path,
+) -> None:
+    experiment_dir, blind_dir = await _prepared_pair(tmp_path, identical=True)
+    public = json.loads((blind_dir / "blind-manifest.json").read_text(encoding="utf-8"))
+    assert public["distinctness"]["exact_overlap_ratio"] == 1.0
+    assert public["distinctness"]["normalized_character_similarity"] == 1.0
+    assert public["distinctness"]["different_unit_count"] == 0
+    assert public["decision"] == "inconclusive_low_distinctness"
+    assert public["human_rating_interpretation"] == "directional_only"
+
+    submit_blind_rating(blind_dir=blind_dir, submission=_rating())
+    reveal = reveal_blind_experiment(
+        experiment_dir=experiment_dir,
+        blind_dir=blind_dir,
+    )
+    assert reveal["distinctness"] == public["distinctness"]
+    assert reveal["experiment_conclusion"] == "inconclusive"
+    assert reveal["winner_selected"] is False
