@@ -10,6 +10,11 @@ from epiphany.draft_quality_schemas import (
 )
 from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
 from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
+from epiphany.revision_schemas import (
+    REVISE_PODCAST_DRAFT,
+    PodcastRevisionTaskInput,
+    revision_base_editor_input,
+)
 from epiphany.runtime.providers.base import (
     ProviderResult,
     RetryableProviderError,
@@ -261,6 +266,7 @@ class FakeProvider:
             "theme_research": self._theme_research,
             BUILD_INTERVIEW_SCAFFOLD: self._build_interview_scaffold,
             BUILD_PODCAST_DRAFT: self._build_podcast_draft,
+            REVISE_PODCAST_DRAFT: self._revise_podcast_draft,
             REVIEW_PODCAST_DRAFT: self._review_podcast_draft,
         }
         try:
@@ -650,6 +656,68 @@ class FakeProvider:
         }
 
     @staticmethod
+    def _revise_podcast_draft(input_json: dict[str, Any]) -> dict[str, Any]:
+        """Produce a deterministic changed candidate from real factual material."""
+
+        parsed = PodcastRevisionTaskInput.model_validate(input_json)
+        base_input = revision_base_editor_input(parsed.model_dump(mode="json"))
+        revised = FakeProvider._build_podcast_draft(base_input)
+        factual_segments = [
+            *base_input["initial_source_segments"],
+            *base_input["supplemental_source_segments"],
+        ]
+        opening_segment = factual_segments[0]
+        opening_sentences = _sentences(str(opening_segment["text"]))
+        revised["podcast_script"]["opening"] = {
+            "text": _clip(
+                opening_sentences[0] if opening_sentences else str(opening_segment["text"]),
+                600,
+            ),
+            "source_refs": [_source_ref(opening_segment)],
+        }
+
+        cited_keys = {
+            (
+                reference["source_id"],
+                reference["source_segment_id"],
+            )
+            for section in revised["podcast_script"]["sections"]
+            for paragraph in section["paragraphs"]
+            for reference in paragraph["source_refs"]
+        }
+        unused_segments = [
+            segment
+            for segment in factual_segments
+            if (
+                str(segment["source_id"]),
+                str(segment["source_segment_id"]),
+            )
+            not in cited_keys
+        ]
+        last_section = revised["podcast_script"]["sections"][-1]
+        for segment in unused_segments[:2]:
+            sentences = _sentences(str(segment["text"]))
+            if not sentences or len(last_section["paragraphs"]) >= 10:
+                continue
+            paragraph = {
+                "text": _clip(sentences[0], 600),
+                "source_refs": [_source_ref(segment)],
+            }
+            last_section["paragraphs"].append(paragraph)
+            last_section["source_refs"] = _merge_refs(
+                list(last_section["source_refs"]),
+                list(paragraph["source_refs"]),
+            )[:10]
+        revised["show_notes"]["key_points"][-1] = {
+            "text": _clip(
+                _sentences(str(factual_segments[-1]["text"]))[0],
+                360,
+            ),
+            "source_refs": [_source_ref(factual_segments[-1])],
+        }
+        return revised
+
+    @staticmethod
     def _review_podcast_draft(input_json: dict[str, Any]) -> dict[str, Any]:
         """Return evidence-bearing review cards from the real Draft text.
 
@@ -718,6 +786,44 @@ class FakeProvider:
                             "source_refs": [
                                 reference.model_dump(mode="json") for reference in references[:2]
                             ],
+                        }
+                    ],
+                }
+            )
+        if parsed.writing_style_context_status == "ready":
+            style_segment = parsed.writing_style_segments[0]
+            location, text, references = evidence_blocks[0]
+            style_excerpt = next(
+                (line.strip()[:180] for line in style_segment.text.splitlines() if line.strip()),
+                style_segment.text.strip()[:180],
+            )
+            dimensions.append(
+                {
+                    "dimension": "personal_style_match",
+                    "assessable": True,
+                    "score": 3,
+                    "assessment": (
+                        "该初稿片段与用户主动提供的写作样本可用于比较句式、节奏和口语感；"
+                        "这只是风格建议，不是作者身份判断。"
+                    ),
+                    "limitation": None,
+                    "evidence": [
+                        {
+                            "location": location,
+                            "exact_quote": text[: min(180, len(text))],
+                            "source_refs": [
+                                reference.model_dump(mode="json") for reference in references[:2]
+                            ],
+                        }
+                    ],
+                    "style_sample_evidence": [
+                        {
+                            "location": "writing_style_segments[0]",
+                            "exact_quote": style_excerpt,
+                            "source_ref": {
+                                "source_id": style_segment.source_id,
+                                "source_segment_id": style_segment.source_segment_id,
+                            },
                         }
                     ],
                 }

@@ -61,7 +61,8 @@ Subagent。
 
 ```text
 create_run
-  -> prepare_sources
+  -> prepare factual Sources
+  -> optional consented writing-style profile (deterministic, style-only)
   -> fan_out
        |- timeline_research
        `- theme_research
@@ -81,12 +82,22 @@ create_run
   -> synthesize code-owned Draft Quality Report + non-compensatory caps
   -> human final review
   -> complete
+
+optional explicit revision
+  -> build deterministic Improvement Plan
+  -> user selects actions and submits an idempotent request
+  -> create podcast-revision child Run with parent_run_id
+  -> revise_podcast_draft (serial root Revision Editor)
+  -> metrics + Reviewer + code-owned quality report
+  -> lazily persist parent/revision comparison
+  -> human chooses; no automatic winner
 ```
 
 其中 `prepare_sources`、`fan_in` 和状态更新是普通代码；
 `timeline_research`、`theme_research`、`build_interview_scaffold`、
 `build_podcast_draft` 和 `review_podcast_draft` 才调用模型。
-`assess_material_readiness` 不调用模型。
+`assess_material_readiness`、写作风格 profile、Improvement Plan 和新旧稿
+comparison 都不调用模型。
 
 M2.4 将可执行边界推进到 `build_interview_scaffold`：两个 Researcher
 仍以同级 Child Task 并行调用模型，确定性 fan-in 持久化研究 Bundle 后，才
@@ -183,12 +194,45 @@ provider/model，报告将关系区分为 `same_model`、
 `cross_tier_same_family` 或 `different_model`。所谓“独立”只是执行与记账
 边界独立，跨 tier 仍不等于独立人工审核。
 
+M3.6 为新质量 Run 使用 workflow v8，并增加一条显式的
+`podcast-revision` 子 Run 路径。可选 `writing_style_reference` 最多选择
+五个用户拥有的现有 Source，且必须同时确认归属和模型处理授权；被选 ID 在
+同一个 Run 中不能也出现在事实 `source_ids`。`writing_sample` 只是可选的
+导入/UI 标签，显式的 per-Run style-only 选择才是权威合同。普通代码按稳定
+round-robin、最多 20 个 Segment /
+12,000 个非空白字符建立 profile。持久 profile 只保存引用、hash、统计和
+readiness，不复制样本正文；Event 与日志也只记录数量和状态。
+
+Editor 只把样本当作不可信的 `style_only` 数据，优先级低于安全、事实、本轮
+明确修订要求和 Creative Brief。样本不能提供本期事实、指令或引用，输出
+校验还会拦截对样本独特长句的直接复制。达到 800 个非空白字符和五句话后
+profile 才是 `ready`；只有这时 Reviewer v3 才增加
+`personal_style_match` 第七维，并要求同时给出 Draft 和 style sample 的逐字
+证据。无样本或样本有限时继续使用六维，也不能据此宣称“像本人”。
+
+质量 Run 成功后，服务可以按需持久化 `draft_improvement_plan`。它根据已
+验证 Draft/Report/Scaffold 和 Editor 的事实材料，区分可复用的未引用事实、
+需要补充的新材料和可以降低的目标时长，并生成三至六个有 Scaffold 锚点的
+追问。读取 Plan 不创建 Task 或模型调用。
+
+只有用户显式提交稳定 `submission_id` 的 revision 请求，服务才在同一事务中
+保存 `draft_revision_request` 并创建带 `parent_run_id` 的 v8
+`podcast-revision`。子 Run 直接排队一次 `revise_podcast_draft`，不重跑
+Researcher、Interviewer 或人工检查点；随后重新走 metrics、Reviewer 与质量
+报告。父 Draft/Report/Feedback/output 不变，子 Run 有自己的 Task、
+ModelCall 账本和预算。同 ID 同请求返回原子 Run，同 ID 改变请求返回冲突。
+
+子 Run 成功后按需建立 `draft_revision_comparison`，只保存双方 Run/Artifact
+ID、字符/时长/分数/decision 摘要及 delta，不保存两份正文，也不自动选出
+winner。这个比较是帮助人工判断的证据，不是自动发布条件。
+
 为使升级时已经在途的 Run 仍可恢复，v1 保留原有语义：fan-in 后以
 `episode_research_bundle` 成功结束，不要求新增 `topic`，也不排队
 Interviewer；v2 仍在采访脚手架完成后成功；v3 Resume 后仍按 M3.1 语义
 确定性结束，不产生 Editor 调用；没有 Creative Brief 的请求仍走 v4；
-显式关闭质量审阅的 Brief 请求走 v5。六个版本分支都复用现有表和字段，
-M3.4 不需要数据库 migration。
+显式关闭质量审阅的 Brief 请求走 v5；旧 v6/v7 继续按各自冻结合同恢复；
+新质量与 Revision 路径走 v8。M3.6 通过 Alembic
+`0004_run_lineage` 只给 `runs` 增加可空 `parent_run_id`、外键和索引。
 
 ## 5. Subagent 定义
 
@@ -233,11 +277,18 @@ location 和存在于该 block 中的 exact quote；无法可靠评价时必须�
 确定性事实放进受校验的 Reviewer Task 输入，并在 60/40 结果之后应用
 代码所有的非补偿 cap；模型高分不能把 blocker 平均掉。
 
+M3.6 的 Revision Editor 同样是一个串行根 Task。它只读取父 Draft、用户明确
+选择的 feedback/gap/修订指令，以及允许的事实和 style-only 上下文。它必须
+返回完整的新候选而不是原地 patch，并且不能把父 Draft 当作新增事实来源。
+随后创建的 Reviewer Task 与 Revision Editor 属于同一个子 Run，因而预算、
+重试、取消、恢复和 trace 都不会借用父 Run。
+
 ## 6. 持久化模型
 
 ### `runs`
 
 - `id`
+- `parent_run_id`（普通 Run 为空；Revision 子 Run 指向父 Run）
 - `workflow_type`
 - `workflow_version`
 - `status`
@@ -477,11 +528,14 @@ exact quote 和引用范围；模型不能返回最终 decision。本阶段不�
 的作者身份，也不生成“AI 概率”。中文 pattern/count 只能说明哪些表达值得
 人工复核。
 
-正常 v4/v5 都需要四次 Provider 调用，正常 v6/v7 需要五次。将单 Run 预算设为三时，Editor 调用会在
+正常 v4/v5 都需要四次 Provider 调用，正常 v6/v7/v8 父质量 Run 需要五次；
+一次 v8 Revision 子 Run 只运行 Revision Editor 和 Reviewer，正常需要两次。
+将单 Run 预算设为三时，Editor 调用会在
 进入 Provider 以前以 `model_call_limit_exceeded` 被拒绝。Editor retry、
 timeout、lease、fencing、startup recovery 和 cancel 复用同一 Worker 机制；
 每个重试 attempt 单独记账，但 Artifact 通过稳定 idempotency key 只提交一次。
-若 v6/v7 预算只够四次，Reviewer 会以 `model_call_limit_exceeded` 失败并触发
+若 v6/v7/v8 父质量 Run 的预算只够四次，Reviewer 会以
+`model_call_limit_exceeded` 失败并触发
 质量报告降级；已经生成的 Draft 不会因此变成失败产物。
 
 ## 11. API 和事件
@@ -500,6 +554,9 @@ GET  /runs/{id}/quality-report
 GET  /runs/{id}/exports/quality-report.md
 POST /runs/{id}/quality-feedback
 GET  /runs/{id}/quality-feedback
+GET  /runs/{id}/improvement-plan
+POST /runs/{id}/revisions
+GET  /runs/{child_id}/revision-comparison
 POST /runs/{id}/resume
 POST /runs/{id}/cancel
 GET  /runs/{id}/events
@@ -513,8 +570,8 @@ Scaffold 导出接受 `waiting_for_user` 或 `succeeded`，并从该 Run 已完�
 `build_interview_scaffold_result` Artifact 读取内容；它不依赖最终
 `output_artifact_id`，因此 v4 Editor 成功后仍能导出同一份 Scaffold。
 Podcast Draft 与 Show Notes 只接受最终成功且 `output_artifact_id` 指向合法
-`build_podcast_draft_result` 的 Run。未就绪、类型不符或内容无效时返回
-409。
+`build_podcast_draft_result` 或 `revise_podcast_draft_result` 的 Run。未
+就绪、类型不符或内容无效时返回 409。
 
 Readiness 首版不增加单独 endpoint；`GET /runs/{id}` 的 Artifact 列表会返回
 所有 `material_readiness_report`，按创建时间可以看到初始判断和每轮补充后的
@@ -535,11 +592,15 @@ M3.5 的 Flash/Pro 比较器是离线实验工具，不是产品 API。它从一
 ModelCall 账本；输出只含模型身份、schema 结果、分数、cap、token、耗时与
 本地估算费用，不含正文、来源或密钥。
 
-M3.6 目前只是架构计划：用户显式选择一组 feedback 和修改指令后，创建一个
-带 `parent_run_id` 的 Revision Run。旧 Draft、Report 和 Feedback 保持
-immutable；新 Run 排队一次独立 `revise_podcast_draft`，再重新计算 metrics
-和 Reviewer 报告，并使用自己的调用预算。不会由一个低分自动触发无限循环，
-也不会静默覆盖用户已经审核过的候选稿。
+M3.6 的三个新 endpoint 都保持“读取不偷偷执行”的边界：
+
+- Improvement Plan 是确定性、按需持久化的诊断；
+- `POST revisions` 才是唯一创建子 Run 和模型工作的动作；
+- comparison 只在子 Run 成功后按需持久化摘要，不自动选择或再触发修订。
+
+写作样本不是事实 Source 通道。即便被选片段为了可恢复执行而持久化在受限
+Editor/Reviewer Task input 中，也不能进入 `allowed_source_refs`、最终引用
+或 Plan 的未使用事实列表。
 
 Markdown 由已验证 JSON 确定性渲染。正文把原始 Source/Segment ID 显示为
 短标签 `[S1]`，文末通过数据库中的 Source 标题与 Segment 位置生成来源索引；
@@ -641,6 +702,16 @@ M3.5 没有新增持久 Event 类型。Reviewer 路由继续复用已有 Task/Mo
 `quality_reviewer_compare.preflight/completed/blocked` 脱敏摘要，包含输入
 hash、版本、调用计数、schema 状态、tokens、耗时和费用，不输出 Draft、
 Prompt、模型 assessment 或 Source 文本。
+
+M3.6 新增
+`workflow.writing_style_profile.created`、
+`workflow.draft_improvement.planned`、
+`workflow.draft_revision.requested`、
+`workflow.draft_revision.queued` 与
+`workflow.draft_revision.compared`。它们只记录 profile readiness、数量、
+Run/Task/Artifact ID、动作数量和 comparison 元数据，不记录写作样本、
+feedback comment、修订指令或 Draft 正文。幂等 replay 只写脱敏操作日志，
+不会重复创建持久 Artifact、Event 或子 Run。
 
 ## 13. 升级触发条件
 

@@ -13,7 +13,7 @@ from epiphany.draft_quality_schemas import (
     DRAFT_QUALITY_RULES_VERSION,
     LEGACY_DRAFT_QUALITY_FORMULA_VERSION,
     LEGACY_DRAFT_QUALITY_RULES_VERSION,
-    REVIEW_DIMENSIONS,
+    STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
     ChineseStylePatternCounts,
     DeterministicDraftMetrics,
     DeterministicDraftQualityResult,
@@ -24,6 +24,8 @@ from epiphany.draft_quality_schemas import (
     ModelSelfReviewOutput,
     QualityScoreCapReason,
     ReviewerRelation,
+    WritingStyleContextStatus,
+    calculate_model_review_score,
 )
 from epiphany.editor_schemas import PodcastDraftOutput
 from epiphany.quality_contract_schemas import (
@@ -658,18 +660,19 @@ def _reviewer_relation(
     return "different_model"
 
 
-def _experimental_model_score(review: ModelSelfReviewOutput) -> float | None:
-    ordered = {dimension.dimension: dimension for dimension in review.dimensions}
-    scores = [
-        ordered[name].score
-        for name in REVIEW_DIMENSIONS
-        if ordered[name].assessable and ordered[name].score is not None
-    ]
+def _experimental_model_score(
+    review: ModelSelfReviewOutput,
+    *,
+    scoring_formula_version: str = DRAFT_QUALITY_FORMULA_VERSION,
+    writing_style_context_status: WritingStyleContextStatus = "not_provided",
+) -> float | None:
     # A partial set of model dimensions is still useful as cards, but folding
     # it into one number would hide what the model admitted it could not judge.
-    if len(scores) != len(REVIEW_DIMENSIONS):
-        return None
-    return round(sum(scores) / len(scores) / 5 * 100, 2)
+    return calculate_model_review_score(
+        review,
+        scoring_formula_version=scoring_formula_version,
+        writing_style_context_status=writing_style_context_status,
+    )
 
 
 def build_deterministic_quality_facts(
@@ -824,6 +827,7 @@ def build_draft_quality_report(
     reviewer_model: str | None = None,
     unavailable_reason: str | None = None,
     scoring_formula_version: str = DRAFT_QUALITY_FORMULA_VERSION,
+    writing_style_context_status: WritingStyleContextStatus = "not_provided",
 ) -> DraftQualityReport:
     """Combine reviews without allowing a model to erase objective blockers."""
 
@@ -832,7 +836,15 @@ def build_draft_quality_report(
         if model_self_review is None
         else ModelSelfReviewOutput.model_validate(model_self_review)
     )
-    model_score = None if parsed_review is None else _experimental_model_score(parsed_review)
+    model_score = (
+        None
+        if parsed_review is None
+        else _experimental_model_score(
+            parsed_review,
+            scoring_formula_version=scoring_formula_version,
+            writing_style_context_status=writing_style_context_status,
+        )
+    )
     uncapped_overall_score = (
         None
         if model_score is None
@@ -843,7 +855,10 @@ def build_draft_quality_report(
         cap_reasons: list[QualityScoreCapReason] = []
         overall_score = uncapped_overall_score
         conflicts: list[ModelReviewConflict] = []
-    elif scoring_formula_version == DRAFT_QUALITY_FORMULA_VERSION:
+    elif scoring_formula_version in {
+        DRAFT_QUALITY_FORMULA_VERSION,
+        STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
+    }:
         score_cap, cap_reasons = _code_owned_score_cap(deterministic)
         overall_score = (
             None
@@ -893,6 +908,7 @@ def build_draft_quality_report(
             )
         ),
         scoring_formula_version=scoring_formula_version,
+        writing_style_context_status=writing_style_context_status,
         experimental_model_score=model_score,
         experimental_uncapped_overall_score=(
             None

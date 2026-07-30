@@ -80,7 +80,8 @@ Subagent 对话。
 1. 用户创建一个 Episode Project。
 2. 导入 Markdown 或纯文本素材。
 3. 系统切分内容并保留来源信息。
-4. 用户选择主题、目标时长、听众和语气，并启动 `EpisodeRun`。
+4. 用户选择主题、目标时长、听众和语气；还可主动选择本人旧文章或口述转录
+   作为仅用于表达风格的写作样本，然后启动 `EpisodeRun`。
 5. 两个只读 Subagent 并行工作：
    - Timeline Researcher：事件、阶段、时间线；
    - Theme Researcher：主题、认知变化、原话和细节。
@@ -92,7 +93,9 @@ Subagent 对话。
 9. 素材达到门槛后，Editor 按同一份 Creative Brief 生成口播稿和
    Show Notes。
 10. 系统生成可解释的 Draft Quality Report，区分确定性指标与模型建议。
-11. 用户审核、提交独立质量反馈并导出 Markdown。
+11. 用户审核、提交独立质量反馈，并查看系统根据现有证据生成的改进计划。
+12. 用户可以直接导出 Markdown，也可以明确选择改进动作，创建一个不覆盖
+    旧稿的 Revision 子 Run，再人工比较两个候选。
 
 ## 5. MVP 范围
 
@@ -108,6 +111,8 @@ Subagent 对话。
 - 运行事件和错误展示；
 - Markdown 导出；
 - Draft Quality Report 与独立用户反馈；
+- 经明确授权、与事实素材分离的可选写作样本；
+- 确定性 Improvement Plan 与用户显式触发的 Revision 子 Run；
 - 可替换的托管模型 Provider（首个为 DeepSeek）与测试用 Fake Provider。
 
 ### 暂不包含
@@ -452,10 +457,54 @@ ModelCall 账本。
 这只是一个合成样本，不能证明 Pro 普遍更好，也不能把一次 schema 失败推断
 为 Flash 普遍不可用。产品选择模型时还要累计多主题、多长度和真实用户反馈。
 
-M3.5 仍只把用户评价 append-only 保存，不会自动修改旧稿。M3.6 目前只是
-计划：由用户显式选择反馈并创建一个带 `parent_run_id` 的 Revision Run，
-保留旧 Draft/Report 不变，生成新候选后重新走完整质量检查和独立预算。系统
-不会因为分数未达标就自己无限改写，也不会把模型自评当作自动发布条件。
+### M3.6 写作样本、改进计划与显式 Revision
+
+M3.6 为新质量 Run 使用 workflow v8，并把“更像用户”和“根据反馈改稿”拆成
+三个有边界的产品能力。
+
+第一，用户可以在创建 Run 时可选提交 `writing_style_reference`。它最多引用
+五个用户拥有的现有 Source，并要求用户明确确认内容归属和模型处理授权。
+`writing_sample` 可以作为导入或 UI 分类标签，但不是能否使用的依据；每个
+Run 中显式的 style-only 选择才是权威合同。被选样本不能同时出现在该 Run 的
+事实 `source_ids` 中。系统只持久化有界
+`writing_style_profile`：被选片段的引用、hash、字符/句子/段落统计和
+readiness，不在 profile、Event 或日志中复制全文。样本正文仍保存在原
+Source；被选片段会进入可恢复的 Editor/Reviewer Task input，因此本地数据库
+仍属于敏感数据。
+
+写作样本的优先级低于安全、来源事实、本轮明确修订要求和 Creative Brief；
+高于系统默认写法。它只能帮助参考句长、节奏、直接程度、转折和口语感，
+不能提供本期事实、可执行指令或 `source_refs`。样本至少达到 800 个非空白
+字符和五句话才是 `ready`；否则只是 `limited` 弱提示。只有 `ready` 时，
+Reviewer 才增加第七维 `personal_style_match`，而且证据必须同时指向 Draft
+和样本。没有足够样本时仍维持六维，系统不能声称文稿“像本人”。最终
+`voice_match_rating` 仍由用户提供。
+
+第二，成功质量 Run 可以读取
+`GET /runs/{run_id}/improvement-plan`。普通代码从 Draft、质量报告、采访
+脚手架和 Editor 已有事实材料生成一个可追踪计划，说明：
+
+- 目标时长还差多少正文；
+- 是否有尚未引用、可以先复用的事实片段；
+- 何时需要补充材料，并给出基于脚手架的具体追问；
+- 用户是否可以选择更低的 10/15 分钟预设；
+- 哪些确定性 finding 或模型低分维度需要处理。
+
+读取计划不调用模型，也不会创建新 Run。
+
+第三，只有用户显式提交 `POST /runs/{run_id}/revisions` 才创建一次
+`podcast-revision` 子 Run。请求使用稳定 `submission_id`，并明确列出复用
+材料、补充 Source、降低目标时长和应用反馈等动作；同一 ID 同一请求安全
+重放，同一 ID 改变选择返回冲突。子 Run 保存 `parent_run_id`，使用独立调用
+预算，先运行一个受限 `revise_podcast_draft`，再重新执行确定性 metrics、
+Reviewer 与非补偿 cap。父 Draft、Report、Feedback、output 和调用账本都
+不会被改写。
+
+子 Run 成功后可读取
+`GET /runs/{child_run_id}/revision-comparison`。系统会懒加载并持久化一份
+不含正文的父/子摘要及字符、时长和分数变化，但
+`automatic_winner_selected=false`，最终采用哪一稿仍由用户决定。自动化
+Fake workflow 已覆盖上述链路；M3.6 的真实 DeepSeek E2E 尚未执行。
 
 ## 7. 成功标准
 
@@ -472,6 +521,10 @@ M3.5 仍只把用户评价 append-only 保存，不会自动修改旧稿。M3.6 
    单独导出 Show Notes，最终采用仍由用户决定。
 9. 用户能看到有证据的质量建议，并能单独记录“是否像我、是否可录”的真人
    评价；合成反馈不能被计为真实用户信号。
+10. 用户选择写作样本时，样本不能成为本期事实引用；没有足够样本时，系统不
+    冒充已经判断“像本人”。
+11. 用户能够从质量证据创建一个可追溯的 Revision 子 Run，比较新旧候选，
+    同时确认父 Draft/Report 没有被覆盖。
 
 ## 8. 衡量指标
 
@@ -486,4 +539,6 @@ M3.5 仍只把用户评价 append-only 保存，不会自动修改旧稿。M3.6 
 - Draft 目标时长偏差、引用覆盖、重复和模板模式；
 - 原始模型分、未封顶分、代码 cap、封顶后分数和 Reviewer schema 成功率；
 - 用户对 voice match、recordability、usefulness 与 tone fit 的独立评分；
+- 写作样本 readiness、是否启用第七维，以及样本泄漏/错误引用数量；
+- Revision 的字符、时长、确定性分数与实验分数变化，以及用户最终选择；
 - `synthetic_test` 与 human feedback 必须分开统计。

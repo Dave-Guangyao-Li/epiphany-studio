@@ -29,8 +29,12 @@ class TimestampMixin:
 
 class Run(TimestampMixin, Base):
     __tablename__ = "runs"
+    __table_args__ = (Index("ix_runs_parent_run_id", "parent_run_id"),)
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: new_id("run"))
+    parent_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id", name="fk_runs_parent_run_id")
+    )
     workflow_type: Mapped[str] = mapped_column(String(80), nullable=False)
     workflow_version: Mapped[str] = mapped_column(String(32), nullable=False, default="v1")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default=RunStatus.QUEUED)

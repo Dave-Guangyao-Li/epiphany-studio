@@ -12,6 +12,7 @@ import httpx
 from epiphany.draft_quality_schemas import REVIEW_PODCAST_DRAFT
 from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
 from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
+from epiphany.revision_schemas import REVISE_PODCAST_DRAFT
 from epiphany.runtime.editor_prompts import build_editor_prompt
 from epiphany.runtime.interview_prompts import build_interview_prompt
 from epiphany.runtime.providers.base import (
@@ -32,6 +33,7 @@ from epiphany.runtime.providers.base import (
 )
 from epiphany.runtime.quality_prompts import build_quality_review_prompt
 from epiphany.runtime.research_prompts import build_research_prompt
+from epiphany.runtime.revision_prompts import build_revision_prompt
 
 logger = logging.getLogger("epiphany.provider.deepseek")
 
@@ -143,6 +145,13 @@ class DeepSeekProvider:
             )
             max_tokens = self.quality_review_max_tokens
             temperature = 0.0
+        elif invocation.kind == REVISE_PODCAST_DRAFT:
+            prompt = build_revision_prompt(
+                task_input=invocation.input_json,
+                max_bundle_chars=self.max_editor_bundle_chars,
+            )
+            max_tokens = self.editor_max_tokens
+            temperature = 0.2
         elif invocation.kind == BUILD_PODCAST_DRAFT:
             prompt = build_editor_prompt(
                 task_input=invocation.input_json,

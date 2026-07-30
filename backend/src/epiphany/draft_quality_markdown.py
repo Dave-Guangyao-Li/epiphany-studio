@@ -24,6 +24,7 @@ _DIMENSION_LABELS = {
     "structure_and_coherence": "结构与连贯性",
     "oral_naturalness_and_voice_fit": "口播自然度与声音匹配",
     "conciseness_and_non_redundancy": "精炼度与非重复性",
+    "personal_style_match": "个人写作风格匹配",
 }
 
 
@@ -101,6 +102,18 @@ def render_draft_quality_markdown(content: dict[str, Any]) -> str:
             )
 
     lines.extend(["", "## 模型建议性自评", ""])
+    if report.scoring_formula_version == "draft_quality_v3_personal_style_non_compensatory_caps":
+        style_status = {
+            "ready": "样本已达到评估门槛；仅用于比较表达风格，不作为本期事实来源。",
+            "limited": "样本量有限；本次不评价、也不声称稿子是否像本人。",
+            "not_provided": "未提供个人写作样本；本次不评价、也不声称稿子是否像本人。",
+        }[report.writing_style_context_status]
+        lines.extend(
+            [
+                f"- 个人写作样本：{_safe(style_status)}",
+                "",
+            ]
+        )
     if report.model_self_review is None:
         lines.append(
             "- 本次模型自评不可用："
@@ -145,15 +158,32 @@ def render_draft_quality_markdown(content: dict[str, Any]) -> str:
                     f"- 证据位置：`{_safe(evidence.location)}`；"
                     f"摘录：“{_safe(evidence.exact_quote)}”"
                 )
+            for evidence in dimension.style_sample_evidence:
+                lines.append(
+                    f"- 写作样本证据：`{_safe(evidence.location)}`；"
+                    f"摘录：“{_safe(evidence.exact_quote)}”"
+                )
             lines.append("")
 
-    if report.scoring_formula_version == "draft_quality_v2_non_compensatory_caps":
+    if report.scoring_formula_version in {
+        "draft_quality_v2_non_compensatory_caps",
+        "draft_quality_v3_personal_style_non_compensatory_caps",
+    }:
+        model_score_description = (
+            "模型六个基础维度与个人风格维度的加权结果"
+            "（个人风格占模型分的 30%，未应用硬性上限，仅用于偏差研究）："
+            if report.writing_style_context_status == "ready"
+            else "模型六个局部维度的简单平均（个人风格不可评估，未应用硬性上限，仅用于偏差研究）："
+            if report.scoring_formula_version
+            == "draft_quality_v3_personal_style_non_compensatory_caps"
+            else "模型六个局部维度的简单平均（未应用硬性上限，仅用于偏差研究）："
+        )
         lines.extend(
             [
                 "## 实验性评分校准",
                 "",
                 f"- 评分公式：`{_safe(report.scoring_formula_version)}`",
-                "- 模型六个局部维度的简单平均（未应用硬性上限，仅用于偏差研究）："
+                f"- {model_score_description}"
                 + (
                     f"{report.experimental_model_score:.2f}/100"
                     if report.experimental_model_score is not None

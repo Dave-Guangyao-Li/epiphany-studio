@@ -1,6 +1,6 @@
 # SQLite 数据与排查指南
 
-更新时间：2026-07-29
+更新时间：2026-07-30
 
 这篇文档只回答四个问题：
 
@@ -48,7 +48,8 @@ Python 进程中的变量在服务停止后会消失，但一次 Workflow 的状
 - 为了重跑 smoke 而误删日常开发数据。
 
 pytest 通常使用临时目录里的独立数据库。测试结束后可以丢弃，它们不是产品
-数据。
+数据。当前 M3.6 自动化 Fake workflow 也使用这种临时数据库，尚未生成可被
+误认为真实 DeepSeek 验收的固定 `data/*.db` 文件。
 
 M3.1 E2E 的配套报告、日志和 Markdown 位于
 `backend/artifacts/checkpoint-e2e*/`。这些目录与数据库都被 Git 忽略；合成
@@ -81,7 +82,7 @@ fixture 才会提交到仓库。查看顺序和字段说明见
 | `alembic_version` | 数据库结构版本号 | 当前执行到了哪个 migration |
 | `sources` | 一份导入素材 | 规范化全文、类型、hash、metadata |
 | `source_segments` | 可以稳定引用的素材片段 | 原文片段、顺序、字符区间、hash |
-| `runs` | 一次完整 Workflow | 类型、状态、当前步骤、调用上限、时间 |
+| `runs` | 一次完整 Workflow | 类型、状态、当前步骤、`parent_run_id`、调用上限、时间 |
 | `tasks` | Run 中可领取和重试的工作单 | Agent 类型、父子关系、attempt、lease、错误码 |
 | `events` | Workflow 的持久化时间线 | sequence、事件类型、关联 Task、结构化 payload |
 | `model_calls` | 每次 Provider attempt 的调用账本 | 模型、Token、耗时、费用、币种、状态 |
@@ -103,6 +104,10 @@ Run
 数据库中会保存素材正文和生成结果，所以本地 `.db` 文件本身也属于私密数据，
 不能提交到 GitHub。
 
+普通 Run 的 `parent_run_id` 为空。M3.6 的 `podcast-revision` 子 Run 会把它
+设为父质量 Run 的 ID，因此新旧稿属于两条独立执行记录，又可以从数据库追溯
+彼此关系。这个字段由 Alembic `0004_run_lineage` 增加。
+
 ### 3.1 M3.4 的四种质量 Artifact
 
 M3.4 没有增加新表。它把四种用途不同的数据继续放在 `artifacts`，通过
@@ -111,11 +116,11 @@ M3.4 没有增加新表。它把四种用途不同的数据继续放在 `artifac
 | `kind` | 保存什么 | 不保存/不代表什么 |
 | --- | --- | --- |
 | `draft_metrics_report` | 目标与估算分钟数、字符数、引用覆盖、来源数、重复、Brief/filler/template finding 和确定性分数 | 不保存另一份 Source 原文；不代表文学质量或真实录音时长 |
-| `review_podcast_draft_result` | Reviewer 的六维 assessable 状态、1–5 分、assessment、Draft location、逐字 quote 和允许引用；另有执行 metadata | 不是独立人工评价；默认可能是同模型 self-review |
+| `review_podcast_draft_result` | Reviewer 的六维 assessable 状态；v8 有 ready 写作样本时增加第七维个人风格匹配；每维含 1–5 分、assessment、Draft location、逐字 quote 和允许引用，另有执行 metadata | 不是独立人工评价；默认可能是同模型 self-review；无 ready 样本不能声称“像本人” |
 | `draft_quality_report` | 代码合成的 decision、Reviewer 状态、关系、实验性分数、确定性与模型结果 | 不是 AI 作者概率，也不替换 Run 的 Draft output |
 | `draft_user_feedback` | submission ID、human/synthetic origin、五项评分、是否愿意录、可选实际时长与评论 | `synthetic_test` 不是真人信号；评论不会复制进 Event 或 stdout |
 
-口播稿仍保存在 `build_podcast_draft_result`。成功 v6/v7 质量 Run 的
+口播稿仍保存在 `build_podcast_draft_result`。成功 v6/v7/v8 父质量 Run 的
 `runs.output_artifact_id` 继续指向这份 Draft；质量报告是可单独查询和导出的
 旁路 Artifact。
 
@@ -123,14 +128,40 @@ Artifact 中保留结构化逐字证据是为了可复核，但这也意味着
 `review_podcast_draft_result` 和 `draft_quality_report` 可能包含 Draft 摘录。
 不要把 `content_json` 整段贴到公开 issue、截图或日志。
 
+### 3.2 M3.6 的写作样本与 Revision Artifact
+
+M3.6 仍然复用 `sources`、`source_segments`、`runs`、`tasks` 和
+`artifacts`。写作样本不依赖某个 Source 类型：`writing_sample` 只是可选的
+导入/UI 标签；是否按 style-only 使用，由本次 Run 显式提交的
+`writing_style_reference` 决定。
+
+| 所属 Run | `kind` | 保存什么 | 隐私/语义边界 |
+| --- | --- | --- | --- |
+| 父 Run | `writing_style_profile` | 被选 Segment 引用、hash、字符/句子/段落统计、readiness 和选择 provenance | 不复制样本正文；不是事实证据 |
+| 父 Run | `draft_improvement_plan` | 时长缺口、未使用事实引用、gap、修订选项和有 Scaffold 锚点的追问 | 不调用模型，不代表已创建 Revision |
+| 父 Run | `draft_revision_request` | submission ID、父/子 Run 与 Artifact ID、用户选择的动作和修订参数 | append-only；同 ID 同请求只保存一次 |
+| 子 Run | `revise_podcast_draft_result` | 完整的新 Podcast Draft 和 Show Notes | 是新候选，不覆盖父 Draft |
+| 子 Run | `draft_metrics_report` / `review_podcast_draft_result` / `draft_quality_report` | 新候选自己的确定性指标、Reviewer 结果和质量报告 | 使用子 Run 的独立调用账本与预算 |
+| 子 Run | `draft_revision_comparison` | 父/子 ID、字符/时长/分数/decision 摘要与 delta | 不保存正文，不自动选择 winner |
+
+需要特别区分“profile 不复制全文”和“Task 可以恢复执行”。被选样本的原文
+本来就存在 `sources` / `source_segments`；为了让 Editor 和 Reviewer 在
+进程重启后仍能完成同一个持久 Task，受限的样本片段还会出现在对应
+`tasks.input_json.writing_style_segments` 中。Revision Task 的
+`input_json` 也可能包含父 Draft、所选 feedback comment 和修订指令。
+这些内容不会进入 Event 或 stdout 日志，但数据库本身仍是敏感文件。
+
 ## 4. 优先从 API 查看，必要时再查数据库
 
 日常调试的推荐顺序是：
 
 1. `GET /runs/{run_id}` 查看 Run、Task、ModelCall 和 Artifact 摘要；
 2. `GET /runs/{run_id}/events` 回放执行顺序；
-3. 用 `run_id`、`task_id`、`request_id` 搜索 stdout JSON 日志；
-4. API 信息仍不足时，再只读查询 SQLite。
+3. 质量 Run 用 `GET /runs/{run_id}/improvement-plan` 查看改进计划；
+4. Revision 子 Run 成功后用
+   `GET /runs/{child_run_id}/revision-comparison` 查看新旧摘要；
+5. 用 `run_id`、`task_id`、`request_id` 搜索 stdout JSON 日志；
+6. API 信息仍不足时，再只读查询 SQLite。
 
 当前 Uvicorn 默认连接 `data/epiphany.db`。因此 Swagger 不会自动显示
 `data/deepseek-live-smoke.db` 里的真实 smoke Run；查看 smoke Trace 时，直接
@@ -291,8 +322,83 @@ LEFT JOIN artifacts AS a ON a.id = r.output_artifact_id
 WHERE r.id = 'run_...';
 ```
 
-正常 v6/v7 成功结果的 `output_kind` 应为
+正常 v6/v7/v8 父质量 Run 的 `output_kind` 应为
 `build_podcast_draft_result`，不是 `draft_quality_report`。
+
+### 5.7 查看 M3.6 父子 Run、style profile 与 comparison
+
+下面的查询只查看 ID、状态和摘要，不展开 Draft、样本文字、feedback comment
+或修订指令。
+
+先查看父子关系和各自调用数：
+
+```sql
+SELECT id, parent_run_id, workflow_type, workflow_version,
+       status, current_step, model_call_count
+FROM runs
+WHERE id = 'run_parent_...'
+   OR parent_run_id = 'run_parent_...'
+ORDER BY created_at;
+```
+
+查看 M3.6 Artifact 分布：
+
+```sql
+SELECT run_id, kind, COUNT(*) AS artifact_count
+FROM artifacts
+WHERE run_id = 'run_parent_...'
+   OR run_id = 'run_child_...'
+GROUP BY run_id, kind
+ORDER BY run_id, kind;
+```
+
+只读 style profile 的 readiness 和计数：
+
+```sql
+SELECT id,
+       json_extract(content_json, '$.readiness.status') AS readiness,
+       json_extract(content_json, '$.stats.source_count') AS source_count,
+       json_extract(content_json, '$.stats.segment_count') AS segment_count,
+       json_extract(content_json, '$.stats.non_whitespace_char_count') AS characters,
+       json_extract(content_json, '$.stats.sentence_count') AS sentences
+FROM artifacts
+WHERE run_id = 'run_parent_...'
+  AND kind = 'writing_style_profile';
+```
+
+只读 Improvement Plan 的决策摘要：
+
+```sql
+SELECT id,
+       json_extract(content_json, '$.duration.missing_duration_minutes') AS missing_minutes,
+       json_extract(content_json, '$.duration_resolution') AS resolution,
+       json_extract(content_json, '$.material.unused_factual_segment_count') AS unused_segments,
+       json_array_length(content_json, '$.options') AS option_count,
+       json_array_length(content_json, '$.targeted_questions') AS question_count
+FROM artifacts
+WHERE run_id = 'run_parent_...'
+  AND kind = 'draft_improvement_plan';
+```
+
+只读新旧比较，不输出两份稿子：
+
+```sql
+SELECT id,
+       json_extract(content_json, '$.parent.run_id') AS parent_run,
+       json_extract(content_json, '$.revision.run_id') AS revision_run,
+       json_extract(content_json, '$.script_character_delta') AS character_delta,
+       json_extract(content_json, '$.estimated_duration_delta_minutes') AS duration_delta,
+       json_extract(content_json, '$.deterministic_score_delta') AS deterministic_delta,
+       json_extract(content_json, '$.automatic_winner_selected') AS auto_winner,
+       json_extract(content_json, '$.requires_human_review') AS human_review
+FROM artifacts
+WHERE run_id = 'run_child_...'
+  AND kind = 'draft_revision_comparison';
+```
+
+正常结果应显示 `auto_winner=0`、`human_review=1`。comparison 是按需生成的；
+如果尚未调用 comparison API，没有这一 Artifact 并不代表 Revision 失败。
+子 Revision Run 的 `output_kind` 是 `revise_podcast_draft_result`。
 
 输入下面命令退出：
 
@@ -311,6 +417,8 @@ WHERE r.id = 'run_...';
 - `events.payload`
 - `tasks.input_json`
 - `runs.input_json`
+- `tasks.input_json.writing_style_segments` 中的写作样本片段
+- Revision Task 中的父 Draft、feedback comment 与修订指令
 - `review_podcast_draft_result` 和 `draft_quality_report` 中的逐字 Draft 证据
 - `draft_user_feedback` 中的 `comment`
 

@@ -34,6 +34,7 @@ async def test_create_and_read_run_api(tmp_path: Path) -> None:
         assert response.status_code == 200
         assert response.headers["x-request-id"] == "req_test_manual"
         assert response.json()["status"] == "queued"
+        assert response.json()["parent_run_id"] is None
 
         response = await client.get(f"/runs/{run_id}/events")
         assert response.status_code == 200

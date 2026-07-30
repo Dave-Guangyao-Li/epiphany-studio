@@ -11,11 +11,21 @@ from epiphany.draft_feedback_schemas import (
 )
 from epiphany.draft_quality_schemas import DraftQualityReportRecord
 from epiphany.human_input_schemas import ResumeRunRequest
+from epiphany.revision_schemas import (
+    CreateDraftRevisionRequest,
+    CreateDraftRevisionResponse,
+    DraftImprovementPlanRecord,
+    DraftRevisionComparisonRecord,
+)
 from epiphany.schemas import CreateRunRequest, EventView, ResumeRunResponse, RunView
 from epiphany.services import (
     DraftFeedbackConflict,
     DraftFeedbackNotAllowed,
+    DraftImprovementPlanNotReady,
     DraftQualityReportNotReady,
+    DraftRevisionComparisonNotReady,
+    DraftRevisionConflict,
+    DraftRevisionNotAllowed,
     InterviewScaffoldExportNotReady,
     InvalidRunPayload,
     PodcastDraftExportNotReady,
@@ -149,6 +159,66 @@ async def get_draft_quality_report(
     except RunNotFound as error:
         raise HTTPException(status_code=404, detail="run not found") from error
     except DraftQualityReportNotReady as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.get(
+    "/runs/{run_id}/improvement-plan",
+    response_model=DraftImprovementPlanRecord,
+)
+async def get_draft_improvement_plan(
+    run_id: str,
+    service: RunServiceDependency,
+) -> DraftImprovementPlanRecord:
+    try:
+        return await service.get_draft_improvement_plan(run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except DraftImprovementPlanNotReady as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post(
+    "/runs/{run_id}/revisions",
+    response_model=CreateDraftRevisionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_draft_revision(
+    run_id: str,
+    body: CreateDraftRevisionRequest,
+    service: RunServiceDependency,
+    response: Response,
+) -> CreateDraftRevisionResponse:
+    try:
+        result = await service.create_draft_revision(run_id, request=body)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except RunSourceNotFound as error:
+        raise HTTPException(status_code=404, detail=f"source not found: {error}") from error
+    except (
+        DraftImprovementPlanNotReady,
+        DraftRevisionNotAllowed,
+        DraftRevisionConflict,
+    ) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if result.idempotent_replay:
+        response.status_code = status.HTTP_200_OK
+    return result
+
+
+@router.get(
+    "/runs/{run_id}/revision-comparison",
+    response_model=DraftRevisionComparisonRecord,
+)
+async def get_draft_revision_comparison(
+    run_id: str,
+    service: RunServiceDependency,
+) -> DraftRevisionComparisonRecord:
+    try:
+        return await service.get_draft_revision_comparison(run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except DraftRevisionComparisonNotReady as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 

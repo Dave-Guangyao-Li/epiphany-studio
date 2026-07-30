@@ -40,7 +40,7 @@ from epiphany.checkpoint_e2e import (
 from epiphany.config import Settings
 from epiphany.draft_feedback_schemas import DraftUserFeedbackResponse
 from epiphany.draft_quality_schemas import (
-    DRAFT_QUALITY_FORMULA_VERSION,
+    STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
     DraftQualityReport,
     DraftQualityReportRecord,
 )
@@ -451,7 +451,8 @@ def _quality_report_contract_valid(
     return (
         parsed.model_review_status == "completed"
         and parsed.reviewer_relation == expected_reviewer_relation
-        and parsed.scoring_formula_version == DRAFT_QUALITY_FORMULA_VERSION
+        and parsed.scoring_formula_version == STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION
+        and parsed.writing_style_context_status == "not_provided"
         and parsed.model_self_review is not None
         and len(parsed.model_self_review.dimensions) == 6
     )

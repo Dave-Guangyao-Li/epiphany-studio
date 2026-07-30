@@ -61,6 +61,7 @@ class RunView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    parent_run_id: str | None
     workflow_type: str
     workflow_version: str
     status: str
@@ -95,7 +96,13 @@ class EventView(BaseModel):
     created_at: datetime
 
 
-SourceType = Literal["journal", "podcast_draft", "voice_note_transcript", "other"]
+SourceType = Literal[
+    "journal",
+    "podcast_draft",
+    "voice_note_transcript",
+    "writing_sample",
+    "other",
+]
 
 
 class CreateSourceRequest(BaseModel):

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
+from hashlib import sha256
 from typing import Any, Literal
 
 from pydantic import (
@@ -16,10 +18,19 @@ from epiphany.interview_schemas import InterviewScaffoldOutput
 from epiphany.quality_contract_schemas import CreativeBrief
 from epiphany.research_schemas import ResearchSourceSegment
 from epiphany.schemas import SourceReference
+from epiphany.writing_style import validate_writing_style_profile_segments
+from epiphany.writing_style_schemas import (
+    MAX_STYLE_SEGMENTS,
+    WritingStyleProfile,
+    WritingStyleSegmentInput,
+)
 
 BUILD_PODCAST_DRAFT = "build_podcast_draft"
 MAX_EDITOR_SUPPLEMENTAL_SEGMENTS = 500
 SourceReferenceKey = tuple[str, str]
+STYLE_SAMPLE_LEAK_WINDOW_CHARS = 24
+STYLE_SAMPLE_LEAK_MINIMUM_UNIQUE_CHARS = 8
+_STYLE_LEAK_NORMALIZATION_PATTERN = re.compile(r"[\W_]+", re.UNICODE)
 
 
 class PodcastDraftOutputError(ValueError):
@@ -44,6 +55,10 @@ class MissingInitialSourceReference(PodcastDraftOutputError):
 
 class MissingSupplementalSourceReference(PodcastDraftOutputError):
     code = "podcast_draft_missing_supplemental_source_reference"
+
+
+class WritingStyleSampleLeak(PodcastDraftOutputError):
+    code = "podcast_draft_writing_style_sample_leak"
 
 
 def _normalize_required_text(value: str) -> str:
@@ -104,6 +119,11 @@ class PodcastDraftTaskInput(BaseModel):
         min_length=1,
         max_length=MAX_EDITOR_SUPPLEMENTAL_SEGMENTS,
     )
+    writing_style_profile: WritingStyleProfile | None = None
+    writing_style_segments: list[WritingStyleSegmentInput] | None = Field(
+        default=None,
+        max_length=MAX_STYLE_SEGMENTS,
+    )
 
     @field_validator("topic")
     @classmethod
@@ -132,6 +152,24 @@ class PodcastDraftTaskInput(BaseModel):
             raise ValueError("supplemental_source_segments must be unique")
         if set(initial_keys) & set(supplemental_keys):
             raise ValueError("initial and supplemental source segments must not overlap")
+
+        profile_present = self.writing_style_profile is not None
+        style_segments_present = self.writing_style_segments is not None
+        if profile_present != style_segments_present:
+            raise ValueError(
+                "writing_style_profile and writing_style_segments must be supplied together"
+            )
+        if self.writing_style_profile is not None and self.writing_style_segments is not None:
+            validate_writing_style_profile_segments(
+                profile=self.writing_style_profile,
+                source_segments=self.writing_style_segments,
+            )
+            style_keys = {
+                (segment.source_id, segment.source_segment_id)
+                for segment in self.writing_style_segments
+            }
+            if style_keys & (set(initial_keys) | set(supplemental_keys)):
+                raise ValueError("style-only and factual source segments must not overlap")
 
         initial_key_set = set(initial_keys)
         if any(
@@ -212,6 +250,18 @@ def _iter_output_references(output: PodcastDraftOutput) -> Iterator[SourceRefere
     yield from _iter_show_notes_references(output)
 
 
+def _iter_output_text(output: PodcastDraftOutput) -> Iterator[str]:
+    yield output.podcast_script.opening.text
+    for section in output.podcast_script.sections:
+        yield section.title
+        for paragraph in section.paragraphs:
+            yield paragraph.text
+    yield output.podcast_script.closing.text
+    yield output.show_notes.summary.text
+    for key_point in output.show_notes.key_points:
+        yield key_point.text
+
+
 def editor_output_reference_keys(
     content: dict[str, Any],
 ) -> tuple[SourceReferenceKey, ...]:
@@ -280,4 +330,57 @@ def validate_podcast_draft_output(
             "show notes must use at least one supplemental source reference"
         )
 
+    if parsed_input.writing_style_segments is not None:
+        factual_texts = [
+            segment.text
+            for segment in [
+                *parsed_input.initial_source_segments,
+                *parsed_input.supplemental_source_segments,
+            ]
+        ]
+        if _contains_unique_style_sample_window(
+            output_texts=list(_iter_output_text(parsed_output)),
+            style_texts=[segment.text for segment in parsed_input.writing_style_segments],
+            factual_texts=factual_texts,
+        ):
+            raise WritingStyleSampleLeak(
+                "podcast draft copied a distinctive long passage from a style-only sample"
+            )
+
     return parsed_output.model_dump(mode="json")
+
+
+def _contains_unique_style_sample_window(
+    *,
+    output_texts: list[str],
+    style_texts: list[str],
+    factual_texts: list[str],
+) -> bool:
+    output_windows = {
+        window
+        for text in output_texts
+        for window in _distinctive_windows(_normalize_style_leak_text(text))
+    }
+    if not output_windows:
+        return False
+    factual_windows = {
+        window
+        for text in factual_texts
+        for window in _distinctive_windows(_normalize_style_leak_text(text))
+    }
+    for text in style_texts:
+        for window in _distinctive_windows(_normalize_style_leak_text(text)):
+            if window in output_windows and window not in factual_windows:
+                return True
+    return False
+
+
+def _normalize_style_leak_text(text: str) -> str:
+    return _STYLE_LEAK_NORMALIZATION_PATTERN.sub("", text).casefold()
+
+
+def _distinctive_windows(text: str) -> Iterator[str]:
+    for start in range(0, len(text) - STYLE_SAMPLE_LEAK_WINDOW_CHARS + 1):
+        window = text[start : start + STYLE_SAMPLE_LEAK_WINDOW_CHARS]
+        if len(set(window)) >= STYLE_SAMPLE_LEAK_MINIMUM_UNIQUE_CHARS:
+            yield sha256(window.encode("utf-8")).hexdigest()

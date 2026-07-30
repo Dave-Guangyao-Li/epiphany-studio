@@ -13,6 +13,7 @@ from pydantic import (
 
 from epiphany.quality_contract_schemas import CreativeBrief, DraftQualityConfig
 from epiphany.schemas import SourceReference
+from epiphany.writing_style_schemas import WritingStyleReference
 
 TIMELINE_RESEARCH = "timeline_research"
 THEME_RESEARCH = "theme_research"
@@ -41,6 +42,7 @@ class EpisodeResearchPayload(BaseModel):
     source_ids: list[str] = Field(min_length=1, max_length=20)
     creative_brief: CreativeBrief | None = None
     draft_quality: DraftQualityConfig | None = None
+    writing_style_reference: WritingStyleReference | None = None
 
     @field_validator("topic")
     @classmethod
@@ -62,9 +64,16 @@ class EpisodeResearchPayload(BaseModel):
         if self.creative_brief is None:
             if self.draft_quality is not None:
                 raise ValueError("draft_quality requires a creative_brief")
+            if self.writing_style_reference is not None:
+                raise ValueError("writing_style_reference requires a creative_brief")
             return self
         if self.draft_quality is None:
             self.draft_quality = DraftQualityConfig()
+        if self.writing_style_reference is not None:
+            factual_source_ids = set(self.source_ids)
+            style_source_ids = {sample.source_id for sample in self.writing_style_reference.samples}
+            if factual_source_ids & style_source_ids:
+                raise ValueError("writing-style Sources must be separate from factual source_ids")
         return self
 
 

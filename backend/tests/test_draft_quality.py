@@ -9,12 +9,14 @@ from epiphany.draft_quality import (
     build_deterministic_quality_facts,
     build_draft_quality_report,
 )
+from epiphany.draft_quality_markdown import render_draft_quality_markdown
 from epiphany.draft_quality_schemas import (
     CHINESE_STYLE_HEURISTIC_VERSION,
     DRAFT_QUALITY_RULES_VERSION,
     LEGACY_DRAFT_QUALITY_FORMULA_VERSION,
     LEGACY_DRAFT_QUALITY_RULES_VERSION,
     REVIEW_DIMENSIONS,
+    STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
     DeterministicDraftMetrics,
     DraftQualityReport,
     InvalidModelReviewEvidence,
@@ -168,6 +170,41 @@ def _model_review(
         "advisory": True,
         "dimensions": dimensions,
     }
+
+
+def _style_aware_model_review(
+    *,
+    base_score: int,
+    personal_style_score: int,
+) -> dict[str, object]:
+    review = _model_review(score=base_score)
+    review["dimensions"].append(
+        {
+            "dimension": "personal_style_match",
+            "assessable": True,
+            "score": personal_style_score,
+            "assessment": "初稿和个人样本都使用具体画面推进反思，但句子节奏仍有差异。",
+            "limitation": None,
+            "evidence": [
+                {
+                    "location": "podcast_script.opening",
+                    "exact_quote": _good_draft().podcast_script.opening.text[:12],
+                    "source_refs": [],
+                }
+            ],
+            "style_sample_evidence": [
+                {
+                    "location": "writing_style_segments[0]",
+                    "exact_quote": "我通常会先写下一个很小的画面。",
+                    "source_ref": {
+                        "source_id": "src_style",
+                        "source_segment_id": "seg_style",
+                    },
+                }
+            ],
+        }
+    )
+    return review
 
 
 def test_config_is_versioned_enabled_and_forbids_unknown_fields() -> None:
@@ -931,3 +968,83 @@ def test_objective_blocker_cannot_be_overridden_by_model_and_failure_degrades() 
     assert partial.decision == "automated_review_incomplete"
     assert partial.experimental_model_score is None
     assert partial.model_self_review is not None
+
+
+def test_v3_weights_ready_personal_style_without_bypassing_hard_caps() -> None:
+    healthy = analyze_podcast_draft(
+        draft=_good_draft(),
+        creative_brief=_brief(),
+    )
+    review = ModelSelfReviewOutput.model_validate(
+        _style_aware_model_review(base_score=3, personal_style_score=5)
+    )
+    report = build_draft_quality_report(
+        deterministic=healthy,
+        model_self_review=review,
+        scoring_formula_version=STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
+        writing_style_context_status="ready",
+    )
+
+    # Six base dimensions average 60; personal style contributes 30% of the
+    # model component: 60 * 0.70 + 100 * 0.30 = 72.
+    assert report.experimental_model_score == 72
+    assert report.experimental_uncapped_overall_score == round(
+        healthy.deterministic_score * 0.6 + 72 * 0.4,
+        2,
+    )
+    assert report.writing_style_context_status == "ready"
+    markdown = render_draft_quality_markdown(report.model_dump(mode="json"))
+    assert "个人写作风格匹配：5/5" in markdown
+    assert "写作样本证据" in markdown
+    assert "个人风格占模型分的 30%" in markdown
+
+    short_draft = _draft_with_script_character_count(200)
+    blocked = analyze_podcast_draft(
+        draft=short_draft,
+        creative_brief=_brief(),
+    )
+    blocked_report = build_draft_quality_report(
+        deterministic=blocked,
+        model_self_review=ModelSelfReviewOutput.model_validate(
+            _style_aware_model_review(base_score=5, personal_style_score=5)
+        ),
+        scoring_formula_version=STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
+        writing_style_context_status="ready",
+    )
+
+    assert blocked_report.experimental_model_score == 100
+    assert blocked_report.code_owned_score_cap == 39
+    assert blocked_report.experimental_overall_score == 39
+    assert blocked_report.decision == "blocked"
+
+
+def test_v3_limited_style_keeps_six_dimension_score_and_markdown_is_explicit() -> None:
+    deterministic = analyze_podcast_draft(
+        draft=_good_draft(),
+        creative_brief=_brief(),
+    )
+    report = build_draft_quality_report(
+        deterministic=deterministic,
+        model_self_review=ModelSelfReviewOutput.model_validate(_model_review(score=4)),
+        scoring_formula_version=STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
+        writing_style_context_status="limited",
+    )
+
+    assert report.experimental_model_score == 80
+    markdown = render_draft_quality_markdown(report.model_dump(mode="json"))
+    assert "样本量有限" in markdown
+    assert "不评价、也不声称稿子是否像本人" in markdown
+    assert "个人风格不可评估" in markdown
+
+
+def test_pre_v3_formula_cannot_claim_ready_personal_style_context() -> None:
+    deterministic = analyze_podcast_draft(
+        draft=_good_draft(),
+        creative_brief=_brief(),
+    )
+    with pytest.raises(ValueError, match="only the v3 formula"):
+        build_draft_quality_report(
+            deterministic=deterministic,
+            model_self_review=ModelSelfReviewOutput.model_validate(_model_review(score=4)),
+            writing_style_context_status="ready",
+        )

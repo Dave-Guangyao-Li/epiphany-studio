@@ -2,6 +2,72 @@
 
 ## 2026-07-30
 
+### M3.6 consented writing-style context and explicit guided Revision Runs
+
+- Versioned new quality-enabled Runs as workflow v8. Historical v1–v7 Runs
+  retain their persisted execution semantics; the Revision path uses a
+  separate `podcast-revision` workflow rather than replaying or mutating its
+  parent.
+- Added Alembic revision `0004_run_lineage`. It adds nullable
+  `runs.parent_run_id`, a self-referential foreign key, and an index so a child
+  Revision Run can be traced to its immutable parent.
+- Added optional `writing_style_reference` input for one to five user-owned
+  existing Sources. The caller must attest ownership and consent to model
+  processing, and style Source IDs must be disjoint from factual `source_ids`
+  within that Run. `writing_sample` is only an optional import/UI label; the
+  explicit per-Run style-only selection is authoritative.
+- Built a deterministic, bounded `writing_style_profile`: at most 20 selected
+  segments and 12,000 non-whitespace characters, with stable references,
+  hashes, aggregate sentence/paragraph statistics, readiness, and no copied
+  sample text. The ready threshold is 800 characters and five sentences.
+- Fixed the Editor priority boundary as application safety and grounded facts,
+  then the current revision request and Creative Brief, then writing samples,
+  then defaults. Samples are untrusted `style_only` data: they cannot supply
+  facts, instructions, or citations. Output validation also rejects direct
+  copying of a distinctive sample window unless that text independently
+  appears in allowed factual evidence.
+- Added a style-aware Reviewer v3 contract. A ready profile adds the seventh
+  `personal_style_match` dimension and requires evidence from both the Draft
+  and a style sample. Missing or limited style context retains the six existing
+  dimensions and cannot support a claim that the Draft sounds like the user.
+  Human `voice_match_rating` remains the final product signal.
+- Added an on-demand deterministic `draft_improvement_plan`. It calculates the
+  spoken-text duration gap, identifies unused factual SourceSegments, chooses
+  between reuse/supplement/lower-duration strategies, carries quality gaps, and
+  derives three to six targeted questions from the persisted Interview
+  Scaffold. Reading the Plan makes no model call and creates no child Run.
+- Added explicit `POST /runs/{parent_id}/revisions`. The request selects
+  actions, feedback/gaps, optional supplemental Sources, an optional lower
+  target, and a bounded instruction. Stable `submission_id` replay returns the
+  same child; reusing it with different choices returns a conflict.
+- Added one `revise_podcast_draft` root Task to the child Run. It consumes the
+  immutable parent Draft as edit context, not as new factual evidence; returns
+  a complete candidate rather than an in-place diff; uses the child's own
+  model-call budget; and then queues the ordinary deterministic quality and
+  Reviewer path.
+- Preserved parent candidate immutability. A completed revision does not alter
+  the parent's Draft, quality report, feedback, output pointer, ModelCall
+  ledger, or existing Events. The deterministic Plan, explicit request
+  provenance, and request Event are append-only additions on the parent.
+- Added lazy, persisted `draft_revision_comparison`. It records text-free
+  parent/revision summaries and character, duration, deterministic-score, and
+  experimental-score deltas. It always records
+  `automatic_winner_selected=false` and `requires_human_review=true`.
+- Added API, schema, Provider, prompt, retry/recovery, validation, privacy, and
+  integration coverage for the complete zero-cost Fake path. Tests exercise
+  Plan idempotency, explicit child creation, a child that still completes when
+  the per-Run limit is tightened to two after the parent spent five calls,
+  style/fact separation, seventh-dimension gating, parent immutability, quality
+  re-evaluation, and comparison replay.
+- Added a repeatable synthetic-user E2E driver and fixture. The guarded
+  `python -m epiphany.guided_revision_e2e --execute` path uses Fake only,
+  pauses and resumes the parent, records synthetic feedback, explicitly creates
+  the child, exports both candidates and reports, validates log redaction, and
+  writes its disposable database/report under ignored local paths. The final
+  backend suite has 292 passing tests.
+- A live DeepSeek M3.6 E2E has not been run. The passing Fake workflow proves
+  orchestration and contracts, not the quality of a real revised script.
+
 ### M3.5 Chinese draft-quality calibration and frozen Reviewer comparison
 
 - Versioned new quality-enabled Runs as workflow v7 because the persisted
@@ -94,11 +160,9 @@
   It cannot establish that Pro is generally better or that Flash generally
   fails. More topics, lengths, repeated trials, and real-user feedback are
   required before changing the default.
-- Planned M3.6, but did not implement it in this slice. The intended boundary
-  is an explicit feedback-driven child Revision Run with immutable parent
-  Draft/report, selected feedback, its own budget, a new candidate, and a full
-  re-evaluation. Append-only feedback still has no automatic rewrite side
-  effect, and there is no score-chasing loop.
+- At the M3.5 cut, M3.6 remained a plan: an explicit feedback-driven child
+  Revision Run with an immutable parent and no score-chasing loop. The M3.6
+  entry above records the later implementation of that boundary.
 
 ## 2026-07-29
 
