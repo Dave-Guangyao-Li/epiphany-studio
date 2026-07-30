@@ -506,6 +506,28 @@ Reviewer 与非补偿 cap。父 Draft、Report、Feedback、output 和调用账�
 `automatic_winner_selected=false`，最终采用哪一稿仍由用户决定。自动化
 Fake workflow 已覆盖上述链路；M3.6 的真实 DeepSeek E2E 尚未执行。
 
+### M3.7 写作样本效果验证
+
+写作样本已经接入并不等于它真的让稿子更像用户。验证时必须冻结同一份
+topic、Creative Brief、采访脚手架、初始素材与补充口述，只改变 Editor
+是否收到 ready 写作样本。重新运行 Researcher 或 Interviewer 会引入额外
+差异，不能算受控比较。
+
+M3.7a 先提供只读预检：从已完成的 v8 Run 读取原始 Editor 输入，构造
+`without_sample` 与 `with_sample` 两臂，并对删除风格字段后的公共输入计算
+同一个 hash。更宽的实验合同还冻结质量配置、模型档位、temperature、
+token/bundle 上限和 Reviewer 共用的 style context；Sample 必须真的改变
+Editor Prompt，否则预检阻断。命令默认不联网、不写实验产物，通过 SQLite
+只读模式保证不修改 Run 业务记录，不调用模型，也不输出素材、Sample、Prompt
+或 Key。SQLite 自身仍可能维护 WAL/SHM 连接辅助文件。
+
+后续执行阶段固定使用同一个 Flash Editor 生成两稿，再让同一个 Pro Reviewer
+在同一份 ready Sample 下评价两稿。即使 Control 生成时没有见过 Sample，
+Reviewer 也必须看见 Sample，否则两边的 `personal_style_match` 不可比。
+真实结论以用户不知道分组时提交的 `voice_match_rating` 和 forced choice
+为主；模型评分只是辅助证据。单个 pair 只能形成方向性案例，不能代表普遍
+效果。
+
 ## 7. 成功标准
 
 完成 MVP 时，应能演示：

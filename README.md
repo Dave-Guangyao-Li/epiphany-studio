@@ -500,12 +500,35 @@ cover the parent, Plan, explicit idempotent revision, child quality review,
 style-only isolation, immutable parent, and comparison path. A live DeepSeek
 M3.6 E2E has **not** yet been run.
 
+M3.7a starts the writing-sample A/B experiment as a deliberately small,
+zero-network slice. It loads the one completed workflow-v8 Editor input that
+already contains a consented, ready writing sample; derives two arms from that
+same frozen bundle; removes only the style profile and style segments from the
+no-sample arm; and proves with a canonical hash that topic, evidence,
+supplemental material, Scaffold, Creative Brief, and quality settings remain
+identical. The command prints only hashes, counts, model names, and privacy
+flags. It makes no Provider call, writes no experiment files, and never changes
+the source Run:
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m epiphany.writing_style_ab \
+  --run-id run_xxx \
+  --database data/epiphany.db
+```
+
+This preflight does not claim that the sample improves the Draft. M3.7b will
+add the bounded two-Editor/two-Reviewer executor, and M3.7c will blind the
+candidates before human voice-match and recordability ratings.
+
 See the
 [M3.6 learning chapter](docs/learning/m3-6-guided-revision-writing-style.zh-CN.md)
-for the complete contract, Swagger path, SQLite inspection, and the repeatable
-zero-cost E2E command. The earlier calibration details remain in the
-[M3.5 learning chapter](docs/learning/m3-5-chinese-quality-calibration.zh-CN.md).
-and
+for the complete Revision contract, and the
+[M3.7a learning chapter](docs/learning/m3-7a-writing-style-ab-preflight.zh-CN.md)
+for the controlled-input proof. The earlier calibration details remain in the
+[M3.5 learning chapter](docs/learning/m3-5-chinese-quality-calibration.zh-CN.md)
+and the
 [Chinese podcast style research note](docs/research/chinese-podcast-style-signals.zh-CN.md).
 
 ## License
