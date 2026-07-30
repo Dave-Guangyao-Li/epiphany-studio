@@ -39,6 +39,11 @@
   81,387 ms provider time, and an estimated CNY 0.117905. Both anonymous Drafts
   remained duration-blocked at 5.64--6.02 minutes despite equal 84.67 model
   scores; their deterministic score was 58 and capped overall score was 39.
+- The source material and writing Sample in that source Run are complete
+  synthetic fixtures. The run validates real Provider behavior and the
+  experiment mechanism, not the effectiveness of a user's private writing
+  Sample. A blind human can still assess naturalness and recordability, while
+  genuine personal-style validation is deferred until consented UI onboarding.
 - Prepared two private Candidate A/B files and a salted mapping commitment
   without revealing treatment. One human blind rating and post-rating reveal
   remain the hard M3 exit criterion; general benchmarking and blind-rating UI

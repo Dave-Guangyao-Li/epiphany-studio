@@ -535,6 +535,8 @@ The first bounded live pair completed all four calls without retry: 42,503
 input tokens, 9,579 output tokens, and an estimated CNY 0.117905. Both Drafts
 remained duration-blocked despite high model-review scores. Candidate A/B are
 prepared, but treatment stays hidden until the human blind rating is stored.
+The Source and writing Sample are synthetic fixtures, so this proves the live
+experiment mechanism rather than the effectiveness of a user's private Sample.
 
 See the
 [M3.6 learning chapter](docs/learning/m3-6-guided-revision-writing-style.zh-CN.md)
