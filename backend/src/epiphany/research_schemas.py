@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-from epiphany.quality_contract_schemas import CreativeBrief
+from epiphany.quality_contract_schemas import CreativeBrief, DraftQualityConfig
 from epiphany.schemas import SourceReference
 
 TIMELINE_RESEARCH = "timeline_research"
@@ -33,6 +40,7 @@ class EpisodeResearchPayload(BaseModel):
     topic: str = Field(min_length=1, max_length=200)
     source_ids: list[str] = Field(min_length=1, max_length=20)
     creative_brief: CreativeBrief | None = None
+    draft_quality: DraftQualityConfig | None = None
 
     @field_validator("topic")
     @classmethod
@@ -48,6 +56,16 @@ class EpisodeResearchPayload(BaseModel):
         if len(value) != len(set(value)):
             raise ValueError("source_ids must be unique")
         return value
+
+    @model_validator(mode="after")
+    def resolve_draft_quality(self) -> EpisodeResearchPayload:
+        if self.creative_brief is None:
+            if self.draft_quality is not None:
+                raise ValueError("draft_quality requires a creative_brief")
+            return self
+        if self.draft_quality is None:
+            self.draft_quality = DraftQualityConfig()
+        return self
 
 
 class ResearchSourceSegment(BaseModel):

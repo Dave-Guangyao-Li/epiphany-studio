@@ -51,7 +51,9 @@ The first vertical slice will:
    the requested duration.
 6. Pause for supplemental human input when the evidence is clearly too short.
 7. Generate a source-grounded draft and show notes.
-8. Expose a replayable run/task event trace.
+8. Produce an explainable Draft Quality Report and keep automated review
+   separate from human feedback.
+9. Expose a replayable run/task event trace.
 
 Every extracted claim must point back to a source segment. Generated memories
 remain candidates until the user confirms them.
@@ -321,11 +323,65 @@ characters. After Scaffold-reference minimum disclosure the readiness gate sees
 3 ModelCalls to 5 / 8 / 4, and uses zero tokens and zero cost with Fake
 Provider. All 178 tests, Ruff, Alembic, and the guarded Fake E2E pass.
 
-M3.4 will evaluate the generated draft itself: deterministic duration and
-repetition checks, an evidence-bearing model self-review, and separately stored
-human feedback. Mock feedback and same-model review will remain labeled as
-synthetic/advisory rather than presented as real user approval. See the
-[M3.3 learning chapter](docs/learning/m3-3-creative-brief-material-readiness.zh-CN.md).
+M3.4 adds post-draft quality review as workflow `v6`. Draft quality is enabled
+by default when a `creative_brief` is present; an explicit
+`"draft_quality": {"enabled": false}` preserves the v5, no-review path. After
+Editor, ordinary code records duration, citation coverage, repetition, Brief
+constraints, filler, and template-pattern metrics. It then queues one serial
+`review_podcast_draft` Task with six fixed dimensions.
+
+An assessable model dimension must cite a stable Draft location and an exact
+verbatim quote. Application code verifies the quote and SourceReference scope,
+then owns the final decision; the model cannot erase a deterministic blocker.
+When Editor and Reviewer use the same model, the report explicitly says
+`same_model`, `self-review`, and `advisory`. It never reports an unverifiable
+"AI-written probability."
+
+A Reviewer failure never hides an already valid Draft. If deterministic rules
+already found a blocker, the decision stays `blocked`; otherwise it degrades to
+`automated_review_incomplete`. The Run still succeeds with the Editor Draft as
+its output, while metrics and the failure reason remain traceable. Feedback is
+append-only and separate. The unauthenticated MVP treats `feedback_origin` as a
+caller-declared marker, not verified human identity; its own E2E always uses
+`synthetic_test`, which is stored with `human_signal_eligible=false`.
+
+The guarded v6 E2E can run end to end with Fake or DeepSeek:
+
+```bash
+cd backend
+python -m epiphany.draft_quality_e2e --provider fake --execute
+```
+
+On 2026-07-29, bounded DeepSeek Run
+`run_276a3bce22394eb8a56edd6af8760012` completed all 5 calls, 6 Tasks, and
+11 pre-feedback Artifacts. It used 26,618 input and 11,239 output tokens,
+61,669 ms combined Provider duration, and a local estimated cost of CNY
+0.049096. After one idempotent `synthetic_test` feedback submission the Run
+had 12 Artifacts. The three-stage restart/checkpoint journey, persistent
+Reviewer queue, supplemental grounding, feedback replay, and 85-line
+content-free JSONL log all passed.
+
+The quality decision was `revision_recommended`: deterministic checks scored
+72 because a 10-minute target produced 1,429 non-whitespace characters, or
+about 5.1 minutes. Citation coverage was 100% across 4 Sources / 10 Segments,
+with no duplicate paragraph, one filler hit, and four repeated "not ... but
+..." constructions. The same-model Reviewer nevertheless scored all six
+dimensions 5/5, producing an experimental 83.2. This disagreement is useful
+evidence for keeping self-review advisory and asking for more source material
+instead of padding the Draft.
+
+An earlier paid attempt was correctly rejected at Editor validation with
+`podcast_draft_missing_supplemental_source_reference`. The prompt/output
+self-check was strengthened before the successful Run. Its separate estimated
+CNY 0.039696 is development debugging cost and is not included in the
+successful Run's CNY 0.049096. Both values are local price-table estimates;
+the provider dashboard or invoice may differ because of billing rules,
+caching, and reporting delay.
+
+See the
+[M3.3 learning chapter](docs/learning/m3-3-creative-brief-material-readiness.zh-CN.md)
+and
+[M3.4 Draft Quality Report chapter](docs/learning/m3-4-draft-quality-report.zh-CN.md).
 
 ## License
 

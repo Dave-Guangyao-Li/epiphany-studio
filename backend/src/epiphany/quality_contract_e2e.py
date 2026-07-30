@@ -38,6 +38,8 @@ from epiphany.checkpoint_e2e import (
     load_fixture,
 )
 from epiphany.config import Settings
+from epiphany.draft_feedback_schemas import DraftUserFeedbackResponse
+from epiphany.draft_quality_schemas import DraftQualityReportRecord
 from epiphany.live_deepseek_smoke import database_url_for_path, migrate_database
 from epiphany.main import create_app
 from epiphany.material_readiness import MaterialReadinessReport, assess_material_readiness
@@ -51,6 +53,7 @@ DEFAULT_OUTPUT_DIR = BACKEND_DIR / "artifacts/quality-contract-e2e"
 
 LIVE_MODEL = "deepseek-v4-flash"
 MAX_MODEL_CALLS = 4
+MAX_QUALITY_MODEL_CALLS = 5
 MAX_TASK_ATTEMPTS = 1
 MAX_CONCURRENCY = 1
 TASK_TIMEOUT_SECONDS = 120
@@ -95,6 +98,14 @@ class QualityContractPaths:
     @property
     def show_notes(self) -> Path:
         return self.output_dir / "show-notes.md"
+
+    @property
+    def quality_report_json(self) -> Path:
+        return self.output_dir / "draft-quality-report.json"
+
+    @property
+    def quality_report_markdown(self) -> Path:
+        return self.output_dir / "draft-quality-report.md"
 
 
 def _expected_contract(payload: object) -> dict[str, Any]:
@@ -210,6 +221,7 @@ def build_preflight(
     paths: QualityContractPaths,
     billing_currency: str,
     fixture: dict[str, Any],
+    quality_review: bool = False,
 ) -> dict[str, Any]:
     deepseek_execution = execute and provider == "deepseek"
     brief = fixture["creative_brief"]
@@ -246,7 +258,8 @@ def build_preflight(
                 "target_script_chars_min"
             ],
         },
-        "max_model_calls_per_run": MAX_MODEL_CALLS,
+        "quality_review_enabled": quality_review,
+        "max_model_calls_per_run": (MAX_QUALITY_MODEL_CALLS if quality_review else MAX_MODEL_CALLS),
         "max_attempts_per_task": MAX_TASK_ATTEMPTS,
         "max_concurrency": MAX_CONCURRENCY,
         "flow_timeout_seconds": FLOW_TIMEOUT_SECONDS,
@@ -276,11 +289,25 @@ def build_preflight(
             "interview_scaffold": str(paths.interview_scaffold),
             "podcast_draft": str(paths.podcast_draft),
             "show_notes": str(paths.show_notes),
+            **(
+                {
+                    "quality_report_json": str(paths.quality_report_json),
+                    "quality_report_markdown": str(paths.quality_report_markdown),
+                }
+                if quality_review
+                else {}
+            ),
         },
-        "m3_3_boundary": (
-            "The deterministic readiness gate pauses without an Editor call, "
-            "survives an application restart, then accepts one synthetic "
-            "supplement and continues through the existing Editor."
+        ("m3_4_boundary" if quality_review else "m3_3_boundary"): (
+            "M3.4 additionally restarts after Editor, resumes one persisted "
+            "Reviewer, exports an evidence-bearing quality report, and records "
+            "synthetic feedback without treating it as a human signal."
+            if quality_review
+            else (
+                "The deterministic readiness gate pauses without an Editor call, "
+                "survives an application restart, then accepts one synthetic "
+                "supplement and continues through the existing Editor."
+            )
         ),
     }
 
@@ -290,18 +317,21 @@ def _runtime_settings(
     database_url: str,
     provider_name: Literal["fake", "deepseek"],
     settings: Settings,
+    quality_review: bool = False,
 ) -> Settings:
     return Settings(
         database_url=database_url,
         create_schema_on_start=False,
         log_level="INFO",
-        worker_enabled=True,
+        # M3.4 drives individual Tasks explicitly so the E2E can prove that
+        # the queued Reviewer survives a second application restart.
+        worker_enabled=not quality_review,
         worker_poll_interval_seconds=0.02,
         worker_max_concurrency=MAX_CONCURRENCY,
         worker_lease_seconds=150,
         task_timeout_seconds=TASK_TIMEOUT_SECONDS,
         task_max_attempts=MAX_TASK_ATTEMPTS,
-        model_max_calls_per_run=MAX_MODEL_CALLS,
+        model_max_calls_per_run=(MAX_QUALITY_MODEL_CALLS if quality_review else MAX_MODEL_CALLS),
         model_provider=provider_name,
         deepseek_billing_currency=settings.deepseek_billing_currency,
     )
@@ -369,6 +399,7 @@ def _read_log_summary(
     *,
     forbidden_texts: list[str],
     provider_name: str,
+    quality_review: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     raw_log = path.read_text(encoding="utf-8")
     rows: list[dict[str, Any]] = []
@@ -394,10 +425,21 @@ def _read_log_summary(
         "workflow.editor.queued",
         "workflow.editor.completed",
     }
+    if quality_review:
+        required_events.update(
+            {
+                "workflow.draft_metrics.evaluated",
+                "workflow.draft_self_review.queued",
+                "workflow.draft_self_review.completed",
+                "workflow.draft_quality.completed",
+                "workflow.draft_quality.feedback_recorded",
+            }
+        )
     required_present = required_events.issubset(event_counts)
     deepseek_completed = event_counts.get("provider.deepseek.request.completed", 0)
+    expected_model_calls = MAX_QUALITY_MODEL_CALLS if quality_review else MAX_MODEL_CALLS
     deepseek_count_valid = (
-        deepseek_completed == MAX_MODEL_CALLS
+        deepseek_completed == expected_model_calls
         if provider_name == "deepseek"
         else deepseek_completed == 0
     )
@@ -445,6 +487,7 @@ async def execute_e2e(
     provider_name: Literal["fake", "deepseek"],
     settings: Settings,
     secret_values: Sequence[str] = (),
+    quality_review: bool = False,
 ) -> dict[str, Any]:
     paths.database.parent.mkdir(parents=True, exist_ok=True)
     paths.output_dir.mkdir(parents=True, exist_ok=True)
@@ -455,6 +498,7 @@ async def execute_e2e(
         database_url=database_url,
         provider_name=provider_name,
         settings=settings,
+        quality_review=quality_review,
     )
 
     file_handler = logging.FileHandler(paths.log, mode="w", encoding="utf-8")
@@ -473,6 +517,14 @@ async def execute_e2e(
     waiting_events: list[dict[str, Any]]
     scaffold_before: str
     run_id: str
+    editor_checkpoint_run: dict[str, Any] | None = None
+    editor_restarted_run: dict[str, Any] | None = None
+    quality_report_payload: dict[str, Any] | None = None
+    quality_report_markdown = ""
+    feedback_response: dict[str, Any] | None = None
+    feedback_replay: dict[str, Any] | None = None
+    feedback_records: list[dict[str, Any]] = []
+    final_run_after_feedback: dict[str, Any] | None = None
     try:
         first_app = create_app(settings=runtime_settings, provider=provider)
         async with first_app.router.lifespan_context(first_app):
@@ -508,6 +560,7 @@ async def execute_e2e(
                             "topic": fixture["topic"],
                             "source_ids": source_ids,
                             "creative_brief": fixture["creative_brief"],
+                            "draft_quality": {"enabled": quality_review},
                         },
                     },
                 )
@@ -520,6 +573,8 @@ async def execute_e2e(
                         code="run_response_invalid",
                     )
                 run_id = created["id"]
+                if quality_review:
+                    await first_app.state.worker.run_until_idle()
                 waiting = await _poll_for_checkpoint(client, run_id)
                 if waiting.get("status") != fixture["expected"]["waiting_status"]:
                     raise E2EFlowError(
@@ -603,43 +658,228 @@ async def execute_e2e(
                         code="resume_response_invalid",
                     )
 
-                final_run = await _poll_for_terminal(client, run_id)
-                if final_run.get("status") != "succeeded":
-                    raise E2EFlowError(
-                        stage="poll_terminal",
-                        code=f"run_stopped_as_{final_run.get('status', 'unknown')}",
-                        safe_context={"run": _safe_run_summary(final_run)},
+                if quality_review:
+                    if not await restarted_app.state.worker.run_once():
+                        raise E2EFlowError(
+                            stage="execute_editor",
+                            code="editor_task_not_claimed",
+                        )
+                    editor_checkpoint_run = await _get_run(
+                        client,
+                        run_id,
+                        stage="get_after_editor",
+                        request_id="req_m34_get_after_editor",
                     )
-                final_events = await _events(
-                    client,
-                    run_id,
-                    stage="events_after_editor",
-                    request_id="req_m33_events_after_editor",
-                )
-                scaffold_after = await _request_markdown(
-                    client,
-                    f"/runs/{run_id}/exports/interview-scaffold.md",
-                    stage="export_final_scaffold",
-                    request_id="req_m33_export_final_scaffold",
-                    run_id=run_id,
-                    filename_prefix="interview-scaffold",
-                )
-                podcast_draft = await _request_markdown(
-                    client,
-                    f"/runs/{run_id}/exports/podcast-draft.md",
-                    stage="export_podcast_draft",
-                    request_id="req_m33_export_podcast_draft",
-                    run_id=run_id,
-                    filename_prefix="podcast-draft",
-                )
-                show_notes = await _request_markdown(
-                    client,
-                    f"/runs/{run_id}/exports/show-notes.md",
-                    stage="export_show_notes",
-                    request_id="req_m33_export_show_notes",
-                    run_id=run_id,
-                    filename_prefix="show-notes",
-                )
+                    if (
+                        editor_checkpoint_run.get("status") != "running"
+                        or editor_checkpoint_run.get("current_step") != "review_podcast_draft"
+                    ):
+                        editor_task = next(
+                            (
+                                task
+                                for task in editor_checkpoint_run.get("tasks", [])
+                                if task.get("kind") == EDITOR_TASK_KIND
+                            ),
+                            None,
+                        )
+                        raise E2EFlowError(
+                            stage="execute_editor",
+                            code=(
+                                editor_task.get("error_code")
+                                if isinstance(editor_task, dict)
+                                and isinstance(editor_task.get("error_code"), str)
+                                else "editor_did_not_queue_reviewer"
+                            ),
+                            safe_context={"run": _safe_run_summary(editor_checkpoint_run)},
+                        )
+                else:
+                    final_run = await _poll_for_terminal(client, run_id)
+                    if final_run.get("status") != "succeeded":
+                        raise E2EFlowError(
+                            stage="poll_terminal",
+                            code=f"run_stopped_as_{final_run.get('status', 'unknown')}",
+                            safe_context={"run": _safe_run_summary(final_run)},
+                        )
+                    final_events = await _events(
+                        client,
+                        run_id,
+                        stage="events_after_editor",
+                        request_id="req_m33_events_after_editor",
+                    )
+                    scaffold_after = await _request_markdown(
+                        client,
+                        f"/runs/{run_id}/exports/interview-scaffold.md",
+                        stage="export_final_scaffold",
+                        request_id="req_m33_export_final_scaffold",
+                        run_id=run_id,
+                        filename_prefix="interview-scaffold",
+                    )
+                    podcast_draft = await _request_markdown(
+                        client,
+                        f"/runs/{run_id}/exports/podcast-draft.md",
+                        stage="export_podcast_draft",
+                        request_id="req_m33_export_podcast_draft",
+                        run_id=run_id,
+                        filename_prefix="podcast-draft",
+                    )
+                    show_notes = await _request_markdown(
+                        client,
+                        f"/runs/{run_id}/exports/show-notes.md",
+                        stage="export_show_notes",
+                        request_id="req_m33_export_show_notes",
+                        run_id=run_id,
+                        filename_prefix="show-notes",
+                    )
+
+        if quality_review:
+            reviewer_restarted_app = create_app(
+                settings=runtime_settings,
+                provider=provider,
+            )
+            async with reviewer_restarted_app.router.lifespan_context(reviewer_restarted_app):
+                transport = httpx.ASGITransport(app=reviewer_restarted_app)
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url="http://epiphany-draft-quality-e2e",
+                    timeout=30,
+                ) as client:
+                    editor_restarted_run = await _get_run(
+                        client,
+                        run_id,
+                        stage="get_editor_state_after_restart",
+                        request_id="req_m34_get_editor_state_after_restart",
+                    )
+                    if not await reviewer_restarted_app.state.worker.run_once():
+                        raise E2EFlowError(
+                            stage="execute_reviewer",
+                            code="reviewer_task_not_claimed",
+                        )
+                    final_run = await _get_run(
+                        client,
+                        run_id,
+                        stage="get_after_reviewer",
+                        request_id="req_m34_get_after_reviewer",
+                    )
+                    if final_run.get("status") != "succeeded":
+                        raise E2EFlowError(
+                            stage="execute_reviewer",
+                            code=f"run_stopped_as_{final_run.get('status', 'unknown')}",
+                            safe_context={"run": _safe_run_summary(final_run)},
+                        )
+                    final_events = await _events(
+                        client,
+                        run_id,
+                        stage="events_after_reviewer",
+                        request_id="req_m34_events_after_reviewer",
+                    )
+                    scaffold_after = await _request_markdown(
+                        client,
+                        f"/runs/{run_id}/exports/interview-scaffold.md",
+                        stage="export_final_scaffold",
+                        request_id="req_m34_export_final_scaffold",
+                        run_id=run_id,
+                        filename_prefix="interview-scaffold",
+                    )
+                    podcast_draft = await _request_markdown(
+                        client,
+                        f"/runs/{run_id}/exports/podcast-draft.md",
+                        stage="export_podcast_draft",
+                        request_id="req_m34_export_podcast_draft",
+                        run_id=run_id,
+                        filename_prefix="podcast-draft",
+                    )
+                    show_notes = await _request_markdown(
+                        client,
+                        f"/runs/{run_id}/exports/show-notes.md",
+                        stage="export_show_notes",
+                        request_id="req_m34_export_show_notes",
+                        run_id=run_id,
+                        filename_prefix="show-notes",
+                    )
+                    raw_quality_report = await _request_json(
+                        client,
+                        "GET",
+                        f"/runs/{run_id}/quality-report",
+                        stage="get_quality_report",
+                        request_id="req_m34_quality_report",
+                        expected_statuses={200},
+                    )
+                    if not isinstance(raw_quality_report, dict):
+                        raise E2EFlowError(
+                            stage="get_quality_report",
+                            code="quality_report_response_invalid",
+                        )
+                    quality_report_payload = DraftQualityReportRecord.model_validate(
+                        raw_quality_report
+                    ).model_dump(mode="json")
+                    quality_report_markdown = await _request_markdown(
+                        client,
+                        f"/runs/{run_id}/exports/quality-report.md",
+                        stage="export_quality_report",
+                        request_id="req_m34_export_quality_report",
+                        run_id=run_id,
+                        filename_prefix="quality-report",
+                    )
+                    synthetic_feedback = {
+                        "submission_id": "m34-synthetic-feedback-v1",
+                        "feedback_origin": "synthetic_test",
+                        "decision": "needs_revision",
+                        "overall_rating": 3,
+                        "voice_match_rating": 3,
+                        "recordability_rating": 3,
+                        "usefulness_rating": 4,
+                        "tone_fit_rating": 4,
+                        "would_record_as_is": False,
+                        "comment": ("Synthetic E2E feedback; never count as a real-user signal."),
+                    }
+                    raw_feedback = await _request_json(
+                        client,
+                        "POST",
+                        f"/runs/{run_id}/quality-feedback",
+                        stage="submit_quality_feedback",
+                        request_id="req_m34_submit_quality_feedback",
+                        expected_statuses={200},
+                        json_body=synthetic_feedback,
+                    )
+                    raw_feedback_replay = await _request_json(
+                        client,
+                        "POST",
+                        f"/runs/{run_id}/quality-feedback",
+                        stage="replay_quality_feedback",
+                        request_id="req_m34_replay_quality_feedback",
+                        expected_statuses={200},
+                        json_body=synthetic_feedback,
+                    )
+                    raw_feedback_records = await _request_json(
+                        client,
+                        "GET",
+                        f"/runs/{run_id}/quality-feedback",
+                        stage="list_quality_feedback",
+                        request_id="req_m34_list_quality_feedback",
+                        expected_statuses={200},
+                    )
+                    if (
+                        not isinstance(raw_feedback, dict)
+                        or not isinstance(raw_feedback_replay, dict)
+                        or not isinstance(raw_feedback_records, list)
+                    ):
+                        raise E2EFlowError(
+                            stage="quality_feedback",
+                            code="feedback_response_invalid",
+                        )
+                    feedback_response = DraftUserFeedbackResponse.model_validate(
+                        raw_feedback
+                    ).model_dump(mode="json")
+                    feedback_replay = DraftUserFeedbackResponse.model_validate(
+                        raw_feedback_replay
+                    ).model_dump(mode="json")
+                    feedback_records = raw_feedback_records
+                    final_run_after_feedback = await _get_run(
+                        client,
+                        run_id,
+                        stage="get_after_feedback",
+                        request_id="req_m34_get_after_feedback",
+                    )
     finally:
         application_logger.removeHandler(file_handler)
         file_handler.close()
@@ -675,17 +915,39 @@ async def execute_e2e(
     paths.interview_scaffold.write_text(scaffold_before, encoding="utf-8")
     paths.podcast_draft.write_text(podcast_draft, encoding="utf-8")
     paths.show_notes.write_text(show_notes, encoding="utf-8")
+    if quality_report_payload is not None:
+        _write_json(paths.quality_report_json, quality_report_payload)
+        paths.quality_report_markdown.write_text(
+            quality_report_markdown,
+            encoding="utf-8",
+        )
 
-    expected = fixture["expected"]
+    expected = dict(fixture["expected"])
+    if quality_review:
+        expected.update(
+            {
+                "workflow_version": "v6",
+                "final_task_count": 6,
+                "final_artifact_count": 11,
+                "final_model_call_count": MAX_QUALITY_MODEL_CALLS,
+            }
+        )
     waiting_summary = _safe_run_summary(waiting)
     restarted_summary = _safe_run_summary(restarted_waiting)
     final_summary = _safe_run_summary(final_run)
+    editor_checkpoint_summary = (
+        None if editor_checkpoint_run is None else _safe_run_summary(editor_checkpoint_run)
+    )
+    editor_restarted_summary = (
+        None if editor_restarted_run is None else _safe_run_summary(editor_restarted_run)
+    )
     waiting_event_types = [str(event.get("type")) for event in waiting_events]
     final_event_types = [str(event.get("type")) for event in final_events]
     scaffold_sha = hashlib.sha256(scaffold_before.encode("utf-8")).hexdigest()
     draft_sha = hashlib.sha256(podcast_draft.encode("utf-8")).hexdigest()
     notes_sha = hashlib.sha256(show_notes.encode("utf-8")).hexdigest()
     model_calls = final_run.get("model_calls", [])
+    expected_model_calls = MAX_QUALITY_MODEL_CALLS if quality_review else MAX_MODEL_CALLS
     expected_currency = provider.billing_currency.upper()
     supplemental_title = str(fixture["supplemental_source"]["title"])
     scaffold_structure = _scaffold_markdown_checks(
@@ -760,7 +1022,7 @@ async def execute_e2e(
             final_run.get("status") == "succeeded" and final_run.get("current_step") == "complete"
         ),
         "model_calls_match_provider": (
-            len(model_calls) == MAX_MODEL_CALLS
+            len(model_calls) == expected_model_calls
             and all(
                 call.get("status") == "succeeded"
                 and call.get("provider") == provider_name
@@ -771,13 +1033,26 @@ async def execute_e2e(
         ),
         "pivotal_events_ordered": _is_ordered_subsequence(
             final_event_types,
-            [
-                "run.waiting_for_user",
-                "run.resumed",
-                "workflow.editor.queued",
-                "workflow.editor.completed",
-                "run.succeeded",
-            ],
+            (
+                [
+                    "run.waiting_for_user",
+                    "run.resumed",
+                    "workflow.editor.queued",
+                    "workflow.editor.completed",
+                    "workflow.draft_self_review.queued",
+                    "workflow.draft_quality.completed",
+                    "workflow.draft_self_review.completed",
+                    "run.succeeded",
+                ]
+                if quality_review
+                else [
+                    "run.waiting_for_user",
+                    "run.resumed",
+                    "workflow.editor.queued",
+                    "workflow.editor.completed",
+                    "run.succeeded",
+                ]
+            ),
         ),
         "resume_and_editor_emitted_once": (
             final_event_types.count("run.resumed") == 1
@@ -794,6 +1069,100 @@ async def execute_e2e(
         ),
     }
 
+    if quality_review:
+        report = (
+            quality_report_payload.get("report")
+            if isinstance(quality_report_payload, dict)
+            else None
+        )
+        report_dimensions = (
+            report.get("model_self_review", {}).get("dimensions", [])
+            if isinstance(report, dict) and isinstance(report.get("model_self_review"), dict)
+            else []
+        )
+        editor_task = next(
+            (
+                task
+                for task in (editor_checkpoint_run or {}).get("tasks", [])
+                if task.get("kind") == EDITOR_TASK_KIND
+            ),
+            None,
+        )
+        reviewer_tasks = [
+            task
+            for task in (editor_checkpoint_run or {}).get("tasks", [])
+            if task.get("kind") == "review_podcast_draft"
+        ]
+        final_output = final_run.get("output_artifact_id")
+        checks.update(
+            {
+                "draft_quality_enabled_and_persisted": (
+                    waiting.get("input_json", {}).get("draft_quality", {}).get("enabled") is True
+                ),
+                "editor_queues_one_persisted_reviewer": (
+                    editor_checkpoint_run is not None
+                    and editor_checkpoint_run.get("status") == "running"
+                    and editor_checkpoint_run.get("current_step") == "review_podcast_draft"
+                    and len(reviewer_tasks) == 1
+                    and reviewer_tasks[0].get("status") == "queued"
+                    and len(editor_checkpoint_run.get("tasks", [])) == 6
+                    and len(editor_checkpoint_run.get("artifacts", [])) == 9
+                    and len(editor_checkpoint_run.get("model_calls", [])) == 4
+                ),
+                "reviewer_queue_survived_second_restart": (
+                    editor_checkpoint_summary is not None
+                    and editor_checkpoint_summary == editor_restarted_summary
+                ),
+                "draft_remains_final_output": (
+                    editor_task is not None
+                    and editor_task.get("output_artifact_id") == final_output
+                ),
+                "quality_report_contract_valid": (
+                    isinstance(report, dict)
+                    and report.get("model_review_status") == "completed"
+                    and report.get("model_review_advisory") is True
+                    and report.get("requires_human_review") is True
+                    and report.get("reviewer_relation") == "same_model"
+                    and report.get("decision")
+                    in {
+                        "blocked",
+                        "revision_recommended",
+                        "candidate_ready_for_human_review",
+                    }
+                    and len(report_dimensions) == 6
+                ),
+                "quality_markdown_readable_and_private": (
+                    quality_report_markdown.startswith("# 口播稿质量报告")
+                    and "src_" not in quality_report_markdown
+                    and "seg_" not in quality_report_markdown
+                    and "模型建议" in quality_report_markdown
+                ),
+                "synthetic_feedback_idempotent_and_not_human": (
+                    feedback_response is not None
+                    and feedback_response.get("idempotent_replay") is False
+                    and feedback_response.get("feedback", {}).get("human_signal_eligible") is False
+                    and feedback_replay is not None
+                    and feedback_replay.get("idempotent_replay") is True
+                    and len(feedback_records) == 1
+                    and feedback_records[0].get("feedback", {}).get("feedback_origin")
+                    == "synthetic_test"
+                ),
+                "feedback_adds_only_one_artifact": (
+                    final_run_after_feedback is not None
+                    and len(final_run_after_feedback.get("artifacts", [])) == 12
+                    and len(final_run_after_feedback.get("tasks", [])) == 6
+                    and len(final_run_after_feedback.get("model_calls", [])) == 5
+                    and final_run_after_feedback.get("output_artifact_id") == final_output
+                ),
+                "quality_events_emitted_once": (
+                    final_event_types.count("workflow.draft_metrics.evaluated") == 1
+                    and final_event_types.count("workflow.draft_self_review.queued") == 1
+                    and final_event_types.count("workflow.draft_self_review.completed") == 1
+                    and final_event_types.count("workflow.draft_quality.completed") == 1
+                ),
+            }
+        )
+
     forbidden_texts = [
         *_forbidden_log_fragments(
             fixture,
@@ -803,18 +1172,23 @@ async def execute_e2e(
             scaffold_before,
             podcast_draft,
             show_notes,
+            quality_report_markdown,
         ),
+        "Synthetic E2E feedback; never count as a real-user signal.",
     ]
     log_summary, log_checks_passed = _read_log_summary(
         paths.log,
         forbidden_texts=forbidden_texts,
         provider_name=provider_name,
+        quality_review=quality_review,
     )
     checks["logs_structured_and_redacted"] = log_checks_passed
     failures = sorted(name for name, passed in checks.items() if not passed)
 
     return {
-        "event": "quality_contract_e2e.completed",
+        "event": (
+            "draft_quality_e2e.completed" if quality_review else "quality_contract_e2e.completed"
+        ),
         "passed": not failures,
         "failures": failures,
         "fixture": {
@@ -829,12 +1203,15 @@ async def execute_e2e(
             "provider": provider_name,
             "model": provider.model,
             "database_path": str(paths.database),
-            "max_model_calls": MAX_MODEL_CALLS,
+            "quality_review_enabled": quality_review,
+            "max_model_calls": expected_model_calls,
             "max_attempts_per_task": MAX_TASK_ATTEMPTS,
             "max_concurrency": MAX_CONCURRENCY,
         },
         "waiting_run": waiting_summary,
         "restarted_waiting_run": restarted_summary,
+        "editor_checkpoint_run": editor_checkpoint_summary,
+        "editor_restarted_run": editor_restarted_summary,
         "final_run": final_summary,
         "readiness": {
             "before": {
@@ -864,6 +1241,27 @@ async def execute_e2e(
             "duration_ms": sum(int(call.get("duration_ms") or 0) for call in model_calls),
             "estimated_costs": _cost_summary(model_calls),
         },
+        "quality": (
+            {
+                "json_path": str(paths.quality_report_json),
+                "markdown_path": str(paths.quality_report_markdown),
+                "report": (
+                    quality_report_payload.get("report")
+                    if isinstance(quality_report_payload, dict)
+                    else None
+                ),
+                "synthetic_feedback": {
+                    "created": feedback_response,
+                    "replay": feedback_replay,
+                    "record_count": len(feedback_records),
+                    "final_artifact_count": len(
+                        (final_run_after_feedback or {}).get("artifacts", [])
+                    ),
+                },
+            }
+            if quality_review
+            else None
+        ),
         "markdown": {
             "interview_scaffold": {
                 "path": str(paths.interview_scaffold),
@@ -883,6 +1281,15 @@ async def execute_e2e(
                 "sha256": notes_sha,
                 "structure": notes_structure,
             },
+            "quality_report": (
+                {
+                    "path": str(paths.quality_report_markdown),
+                    "char_count": len(quality_report_markdown),
+                    "sha256": hashlib.sha256(quality_report_markdown.encode("utf-8")).hexdigest(),
+                }
+                if quality_review
+                else None
+            ),
         },
         "logs": log_summary,
         "checks": checks,
@@ -901,6 +1308,14 @@ def _parser() -> argparse.ArgumentParser:
         "--execute",
         action="store_true",
         help="perform the E2E flow; required even for the zero-cost Fake Provider",
+    )
+    parser.add_argument(
+        "--quality-review",
+        action="store_true",
+        help=(
+            "exercise the M3.4 v6 Editor -> persisted Reviewer -> quality "
+            "report -> synthetic feedback flow"
+        ),
     )
     parser.add_argument(
         "--provider",
@@ -931,10 +1346,17 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    database_path = args.database
+    output_dir = args.output_dir
+    if args.quality_review:
+        if database_path == DEFAULT_DATABASE_PATH:
+            database_path = BACKEND_DIR / "data/draft-quality-e2e.db"
+        if output_dir == DEFAULT_OUTPUT_DIR:
+            output_dir = BACKEND_DIR / "artifacts/draft-quality-e2e"
     paths = QualityContractPaths(
         fixture=args.fixture.expanduser().resolve(),
-        database=args.database.expanduser().resolve(),
-        output_dir=args.output_dir.expanduser().resolve(),
+        database=database_path.expanduser().resolve(),
+        output_dir=output_dir.expanduser().resolve(),
     )
     settings = Settings(_env_file=BACKEND_DIR / ".env")
     api_key = (
@@ -963,6 +1385,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             paths=paths,
             billing_currency=settings.deepseek_billing_currency,
             fixture=fixture,
+            quality_review=args.quality_review,
         )
     )
     if not args.execute:
@@ -1002,6 +1425,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provider_name=args.provider,
                 settings=settings,
                 secret_values=(api_key,),
+                quality_review=args.quality_review,
             )
         )
     except Exception as error:
@@ -1022,6 +1446,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "interview_scaffold": str(paths.interview_scaffold),
                 "podcast_draft": str(paths.podcast_draft),
                 "show_notes": str(paths.show_notes),
+                "quality_report_json": str(paths.quality_report_json),
+                "quality_report_markdown": str(paths.quality_report_markdown),
             },
             "evidence": getattr(error, "safe_context", {}),
         }
@@ -1049,6 +1475,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "interview_scaffold_path": str(paths.interview_scaffold),
             "podcast_draft_path": str(paths.podcast_draft),
             "show_notes_path": str(paths.show_notes),
+            "quality_report_json_path": (
+                str(paths.quality_report_json) if args.quality_review else None
+            ),
+            "quality_report_markdown_path": (
+                str(paths.quality_report_markdown) if args.quality_review else None
+            ),
         }
     )
     return 0 if report["passed"] else 1

@@ -1,6 +1,6 @@
 # SQLite 数据与排查指南
 
-更新时间：2026-07-28
+更新时间：2026-07-29
 
 这篇文档只回答四个问题：
 
@@ -36,6 +36,8 @@ Python 进程中的变量在服务停止后会消失，但一次 Workflow 的状
 | `data/deepseek-live-smoke.db` | 受限真实 DeepSeek smoke 独立 Trace | 否 |
 | `data/checkpoint-e2e.db` | M3.1 Fake 全流程 E2E 的专用数据库 | 否 |
 | `data/checkpoint-e2e-deepseek*.db` | 每次受限真实 DeepSeek E2E 的独立失败/成功证据 | 否 |
+| `data/quality-contract-e2e.db` | M3.3 Creative Brief / Readiness 合成 E2E | 否 |
+| `data/draft-quality-e2e*.db` | M3.4 Draft Quality 合成或受限真实 E2E（生成后） | 否 |
 | `*.db-wal` | SQLite Write-Ahead Log 写前日志 | 否 |
 | `*.db-shm` | WAL 模式下的共享协调索引 | 否 |
 
@@ -100,6 +102,26 @@ Run
 
 数据库中会保存素材正文和生成结果，所以本地 `.db` 文件本身也属于私密数据，
 不能提交到 GitHub。
+
+### 3.1 M3.4 的四种质量 Artifact
+
+M3.4 没有增加新表。它把四种用途不同的数据继续放在 `artifacts`，通过
+`kind` 区分：
+
+| `kind` | 保存什么 | 不保存/不代表什么 |
+| --- | --- | --- |
+| `draft_metrics_report` | 目标与估算分钟数、字符数、引用覆盖、来源数、重复、Brief/filler/template finding 和确定性分数 | 不保存另一份 Source 原文；不代表文学质量或真实录音时长 |
+| `review_podcast_draft_result` | Reviewer 的六维 assessable 状态、1–5 分、assessment、Draft location、逐字 quote 和允许引用；另有执行 metadata | 不是独立人工评价；默认可能是同模型 self-review |
+| `draft_quality_report` | 代码合成的 decision、Reviewer 状态、关系、实验性分数、确定性与模型结果 | 不是 AI 作者概率，也不替换 Run 的 Draft output |
+| `draft_user_feedback` | submission ID、human/synthetic origin、五项评分、是否愿意录、可选实际时长与评论 | `synthetic_test` 不是真人信号；评论不会复制进 Event 或 stdout |
+
+口播稿仍保存在 `build_podcast_draft_result`。成功 v6 Run 的
+`runs.output_artifact_id` 继续指向这份 Draft；质量报告是可单独查询和导出的
+旁路 Artifact。
+
+Artifact 中保留结构化逐字证据是为了可复核，但这也意味着
+`review_podcast_draft_result` 和 `draft_quality_report` 可能包含 Draft 摘录。
+不要把 `content_json` 整段贴到公开 issue、截图或日志。
 
 ## 4. 优先从 API 查看，必要时再查数据库
 
@@ -191,6 +213,87 @@ GROUP BY kind
 ORDER BY kind;
 ```
 
+### 5.6 查看 M3.4 质量流程摘要
+
+先把 `run_...` 替换成要检查的 Run ID。下面查询只取计数和摘要，不输出
+Draft、Source 或用户评论。
+
+确定性指标：
+
+```sql
+SELECT id,
+       json_extract(content_json, '$.deterministic_score') AS deterministic_score,
+       json_extract(content_json, '$.metrics.target_duration_minutes') AS target_minutes,
+       json_extract(content_json, '$.metrics.estimated_duration_minutes') AS estimated_minutes,
+       json_extract(content_json, '$.metrics.paragraph_citation_coverage') AS citation_coverage,
+       json_extract(content_json, '$.metrics.exact_duplicate_paragraph_count') AS duplicate_paragraphs,
+       json_extract(content_json, '$.metrics.template_phrase_count') AS template_phrases
+FROM artifacts
+WHERE run_id = 'run_...'
+  AND kind = 'draft_metrics_report';
+```
+
+Reviewer Task 与调用账本：
+
+```sql
+SELECT t.id AS task_id, t.status, t.attempt,
+       COALESCE(t.error_code, '') AS error_code,
+       m.provider, m.model, m.status AS call_status,
+       m.input_tokens, m.output_tokens, m.duration_ms,
+       m.estimated_cost_micros, m.cost_currency
+FROM tasks AS t
+LEFT JOIN model_calls AS m ON m.task_id = t.id
+WHERE t.run_id = 'run_...'
+  AND t.kind = 'review_podcast_draft'
+ORDER BY m.attempt;
+```
+
+最终报告结论：
+
+```sql
+SELECT id,
+       json_extract(content_json, '$.decision') AS decision,
+       json_extract(content_json, '$.model_review_status') AS model_review_status,
+       json_extract(content_json, '$.reviewer_relation') AS reviewer_relation,
+       json_extract(content_json, '$.experimental_overall_score') AS experimental_score,
+       json_extract(content_json, '$.requires_human_review') AS requires_human_review
+FROM artifacts
+WHERE run_id = 'run_...'
+  AND kind = 'draft_quality_report';
+```
+
+反馈来源和评分（刻意不选择 comment）：
+
+```sql
+SELECT id,
+       json_extract(content_json, '$.submission_id') AS submission_id,
+       json_extract(content_json, '$.feedback_origin') AS origin,
+       json_extract(content_json, '$.human_signal_eligible') AS human_signal,
+       json_extract(content_json, '$.decision') AS decision,
+       json_extract(content_json, '$.overall_rating') AS overall,
+       json_extract(content_json, '$.voice_match_rating') AS voice_match,
+       json_extract(content_json, '$.recordability_rating') AS recordability,
+       json_extract(content_json, '$.would_record_as_is') AS record_as_is,
+       json_extract(content_json, '$.observed_duration_minutes') AS observed_minutes
+FROM artifacts
+WHERE run_id = 'run_...'
+  AND kind = 'draft_user_feedback'
+ORDER BY created_at;
+```
+
+确认最终 output 仍是 Draft：
+
+```sql
+SELECT r.id AS run_id, r.status, r.workflow_version,
+       r.output_artifact_id, a.kind AS output_kind
+FROM runs AS r
+LEFT JOIN artifacts AS a ON a.id = r.output_artifact_id
+WHERE r.id = 'run_...';
+```
+
+正常 v6 成功结果的 `output_kind` 应为
+`build_podcast_draft_result`，不是 `draft_quality_report`。
+
 输入下面命令退出：
 
 ```sql
@@ -208,6 +311,8 @@ ORDER BY kind;
 - `events.payload`
 - `tasks.input_json`
 - `runs.input_json`
+- `review_podcast_draft_result` 和 `draft_quality_report` 中的逐字 Draft 证据
+- `draft_user_feedback` 中的 `comment`
 
 优先只查 ID、状态、类型、时间、Token、耗时、费用和错误码。这样既容易阅读，
 也能避免终端日志、截图或聊天记录意外泄露个人素材。

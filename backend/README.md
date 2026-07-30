@@ -640,6 +640,128 @@ review of the historical M3.1 run. The current Editor design, tests, and
 commands are documented in
 [`docs/learning/m3-2-editor-final-markdown.zh-CN.md`](../docs/learning/m3-2-editor-final-markdown.zh-CN.md).
 
+## M3.3 Creative Brief and material readiness
+
+Supplying a `creative_brief` records a 10, 15, or 30 minute target, an
+adjustable characters-per-minute estimate, scenario, audience, communication
+goal, tone, required details, and patterns to avoid. Material readiness is
+ordinary deterministic code, not a model call. It persists aggregate counts
+without copying Source text and keeps an obviously short Run at
+`waiting_for_user / awaiting_more_material`.
+
+Each accepted supplemental Source submission is append-only and idempotent.
+Readiness is recalculated over all accepted rounds. Editor is queued exactly
+once only after the accumulated, deduplicated material crosses the configured
+lower bound. This estimate protects against obvious shortage; it does not
+promise an actual recording duration or evaluate prose quality.
+
+## M3.4 Draft Quality Report and feedback
+
+With a Creative Brief, draft quality defaults to enabled and a new Run uses
+workflow `v6`. Explicitly sending
+`"draft_quality": {"enabled": false}` preserves the v5 path and avoids the
+extra Reviewer model call.
+
+After Editor, v6 first persists deterministic `draft_metrics_report` data:
+estimated duration, paragraph citation coverage, source diversity, exact and
+eight-character-window repetition, Brief constraints, filler patterns,
+template phrases, and repeated "not ... but ..." style patterns. The duration
+is an estimate based on non-whitespace characters and the configured speaking
+rate, not measured audio duration.
+
+One serial `review_podcast_draft` Task then evaluates six fixed dimensions:
+Brief adherence, source faithfulness, coverage/specificity,
+structure/coherence, oral naturalness/voice fit, and
+conciseness/non-redundancy. Every assessable dimension needs an exact quote and
+a valid Draft location. Application code verifies that the quote exists and
+that any SourceReference belongs to that Draft block. The final decision is
+code-owned; a model cannot override deterministic blockers.
+
+The model result is always advisory. When Editor and Reviewer use the same
+model, the report records `reviewer_relation="same_model"` rather than
+presenting the result as an independent review. The API does not report an
+"AI-generated probability." It reports observable style signals and
+evidence-bearing suggestions.
+
+A permanent Reviewer, authentication, or budget failure preserves the
+deterministic metrics and error reason. A pre-existing deterministic blocker
+keeps the decision `blocked`; otherwise the report uses
+`automated_review_incomplete`. The valid Editor Draft remains exportable and
+remains `output_artifact_id`, and the Run succeeds instead of hiding the core
+result.
+
+New endpoints:
+
+```text
+GET  /runs/{run_id}/quality-report
+GET  /runs/{run_id}/exports/quality-report.md
+POST /runs/{run_id}/quality-feedback
+GET  /runs/{run_id}/quality-feedback
+```
+
+Feedback is independent and append-only. `feedback_origin="human"` is marked as
+a candidate human signal; `feedback_origin="synthetic_test"` is reserved for
+automated E2E and is always persisted with
+`human_signal_eligible=false`. In this unauthenticated local MVP the origin is
+caller-declared, not identity verification. Feedback comments stay in the
+Artifact and can be read through local data APIs, but are not copied into
+Events or stdout logs.
+
+Focused validation:
+
+```bash
+pytest \
+  tests/test_draft_quality.py \
+  tests/test_draft_quality_provider.py \
+  tests/test_draft_quality_workflow.py \
+  tests/test_draft_feedback_api.py -vv
+```
+
+M3.4 reuses the existing Run, Task, Artifact, Event, and ModelCall tables. It
+requires no migration. The 2026-07-29 validation snapshot passed Ruff,
+format-checking for 71 files, all 205 pytest cases, Alembic upgrade/check, the
+M3.3 Fake regression E2E, and the M3.4 Fake E2E.
+
+Run the guarded v6 journey with deterministic Fake output:
+
+```bash
+python -m epiphany.draft_quality_e2e --provider fake --execute
+```
+
+The explicit 2026-07-29 DeepSeek Run
+`run_276a3bce22394eb8a56edd6af8760012` passed the same guarded journey:
+
+- workflow v6, 6 succeeded Tasks, and 5/5 succeeded ModelCalls;
+- 11 Artifacts before feedback and 12 after one idempotent
+  `synthetic_test` feedback submission;
+- 26,618 input tokens, 11,239 output tokens, and 61,669 ms combined Provider
+  duration;
+- local estimated cost CNY 0.049096;
+- persistent checkpoints across three App lifespans, durable Reviewer queue,
+  supplemental-source grounding, feedback replay, and 85 structured JSON log
+  lines with no Source or generated prose.
+
+The report returned `revision_recommended`, deterministic 72, and experimental
+83.2. A 10-minute target contained 1,429 non-whitespace characters and was
+estimated at 5.1 minutes. It still had 100% paragraph citation coverage,
+4 Sources / 10 Segments, no exact duplicate paragraph, one filler hit, and
+four "not ... but ..." constructions. The same DeepSeek model used by Editor
+scored all six Reviewer dimensions 5/5. That disagreement is expected evidence
+that same-model self-review is advisory rather than a release gate.
+
+One earlier paid attempt reached Editor but was rejected by the strict
+`podcast_draft_missing_supplemental_source_reference` contract. The
+prompt/output tail self-check was strengthened and the next Run passed. The
+earlier local CNY 0.039696 estimate is separate debugging expenditure and is
+not part of the successful Run's CNY 0.049096. Local estimates can differ from
+the provider dashboard or invoice because of pricing rules, cache treatment,
+and usage-reporting delay.
+
+See the beginner-oriented
+[`M3.4 learning chapter`](../docs/learning/m3-4-draft-quality-report.zh-CN.md)
+for the scoring boundary, Swagger walkthrough, event names, and SQLite
+queries.
+
 ## Debugging and logs
 
 The backend writes one-line JSON logs to stdout. HTTP responses include

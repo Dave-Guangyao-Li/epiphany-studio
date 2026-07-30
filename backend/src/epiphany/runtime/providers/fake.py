@@ -3,6 +3,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from epiphany.draft_quality_schemas import (
+    REVIEW_DIMENSIONS,
+    REVIEW_PODCAST_DRAFT,
+    ModelSelfReviewTaskInput,
+)
 from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
 from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
 from epiphany.runtime.providers.base import (
@@ -256,6 +261,7 @@ class FakeProvider:
             "theme_research": self._theme_research,
             BUILD_INTERVIEW_SCAFFOLD: self._build_interview_scaffold,
             BUILD_PODCAST_DRAFT: self._build_podcast_draft,
+            REVIEW_PODCAST_DRAFT: self._review_podcast_draft,
         }
         try:
             content = handlers[invocation.kind](invocation.input_json)
@@ -641,4 +647,83 @@ class FakeProvider:
                     },
                 ],
             },
+        }
+
+    @staticmethod
+    def _review_podcast_draft(input_json: dict[str, Any]) -> dict[str, Any]:
+        """Return evidence-bearing review cards from the real Draft text.
+
+        These fixed scores are a deterministic contract fixture, not a content
+        quality judgment. The strict Worker validator still checks every quote
+        and source reference.
+        """
+
+        parsed = ModelSelfReviewTaskInput.model_validate(input_json)
+        draft = parsed.podcast_draft
+        evidence_blocks = [
+            (
+                "podcast_script.opening",
+                draft.podcast_script.opening.text,
+                draft.podcast_script.opening.source_refs,
+            ),
+            *[
+                (
+                    f"podcast_script.sections[{section_index}].paragraphs[0]",
+                    section.paragraphs[0].text,
+                    section.paragraphs[0].source_refs,
+                )
+                for section_index, section in enumerate(draft.podcast_script.sections)
+            ],
+            (
+                "podcast_script.closing",
+                draft.podcast_script.closing.text,
+                draft.podcast_script.closing.source_refs,
+            ),
+            (
+                "show_notes.summary",
+                draft.show_notes.summary.text,
+                draft.show_notes.summary.source_refs,
+            ),
+        ]
+        assessment_by_dimension = {
+            "brief_adherence": "该段提供了可核对创作约束贴合度的真实初稿证据。",
+            "source_faithfulness": "该段及其来源引用可用于核对初稿是否保留原始事实限定。",
+            "coverage_and_specificity": "该段呈现了可检查具体场景与信息密度的真实初稿内容。",
+            "structure_and_coherence": "该段在初稿中的位置可用于检查叙事推进与衔接。",
+            "oral_naturalness_and_voice_fit": "该段保留了可直接检查口播自然度的真实措辞。",
+            "conciseness_and_non_redundancy": "该段可与其余初稿比较是否存在重复或信息增量不足。",
+        }
+        scores = {
+            "brief_adherence": 4,
+            "source_faithfulness": 4,
+            "coverage_and_specificity": 3,
+            "structure_and_coherence": 4,
+            "oral_naturalness_and_voice_fit": 3,
+            "conciseness_and_non_redundancy": 4,
+        }
+        dimensions: list[dict[str, Any]] = []
+        for index, dimension in enumerate(REVIEW_DIMENSIONS):
+            location, text, references = evidence_blocks[index % len(evidence_blocks)]
+            dimensions.append(
+                {
+                    "dimension": dimension,
+                    "assessable": True,
+                    "score": scores[dimension],
+                    "assessment": assessment_by_dimension[dimension],
+                    "limitation": None,
+                    "evidence": [
+                        {
+                            "location": location,
+                            "exact_quote": text[: min(180, len(text))],
+                            "source_refs": [
+                                reference.model_dump(mode="json") for reference in references[:2]
+                            ],
+                        }
+                    ],
+                }
+            )
+        return {
+            "review_kind": "model_self_review",
+            "advisory": True,
+            "dimensions": dimensions,
         }
