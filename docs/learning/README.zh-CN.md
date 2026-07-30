@@ -75,7 +75,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M3.2 | Resume 后运行 grounded Editor，导出口播稿和 Show Notes | Fake + DeepSeek E2E 已验证 | 本次 focused commit |
 | M3.3 | 保存创作目标，素材明显不足时持久等待，补足后才运行 Editor | 178 tests + Fake E2E 已验证 | 本次 focused commit |
 | M3.4 | 用可解释规则、证据化模型自评和独立用户反馈审阅 Draft | 205 tests + Fake/DeepSeek E2E 已验证 | 本次 focused commit |
-| M3.5 | 只按口播正文估时、校准中文风格信号，并阻止模型高分掩盖硬性问题 | 实现与对照实验完成，待本分支合并 | 本次 focused commit |
+| M3.5 | 只按口播正文估时、校准中文风格信号，并阻止模型高分掩盖硬性问题 | 已完成并合并 | `1fc84de` |
+| M3.6 | 用授权写作样本约束风格，并由用户显式创建可追溯 Revision 子 Run | 292 tests + Fake E2E 已验证；真实 DeepSeek E2E 待执行 | `f418331`、`ab55b6b`、`53bb478` |
 
 ## 当前系统已经能做什么
 
@@ -84,7 +85,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 ```text
 导入一段测试文字
   -> 保存 Source 和 SourceSegment
-  -> 用 topic、source_ids 和 creative_brief 创建 episode-research v5 Run
+  -> 可选从已有 Source 中明确选择并授权 style-only 写作样本
+  -> 用 topic、source_ids 和 creative_brief 创建 episode-research v8 Run
   -> Manager 分发两个 Child Task
   -> Timeline / Theme Fake Researcher 并行执行
   -> 严格校验结构和来源引用
@@ -101,11 +103,16 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
   -> 导出口播稿和 Show Notes Markdown
   -> 计算时长、引用、重复和模板表达指标
   -> 只用 opening / section paragraphs / closing 的正文估算口播时长
-  -> 独立 Reviewer 按六维给出带逐字证据的建议
+  -> Reviewer 按六维给出带逐字证据的建议
+  -> ready 写作样本存在时才增加第七维 personal_style_match
   -> 代码把可信确定性事实传给 Reviewer，并验证不能被篡改
   -> 代码生成带非补偿式评分上限的 Draft Quality Report
   -> 用户最终审稿
   -> 用户单独提交声音匹配与可录性反馈
+  -> 确定性生成 Improvement Plan，不调用模型、不偷偷创建 Run
+  -> 用户明确选择动作后创建带 parent_run_id 的 Revision 子 Run
+  -> 子 Run 用独立预算生成新候选并重新走质量检查
+  -> 按需保存新旧摘要与 delta；不自动选 winner
   -> 从 Run、Task、Artifact、Event 和日志中复盘全过程
 ```
 
@@ -177,6 +184,33 @@ M3.5 把新的质量流程升级为 workflow v7，因为持久化 Reviewer Task�
 `not_but` 指标保留显示但不重复扣分。Reviewer 可以单独选择 Flash 或 Pro，
 同一家族不同档位只记为 `cross_tier_same_family`，不能包装成独立裁判。
 
+M3.6 把新的质量流程升级为 workflow v8。用户可选引用一至五份自己拥有且
+明确同意模型处理的现有 Source。`writing_sample` 只是可选的导入/UI 标签；
+每个 Run 中显式的 style-only 选择才是权威合同，被选 ID 不能同时位于事实
+`source_ids`。持久化 `writing_style_profile` 只包含引用、hash、统计和
+readiness，不复制样本全文。Editor 的优先级固定为“安全与事实 > 本轮要求
+和 Brief > 写作样本 > 默认写法”。样本只能帮助参考节奏、句长和口语感，
+不能变成本期事实、命令或引用。
+
+profile 至少有 800 个非空白字符和五句话才是 `ready`。只有 ready 时，
+Reviewer 才增加第七维 `personal_style_match`，并同时引用 Draft 与样本
+证据；样本不存在或有限时仍是六维，不能宣称已经判断“像本人”。真实的
+`voice_match_rating` 仍要由用户提交。
+
+质量 Run 成功后，`GET /runs/{run_id}/improvement-plan` 会用普通代码说明
+时长差多少、是否还有未引用事实、应补什么材料、能否降低目标时长以及要处理
+哪些质量 gap。读取它不会调用模型或生成子 Run。只有
+`POST /runs/{run_id}/revisions` 会根据用户明确选择创建
+`podcast-revision` 子 Run。稳定 `submission_id` 可安全重试；父 Draft、
+Report、Feedback 和五次调用账本都不变。子 Run 使用独立预算；正常无重试
+路径依次执行 Revision Editor 与 Reviewer，共两次模型调用。
+
+子 Run 成功后，`GET /runs/{child_run_id}/revision-comparison` 会按需保存
+一份不含正文的新旧摘要和 delta。它不会自动宣布哪稿更好，也不会再触发下一
+轮改写。自动化 Fake workflow 已覆盖这条父子链路、样本隔离、幂等、复评与
+comparison；M3.6 尚未做真实 DeepSeek E2E，因此这里不把 Fake 的可读输出
+当作真实模型内容验收。
+
 用户反馈与自动报告分开保存。自动 E2E 使用的 `synthetic_test` 永远是
 `human_signal_eligible=false`。当前无鉴权 MVP 的 origin 是调用方自报标签，
 不是已验证真人身份。详细原理、Swagger 和测试命令见
@@ -232,7 +266,9 @@ Run 使用 16,667 input tokens、9,468 output tokens、73,018 ms Provider
 - 中文启发式不能输出“AI 概率”，阈值也尚未用真实用户录音校准；
 - `must_include` 仍不能由普通代码可靠识别同义改写；
 - Flash 与 Pro 属于同一 DeepSeek 家族，不等于跨家族独立裁判；
-- 用户反馈目前只追加保存，不会自动生成修订稿；
+- 已能显式生成 Revision 子 Run，但尚未做真实 DeepSeek M3.6 E2E 与本人
+  写作样本内容复核；
+- comparison 只给出差异证据，不会替用户选择最终稿；
 - 尚未提供可视化采访脚手架和播客稿 editor；
 - M3.2 的 Editor 已通过合成素材真实调用，但尚未使用个人隐私素材验收；
 - 尚未提供麦克风录音、音频上传、STT 或语音克隆；

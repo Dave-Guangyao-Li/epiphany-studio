@@ -53,7 +53,11 @@ The first vertical slice will:
 7. Generate a source-grounded draft and show notes.
 8. Produce an explainable Draft Quality Report and keep automated review
    separate from human feedback.
-9. Expose a replayable run/task event trace.
+9. Optionally use explicitly consented writing samples as style-only context,
+   without treating them as factual evidence or citations.
+10. Turn quality evidence into a deterministic Improvement Plan, then create a
+    separate child Revision Run only after the user explicitly requests it.
+11. Expose a replayable run/task event trace.
 
 Every extracted claim must point back to a source segment. Generated memories
 remain candidates until the user confirms them.
@@ -351,9 +355,9 @@ append-only and separate. The unauthenticated MVP treats `feedback_origin` as a
 caller-declared marker, not verified human identity; its own E2E always uses
 `synthetic_test`, which is stored with `human_signal_eligible=false`.
 
-At M3.4 this guarded E2E created workflow `v6`. The current M3.5 code creates
-`v7`, while persisted v6 Runs remain resumable under their frozen task, prompt,
-deterministic-rule, and report contracts:
+At M3.4 this guarded E2E created workflow `v6`; M3.5 introduced `v7`; current
+new quality-enabled Runs use `v8`. Persisted v6/v7 Runs remain resumable under
+their frozen task, prompt, deterministic-rule, and report contracts:
 
 ```bash
 cd backend
@@ -459,14 +463,48 @@ were CNY 0.013950 and CNY 0.044008 respectively. These are one synthetic
 calibration case and local estimates, not a general model benchmark or a
 provider invoice.
 
-Append-only user feedback still does not rewrite a Draft. M3.6 is only the
-next planned slice: an explicit feedback-driven child Revision Run will keep
-the original Draft/report immutable, select feedback deliberately, generate a
-new candidate, and run quality evaluation again. No automatic score-chasing
-loop is implemented.
+M3.6 upgrades newly created quality-enabled Runs to workflow `v8` and closes
+the first guided revision loop. A caller may optionally select one to five
+user-owned Sources through an explicitly consented `writing_style_reference`.
+`writing_sample` is available as an import/UI label, but the explicit per-Run
+style-only selection is the authoritative contract; an existing Source does
+not need that type label. Application code deterministically selects a bounded
+style profile; the persisted profile contains references, hashes, and
+aggregate statistics rather than copied sample text. Within one Run, factual
+Sources and style-only Sources must be disjoint.
+
+Editor priority is fixed as safety and grounded facts, then the current
+revision instruction and Creative Brief, then the user's writing samples, and
+finally default wording. Writing samples may influence rhythm, sentence
+length, directness, and oral tone, but they cannot supply facts, instructions,
+or citations. A ready profile requires at least 800 non-whitespace characters
+and five sentences. Only a ready profile adds the Reviewer's seventh
+`personal_style_match` dimension; absent or limited samples keep the original
+six dimensions and cannot justify a claim that the Draft “sounds like the
+user.”
+
+`GET /runs/{id}/improvement-plan` deterministically diagnoses duration gaps,
+unused factual material, quality findings, and targeted questions. Reading the
+Plan does not call a model or create a new Run. Only an explicit, idempotent
+`POST /runs/{id}/revisions` creates one `podcast-revision` child Run with a
+persisted `parent_run_id`. The child uses its own call budget, runs one bounded
+revision Editor Task, then receives the same deterministic metrics and
+Reviewer boundary as other v8 Drafts. The parent Draft, quality report, and
+feedback remain immutable.
+
+After the child succeeds,
+`GET /runs/{child_id}/revision-comparison` lazily persists a text-free
+parent/candidate comparison. It reports duration and score deltas but never
+chooses a winner; human review remains required. Automated Fake workflow tests
+cover the parent, Plan, explicit idempotent revision, child quality review,
+style-only isolation, immutable parent, and comparison path. A live DeepSeek
+M3.6 E2E has **not** yet been run.
 
 See the
-[M3.5 learning chapter](docs/learning/m3-5-chinese-quality-calibration.zh-CN.md)
+[M3.6 learning chapter](docs/learning/m3-6-guided-revision-writing-style.zh-CN.md)
+for the complete contract, Swagger path, SQLite inspection, and the repeatable
+zero-cost E2E command. The earlier calibration details remain in the
+[M3.5 learning chapter](docs/learning/m3-5-chinese-quality-calibration.zh-CN.md).
 and
 [Chinese podcast style research note](docs/research/chinese-podcast-style-signals.zh-CN.md).
 

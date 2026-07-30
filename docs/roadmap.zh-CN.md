@@ -365,18 +365,28 @@ cap：任一 blocker 最多 39，时长覆盖低于 60% 最多 59，任一 warni
 错误呈现有效，不能证明 Pro 永远优于 Flash。模型选择需要继续积累不同主题、
 长度和真实用户评分。
 
-### M3.6：显式反馈驱动的 Revision Run（计划）
+### M3.6：写作样本与显式反馈驱动的 Revision Run
 
-- [ ] 为新修订 Run 保存 `parent_run_id`，旧 Draft/Report 不可变
-- [ ] 用户显式选择 feedback、修订目标和可选 Brief/Source 变更
-- [ ] 新增受限 `revise_podcast_draft` Task，不静默覆盖旧稿
-- [ ] 新候选重新执行确定性 metrics、Reviewer 与非补偿 cap
-- [ ] Revision 使用独立调用预算、幂等键、事件、日志和失败恢复
-- [ ] 对比旧稿/新稿及用户最终选择，不自动追逐分数或无限重写
+- [x] 新质量 Run 升级为 workflow v8；新增 `runs.parent_run_id` migration
+- [x] 可选接收一至五份经用户确认归属与模型处理授权的写作样本
+- [x] 写作样本只建立有界 `writing_style_profile`，不提供事实、指令或引用
+- [x] Editor 按“安全/事实 > 本轮要求与 Brief > 写作样本 > 默认写法”处理
+- [x] 样本达到 800 字符和五句后，Reviewer 才增加第七维个人风格匹配
+- [x] 确定性 Improvement Plan 区分未使用事实、需补素材和可降低目标时长
+- [x] 用户显式选择 feedback、gap、补充 Source、目标时长与修订指令
+- [x] 新增受限 `revise_podcast_draft` Task，不静默覆盖旧稿
+- [x] 子 Run 独立记账与预算，并重新执行 metrics、Reviewer 和非补偿 cap
+- [x] `submission_id` 幂等重放；同 ID 不同请求冲突，不重复创建子 Run
+- [x] 懒加载持久化旧稿/新稿对比，不自动选 winner，仍要求人工审核
 
-M3.6 尚未实现。当前 `quality-feedback` 仍是 append-only 记录，提交反馈不会
-触发模型调用或改变现有 Draft。下一步的核心人机边界是“用户明确按下修订”，
-而不是系统看到低分就自己循环生成。
+M3.6 的人机边界已经落地：读取 Improvement Plan 不调用模型，也不创建子
+Run；只有用户明确提交 `POST /runs/{run_id}/revisions` 才会开始一次新的
+`podcast-revision`。父 Run 的 Draft、Report、Feedback、output 与历史调用
+账本保持不变，子 Run 通过 `parent_run_id` 追溯来源并使用独立预算。
+
+自动化 Fake workflow 测试已经覆盖完整父子链路、样本隔离、幂等、质量复评
+和 comparison。M3.6 尚未进行真实 DeepSeek E2E；在得到真实模型与人工内容
+复核证据前，不把 Fake 结果表述为真实生成质量验收。
 
 ## M4：可靠性与 Trace
 
