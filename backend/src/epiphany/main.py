@@ -28,15 +28,17 @@ from epiphany.source_service import SourceService
 logger = logging.getLogger("epiphany.http")
 
 
-def build_provider(settings: Settings) -> ModelProvider:
-    if settings.model_provider == "fake":
-        return FakeProvider()
+def _build_deepseek_provider(
+    settings: Settings,
+    *,
+    model: str,
+) -> DeepSeekProvider:
     if settings.deepseek_api_key is None:
         raise ValueError("EPIPHANY_MODEL_PROVIDER=deepseek requires EPIPHANY_DEEPSEEK_API_KEY")
     return DeepSeekProvider(
         api_key=settings.deepseek_api_key.get_secret_value(),
         base_url=settings.deepseek_base_url,
-        model=settings.deepseek_model,
+        model=model,
         billing_currency=settings.deepseek_billing_currency,
         max_tokens=settings.deepseek_max_tokens,
         editor_max_tokens=settings.deepseek_editor_max_tokens,
@@ -51,20 +53,50 @@ def build_provider(settings: Settings) -> ModelProvider:
     )
 
 
+def build_provider(settings: Settings) -> ModelProvider:
+    if settings.model_provider == "fake":
+        return FakeProvider()
+    return _build_deepseek_provider(settings, model=settings.deepseek_model)
+
+
+def build_reviewer_provider(
+    settings: Settings,
+    *,
+    default_provider: ModelProvider,
+) -> ModelProvider:
+    """Build a trusted Reviewer override without accepting a model from Run input."""
+
+    reviewer_model = settings.deepseek_reviewer_model
+    if settings.model_provider != "deepseek" or reviewer_model is None:
+        return default_provider
+    if reviewer_model == settings.deepseek_model:
+        return default_provider
+    return _build_deepseek_provider(settings, model=reviewer_model)
+
+
 def create_app(
     *,
     settings: Settings | None = None,
     provider: ModelProvider | None = None,
+    reviewer_provider: ModelProvider | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings()
     database = Database(resolved_settings.database_url)
     orchestrator = Orchestrator(task_max_attempts=resolved_settings.task_max_attempts)
     run_service = RunService(database, orchestrator)
     source_service = SourceService(database)
+    resolved_provider = provider or build_provider(resolved_settings)
+    resolved_reviewer_provider = reviewer_provider
+    if resolved_reviewer_provider is None and provider is None:
+        resolved_reviewer_provider = build_reviewer_provider(
+            resolved_settings,
+            default_provider=resolved_provider,
+        )
     worker = Worker(
         database=database,
         orchestrator=orchestrator,
-        provider=provider or build_provider(resolved_settings),
+        provider=resolved_provider,
+        reviewer_provider=resolved_reviewer_provider,
         lease_seconds=resolved_settings.worker_lease_seconds,
         timeout_seconds=resolved_settings.task_timeout_seconds,
         poll_interval_seconds=resolved_settings.worker_poll_interval_seconds,

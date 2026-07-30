@@ -39,12 +39,17 @@ from epiphany.checkpoint_e2e import (
 )
 from epiphany.config import Settings
 from epiphany.draft_feedback_schemas import DraftUserFeedbackResponse
-from epiphany.draft_quality_schemas import DraftQualityReportRecord
+from epiphany.draft_quality_schemas import (
+    DRAFT_QUALITY_FORMULA_VERSION,
+    DraftQualityReport,
+    DraftQualityReportRecord,
+)
 from epiphany.live_deepseek_smoke import database_url_for_path, migrate_database
 from epiphany.main import create_app
 from epiphany.material_readiness import MaterialReadinessReport, assess_material_readiness
 from epiphany.observability import JsonFormatter, RequestContextFilter
 from epiphany.quality_contract_schemas import CreativeBrief
+from epiphany.runtime.orchestrator import QUALITY_REVIEW_WORKFLOW_VERSION
 from epiphany.runtime.providers import ModelProvider
 
 DEFAULT_FIXTURE_PATH = BACKEND_DIR / "fixtures/e2e/m3-3-quality-contract.zh-CN.json"
@@ -222,15 +227,21 @@ def build_preflight(
     billing_currency: str,
     fixture: dict[str, Any],
     quality_review: bool = False,
+    editor_model: str = LIVE_MODEL,
+    reviewer_model: str | None = None,
 ) -> dict[str, Any]:
     deepseek_execution = execute and provider == "deepseek"
     brief = fixture["creative_brief"]
+    uses_pro = editor_model == "deepseek-v4-pro" or reviewer_model == "deepseek-v4-pro"
     return {
         "event": "quality_contract_e2e.preflight",
         "mode": "execute" if execute else "dry-run",
         "execute_requested": execute,
         "provider": provider,
-        "model": LIVE_MODEL if provider == "deepseek" else "fake-v1",
+        "model": editor_model if provider == "deepseek" else "fake-v1",
+        "reviewer_model": (
+            (reviewer_model or editor_model) if provider == "deepseek" else "fake-v1"
+        ),
         "network_enabled": deepseek_execution and api_key_present,
         "paid_api_call_possible": deepseek_execution and api_key_present,
         "api_key_status": "present" if api_key_present else "absent",
@@ -267,7 +278,7 @@ def build_preflight(
         "expected_cost": (
             {
                 "currency": billing_currency,
-                "planning_ceiling": "0.08",
+                "planning_ceiling": "0.25" if uses_pro else "0.08",
                 "is_estimate": True,
                 "hard_currency_limit_enforced": False,
             }
@@ -375,6 +386,75 @@ def _is_ordered_subsequence(
 ) -> bool:
     cursor = iter(sequence)
     return all(any(item == expected_item for item in cursor) for expected_item in expected)
+
+
+def _expected_reviewer_relation(
+    primary_provider: ModelProvider,
+    reviewer_provider: ModelProvider,
+) -> str:
+    if (
+        primary_provider.name,
+        primary_provider.model,
+    ) == (
+        reviewer_provider.name,
+        reviewer_provider.model,
+    ):
+        return "same_model"
+    if primary_provider.name == reviewer_provider.name == "deepseek" and {
+        primary_provider.model,
+        reviewer_provider.model,
+    } <= {"deepseek-v4-flash", "deepseek-v4-pro"}:
+        return "cross_tier_same_family"
+    return "different_model"
+
+
+def _model_calls_match_routed_providers(
+    *,
+    model_calls: list[dict[str, Any]],
+    tasks: list[dict[str, Any]],
+    primary_provider: ModelProvider,
+    reviewer_provider: ModelProvider,
+    expected_model_calls: int,
+) -> bool:
+    reviewer_task_ids = {
+        str(task.get("id")) for task in tasks if task.get("kind") == "review_podcast_draft"
+    }
+    if len(reviewer_task_ids) > 1:
+        return False
+
+    def call_matches(call: dict[str, Any]) -> bool:
+        expected_provider = (
+            reviewer_provider if str(call.get("task_id")) in reviewer_task_ids else primary_provider
+        )
+        return (
+            call.get("status") == "succeeded"
+            and call.get("provider") == expected_provider.name
+            and call.get("model") == expected_provider.model
+            and str(call.get("cost_currency", "")).upper()
+            == expected_provider.billing_currency.upper()
+        )
+
+    return len(model_calls) == expected_model_calls and all(
+        call_matches(call) for call in model_calls
+    )
+
+
+def _quality_report_contract_valid(
+    report: object,
+    *,
+    expected_reviewer_relation: str,
+) -> bool:
+    try:
+        parsed = DraftQualityReport.model_validate(report)
+    except (ValidationError, ValueError, TypeError):
+        return False
+    return (
+        parsed.model_review_status == "completed"
+        and parsed.reviewer_relation == expected_reviewer_relation
+        and parsed.scoring_formula_version == DRAFT_QUALITY_FORMULA_VERSION
+        and parsed.model_self_review is not None
+        and len(parsed.model_self_review.dimensions) == 6
+    )
 
 
 def _generated_text_fragments(*markdown_documents: str) -> list[str]:
@@ -488,6 +568,7 @@ async def execute_e2e(
     settings: Settings,
     secret_values: Sequence[str] = (),
     quality_review: bool = False,
+    reviewer_provider: ModelProvider | None = None,
 ) -> dict[str, Any]:
     paths.database.parent.mkdir(parents=True, exist_ok=True)
     paths.output_dir.mkdir(parents=True, exist_ok=True)
@@ -526,7 +607,11 @@ async def execute_e2e(
     feedback_records: list[dict[str, Any]] = []
     final_run_after_feedback: dict[str, Any] | None = None
     try:
-        first_app = create_app(settings=runtime_settings, provider=provider)
+        first_app = create_app(
+            settings=runtime_settings,
+            provider=provider,
+            reviewer_provider=reviewer_provider,
+        )
         async with first_app.router.lifespan_context(first_app):
             transport = httpx.ASGITransport(app=first_app)
             async with httpx.AsyncClient(
@@ -601,7 +686,11 @@ async def execute_e2e(
         # and Worker are gone before the same SQLite state is reopened.
         await asyncio.to_thread(_assert_database_has_no_active_tasks, paths.database)
 
-        restarted_app = create_app(settings=runtime_settings, provider=provider)
+        restarted_app = create_app(
+            settings=runtime_settings,
+            provider=provider,
+            reviewer_provider=reviewer_provider,
+        )
         async with restarted_app.router.lifespan_context(restarted_app):
             transport = httpx.ASGITransport(app=restarted_app)
             async with httpx.AsyncClient(
@@ -735,6 +824,7 @@ async def execute_e2e(
             reviewer_restarted_app = create_app(
                 settings=runtime_settings,
                 provider=provider,
+                reviewer_provider=reviewer_provider,
             )
             async with reviewer_restarted_app.router.lifespan_context(reviewer_restarted_app):
                 transport = httpx.ASGITransport(app=reviewer_restarted_app)
@@ -926,7 +1016,7 @@ async def execute_e2e(
     if quality_review:
         expected.update(
             {
-                "workflow_version": "v6",
+                "workflow_version": QUALITY_REVIEW_WORKFLOW_VERSION,
                 "final_task_count": 6,
                 "final_artifact_count": 11,
                 "final_model_call_count": MAX_QUALITY_MODEL_CALLS,
@@ -948,7 +1038,11 @@ async def execute_e2e(
     notes_sha = hashlib.sha256(show_notes.encode("utf-8")).hexdigest()
     model_calls = final_run.get("model_calls", [])
     expected_model_calls = MAX_QUALITY_MODEL_CALLS if quality_review else MAX_MODEL_CALLS
-    expected_currency = provider.billing_currency.upper()
+    effective_reviewer_provider = reviewer_provider or provider
+    expected_reviewer_relation = _expected_reviewer_relation(
+        provider,
+        effective_reviewer_provider,
+    )
     supplemental_title = str(fixture["supplemental_source"]["title"])
     scaffold_structure = _scaffold_markdown_checks(
         scaffold_before,
@@ -966,7 +1060,7 @@ async def execute_e2e(
     )
 
     checks = {
-        "initial_sources_imported": len(imported_initial) == 3,
+        "initial_sources_imported": len(imported_initial) == len(fixture["initial_sources"]),
         "creative_brief_persisted": (
             waiting.get("input_json", {}).get("creative_brief") == fixture["creative_brief"]
         ),
@@ -1022,13 +1116,12 @@ async def execute_e2e(
             final_run.get("status") == "succeeded" and final_run.get("current_step") == "complete"
         ),
         "model_calls_match_provider": (
-            len(model_calls) == expected_model_calls
-            and all(
-                call.get("status") == "succeeded"
-                and call.get("provider") == provider_name
-                and call.get("model") == provider.model
-                and str(call.get("cost_currency", "")).upper() == expected_currency
-                for call in model_calls
+            _model_calls_match_routed_providers(
+                model_calls=model_calls,
+                tasks=final_run.get("tasks", []),
+                primary_provider=provider,
+                reviewer_provider=effective_reviewer_provider,
+                expected_model_calls=expected_model_calls,
             )
         ),
         "pivotal_events_ordered": _is_ordered_subsequence(
@@ -1075,11 +1168,6 @@ async def execute_e2e(
             if isinstance(quality_report_payload, dict)
             else None
         )
-        report_dimensions = (
-            report.get("model_self_review", {}).get("dimensions", [])
-            if isinstance(report, dict) and isinstance(report.get("model_self_review"), dict)
-            else []
-        )
         editor_task = next(
             (
                 task
@@ -1117,19 +1205,9 @@ async def execute_e2e(
                     editor_task is not None
                     and editor_task.get("output_artifact_id") == final_output
                 ),
-                "quality_report_contract_valid": (
-                    isinstance(report, dict)
-                    and report.get("model_review_status") == "completed"
-                    and report.get("model_review_advisory") is True
-                    and report.get("requires_human_review") is True
-                    and report.get("reviewer_relation") == "same_model"
-                    and report.get("decision")
-                    in {
-                        "blocked",
-                        "revision_recommended",
-                        "candidate_ready_for_human_review",
-                    }
-                    and len(report_dimensions) == 6
+                "quality_report_contract_valid": _quality_report_contract_valid(
+                    report,
+                    expected_reviewer_relation=expected_reviewer_relation,
                 ),
                 "quality_markdown_readable_and_private": (
                     quality_report_markdown.startswith("# 口播稿质量报告")
@@ -1202,6 +1280,7 @@ async def execute_e2e(
         "runtime": {
             "provider": provider_name,
             "model": provider.model,
+            "reviewer_model": ((reviewer_provider or provider).model if quality_review else None),
             "database_path": str(paths.database),
             "quality_review_enabled": quality_review,
             "max_model_calls": expected_model_calls,
@@ -1313,7 +1392,7 @@ def _parser() -> argparse.ArgumentParser:
         "--quality-review",
         action="store_true",
         help=(
-            "exercise the M3.4 v6 Editor -> persisted Reviewer -> quality "
+            "exercise the current v7 Editor -> persisted Reviewer -> quality "
             "report -> synthetic feedback flow"
         ),
     )
@@ -1322,6 +1401,18 @@ def _parser() -> argparse.ArgumentParser:
         choices=("fake", "deepseek"),
         default="fake",
         help="model provider (default: fake)",
+    )
+    parser.add_argument(
+        "--editor-model",
+        choices=("deepseek-v4-flash", "deepseek-v4-pro"),
+        default=LIVE_MODEL,
+        help="trusted DeepSeek model for Researcher, Interviewer, and Editor",
+    )
+    parser.add_argument(
+        "--reviewer-model",
+        choices=("deepseek-v4-flash", "deepseek-v4-pro"),
+        default=None,
+        help="trusted DeepSeek Reviewer override; defaults to --editor-model",
     )
     parser.add_argument(
         "--fixture",
@@ -1386,6 +1477,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             billing_currency=settings.deepseek_billing_currency,
             fixture=fixture,
             quality_review=args.quality_review,
+            editor_model=args.editor_model,
+            reviewer_model=args.reviewer_model,
         )
     )
     if not args.execute:
@@ -1411,7 +1504,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provider_name=args.provider,
                 settings=settings,
                 api_key=api_key,
+                model=args.editor_model,
             )
+            reviewer_provider = provider
+            if (
+                args.provider == "deepseek"
+                and args.quality_review
+                and args.reviewer_model is not None
+                and args.reviewer_model != args.editor_model
+            ):
+                reviewer_provider = build_provider(
+                    provider_name=args.provider,
+                    settings=settings,
+                    api_key=api_key,
+                    model=args.reviewer_model,
+                )
         except (TypeError, ValueError) as error:
             raise E2EFlowError(
                 stage="provider",
@@ -1426,6 +1533,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 settings=settings,
                 secret_values=(api_key,),
                 quality_review=args.quality_review,
+                reviewer_provider=reviewer_provider,
             )
         )
     except Exception as error:

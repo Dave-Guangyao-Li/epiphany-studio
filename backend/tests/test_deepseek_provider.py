@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from epiphany.config import Settings
 from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
 from epiphany.interview_schemas import BUILD_INTERVIEW_SCAFFOLD
-from epiphany.main import build_provider
+from epiphany.main import build_provider, build_reviewer_provider
 from epiphany.observability import JsonFormatter
 from epiphany.runtime.output_validation import validate_task_output
 from epiphany.runtime.providers import (
@@ -1120,6 +1120,50 @@ def test_provider_selection_defaults_to_fake_and_requires_a_deepseek_key() -> No
     assert provider.max_source_chars == 8_000
     assert provider.max_interview_bundle_chars == 24_000
     assert provider.max_editor_bundle_chars == 48_000
+
+
+def test_reviewer_provider_defaults_to_editor_but_can_use_a_trusted_tier() -> None:
+    fake_settings = Settings(
+        _env_file=None,
+        model_provider="fake",
+        deepseek_reviewer_model="deepseek-v4-pro",
+    )
+    fake = build_provider(fake_settings)
+    assert build_reviewer_provider(fake_settings, default_provider=fake) is fake
+
+    same_settings = Settings(
+        _env_file=None,
+        model_provider="deepseek",
+        deepseek_api_key=API_KEY,
+        deepseek_model="deepseek-v4-flash",
+    )
+    editor = build_provider(same_settings)
+    assert build_reviewer_provider(same_settings, default_provider=editor) is editor
+
+    cross_tier_settings = Settings(
+        _env_file=None,
+        model_provider="deepseek",
+        deepseek_api_key=API_KEY,
+        deepseek_model="deepseek-v4-flash",
+        deepseek_reviewer_model="deepseek-v4-pro",
+    )
+    cross_tier_editor = build_provider(cross_tier_settings)
+    reviewer = build_reviewer_provider(
+        cross_tier_settings,
+        default_provider=cross_tier_editor,
+    )
+
+    assert isinstance(reviewer, DeepSeekProvider)
+    assert reviewer is not cross_tier_editor
+    assert reviewer.model == "deepseek-v4-pro"
+
+
+def test_settings_reject_an_arbitrary_reviewer_model() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            deepseek_reviewer_model="model-from-run-input",
+        )
 
 
 def test_default_editor_output_limit_can_cover_a_thirty_minute_brief() -> None:

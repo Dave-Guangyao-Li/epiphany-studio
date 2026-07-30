@@ -57,6 +57,7 @@ from epiphany.runtime.orchestrator import (
     INTERVIEW_RESEARCH_WORKFLOW_VERSION,
     MATERIAL_READINESS_WORKFLOW_VERSION,
     QUALITY_REVIEW_WORKFLOW_VERSION,
+    QUALITY_REVIEW_WORKFLOW_VERSIONS,
     Orchestrator,
 )
 from epiphany.schemas import (
@@ -657,7 +658,7 @@ class RunService:
                 raise RunNotFound(run_id)
             if versioned_run.workflow_version in {
                 MATERIAL_READINESS_WORKFLOW_VERSION,
-                QUALITY_REVIEW_WORKFLOW_VERSION,
+                *QUALITY_REVIEW_WORKFLOW_VERSIONS,
             }:
                 return await self._resume_material_readiness_run(
                     run_id,
@@ -1020,7 +1021,7 @@ class RunService:
                         or run.workflow_version
                         not in {
                             MATERIAL_READINESS_WORKFLOW_VERSION,
-                            QUALITY_REVIEW_WORKFLOW_VERSION,
+                            *QUALITY_REVIEW_WORKFLOW_VERSIONS,
                         }
                         or run.status != RunStatus.WAITING_FOR_USER
                         or run.current_step != "awaiting_more_material"

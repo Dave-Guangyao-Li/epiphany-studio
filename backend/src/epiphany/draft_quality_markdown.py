@@ -45,6 +45,13 @@ def render_draft_quality_markdown(content: dict[str, Any]) -> str:
         "",
         "## 可复现指标",
         "",
+        f"- 确定性规则版本：`{_safe(metrics.rules_version)}`",
+        "- 中文表达启发式版本："
+        + (
+            f"`{_safe(metrics.chinese_style_heuristic_version)}`"
+            if metrics.chinese_style_heuristic_version is not None
+            else "未启用（legacy）"
+        ),
         f"- 目标时长：{metrics.target_duration_minutes} 分钟",
         f"- 估算时长：{metrics.estimated_duration_minutes:.2f} 分钟",
         f"- 估算口径：每分钟 {metrics.speaking_rate_chars_per_minute} 个非空白字符",
@@ -58,6 +65,8 @@ def render_draft_quality_markdown(content: dict[str, Any]) -> str:
         f"{metrics.filler_phrase_density_per_1000_chars:.2f} 次 / 1000 字符",
         f"- 模板化短语命中：{metrics.template_phrase_count}",
         f"- “不是……而是……”句式命中：{metrics.not_but_pattern_count}",
+        "- `must_include` 逐字未命中："
+        f"{metrics.must_include_missing_count}（仅表示字符串未出现，不代表语义缺失）",
         "",
         f"确定性分数（实验性）：{report.deterministic.deterministic_score}/100",
         "",
@@ -80,6 +89,16 @@ def render_draft_quality_markdown(content: dict[str, Any]) -> str:
         lines.append(f"  - 位置：`{_safe(finding.location)}`")
         if finding.exact_quote:
             lines.append(f"  - 证据摘录：“{_safe(finding.exact_quote)}”")
+    informational = [
+        finding for finding in report.deterministic.findings if finding.status == "info"
+    ]
+    if informational:
+        lines.extend(["", "### 信息性观察（不扣分、不触发评分上限）", ""])
+        for finding in informational:
+            lines.append(
+                f"- {_safe(finding.code)}：观测值 {_safe(finding.observed)}；"
+                f"说明 {_safe(finding.threshold)}"
+            )
 
     lines.extend(["", "## 模型建议性自评", ""])
     if report.model_self_review is None:
@@ -90,6 +109,7 @@ def render_draft_quality_markdown(content: dict[str, Any]) -> str:
     else:
         relation = {
             "same_model": "与写稿模型相同",
+            "cross_tier_same_family": "与写稿模型同属 DeepSeek V4、但使用不同能力档位",
             "different_model": "与写稿模型不同",
             "unknown": "模型关系未知",
         }.get(report.reviewer_relation, "模型关系未知")
@@ -127,15 +147,73 @@ def render_draft_quality_markdown(content: dict[str, Any]) -> str:
                 )
             lines.append("")
 
-    if report.experimental_overall_score is not None:
+    if report.scoring_formula_version == "draft_quality_v2_non_compensatory_caps":
         lines.extend(
             [
-                "## 实验性综合分",
+                "## 实验性评分校准",
                 "",
-                f"{report.experimental_overall_score:.2f}/100",
+                f"- 评分公式：`{_safe(report.scoring_formula_version)}`",
+                "- 模型六个局部维度的简单平均（未应用硬性上限，仅用于偏差研究）："
+                + (
+                    f"{report.experimental_model_score:.2f}/100"
+                    if report.experimental_model_score is not None
+                    else "不可用"
+                ),
+                "- 未校准加权综合分："
+                + (
+                    f"{report.experimental_uncapped_overall_score:.2f}/100"
+                    if report.experimental_uncapped_overall_score is not None
+                    else "不可用"
+                ),
+                "- 代码拥有的非补偿式上限："
+                + (
+                    f"{report.code_owned_score_cap}/100"
+                    if report.code_owned_score_cap is not None
+                    else "未记录"
+                ),
+                "- 校准后实验性综合分："
+                + (
+                    f"{report.experimental_overall_score:.2f}/100"
+                    if report.experimental_overall_score is not None
+                    else "不可用"
+                ),
                 "",
                 "该分数只用于同一版本规则下的回归比较，不代表客观质量，"
                 "也不能替代真实录制与听众反馈。",
+                "",
+            ]
+        )
+        if report.score_cap_reasons:
+            lines.extend(["### 上限原因", ""])
+            for reason in report.score_cap_reasons:
+                lines.append(
+                    f"- `{_safe(reason.code)}`（上限 {reason.cap}）：{_safe(reason.explanation)}"
+                )
+            lines.append("")
+        if report.model_review_conflicts:
+            lines.extend(
+                [
+                    "### 模型意见与代码事实的冲突",
+                    "",
+                    "> 下列冲突不会改写原始模型评分卡，只会由代码校准最终综合分。",
+                    "",
+                ]
+            )
+            for conflict in report.model_review_conflicts:
+                lines.append(f"- `{_safe(conflict.code)}`：{_safe(conflict.explanation)}")
+                lines.append(
+                    "  - 相关确定性规则："
+                    + "、".join(f"`{_safe(code)}`" for code in conflict.deterministic_finding_codes)
+                )
+            lines.append("")
+    elif report.experimental_overall_score is not None:
+        lines.extend(
+            [
+                "## 实验性综合分（旧版公式）",
+                "",
+                f"{report.experimental_overall_score:.2f}/100",
+                "",
+                "这是旧版可补偿式加权结果，仅为兼容历史报告保留。",
                 "",
             ]
         )

@@ -8,6 +8,7 @@ from time import perf_counter
 from sqlalchemy import select
 
 from epiphany.db import Database
+from epiphany.draft_quality_schemas import REVIEW_PODCAST_DRAFT
 from epiphany.events import append_event
 from epiphany.ids import new_id
 from epiphany.models import Artifact, Run, Task
@@ -41,6 +42,7 @@ class Worker:
         database: Database,
         orchestrator: Orchestrator,
         provider: ModelProvider,
+        reviewer_provider: ModelProvider | None = None,
         lease_seconds: int,
         timeout_seconds: float,
         poll_interval_seconds: float,
@@ -50,6 +52,7 @@ class Worker:
         self.database = database
         self.orchestrator = orchestrator
         self.provider = provider
+        self.reviewer_provider = reviewer_provider
         self.lease_seconds = lease_seconds
         self.timeout_seconds = timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
@@ -402,12 +405,13 @@ class Worker:
         return True
 
     async def _execute_invocation(self, invocation: TaskInvocation) -> None:
+        provider = self._provider_for(invocation)
         try:
             model_call_id = await self.model_call_ledger.reserve(
                 invocation,
-                provider=self.provider.name,
-                model=self.provider.model,
-                cost_currency=self.provider.billing_currency,
+                provider=provider.name,
+                model=provider.model,
+                cost_currency=provider.billing_currency,
             )
         except ModelCallLeaseLost:
             logger.warning(
@@ -428,7 +432,7 @@ class Worker:
         started_at = perf_counter()
         try:
             result = await asyncio.wait_for(
-                self.provider.generate(invocation),
+                provider.generate(invocation),
                 timeout=self.timeout_seconds,
             )
         except TimeoutError:
@@ -502,6 +506,11 @@ class Worker:
             )
         except Exception as error:  # Worker boundary persists the error before continuing.
             await self.fail(invocation, error)
+
+    def _provider_for(self, invocation: TaskInvocation) -> ModelProvider:
+        if invocation.kind == REVIEW_PODCAST_DRAFT and self.reviewer_provider is not None:
+            return self.reviewer_provider
+        return self.provider
 
     async def run_batch(self, *, limit: int | None = None) -> int:
         batch_limit = min(limit or self.max_concurrency, self.max_concurrency)
