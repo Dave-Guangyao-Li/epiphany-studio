@@ -54,7 +54,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 18. [M3.5：中文口播质量校准与冻结稿 Reviewer 实验](m3-5-chinese-quality-calibration.zh-CN.md)
 19. [M3.6：授权写作样本与显式 Revision 子 Run](m3-6-guided-revision-writing-style.zh-CN.md)
 20. [M3.7a：写作样本 A/B 的冻结输入与零费用预检](m3-7a-writing-style-ab-preflight.zh-CN.md)
-21. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+21. [M3.7b/c：受控写作样本 A/B 与匿名盲评](m3-7bc-controlled-writing-style-experiment.zh-CN.md)
+22. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -80,6 +81,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M3.5 | 只按口播正文估时、校准中文风格信号，并阻止模型高分掩盖硬性问题 | 已完成并合并 | `1fc84de` |
 | M3.6 | 用授权写作样本约束风格，并由用户显式创建可追溯 Revision 子 Run | 292 tests + Fake E2E 已验证；真实 DeepSeek E2E 待执行 | `f418331`、`ab55b6b`、`53bb478` |
 | M3.7a | 冻结同一份 v8 Editor 输入，证明 Sample A/B 只改变写作风格上下文 | 308 tests + Fake v8 手动预检通过；零模型调用 | 本次 focused commit |
+| M3.7b/c | 有界生成两稿、同条件 Reviewer、匿名真人盲评与揭盲 | 309 tests + DeepSeek 4/4 调用通过；等待真人盲评 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -226,6 +228,13 @@ canonical hash 必须相同；无 Sample 组只清空
 也不修改原 Run。详细命令和设计原因见
 [M3.7a 学习章节](m3-7a-writing-style-ab-preflight.zh-CN.md)。
 
+M3.7b/c 在同一冻结输入上最多执行两次 Editor 和两次 Reviewer。执行顺序默认
+随机化，输出写入独占、私有的本地实验目录；任一步失败立即停止。随后系统把
+两份口播正文随机匿名成 Candidate A/B，隐藏 treatment 和 Reviewer 分数，
+要求先保存真人的声音匹配、可录性与二选一判断，再允许揭盲。它是一次离线
+个人实验，不修改原 Run，也不扩展生产 API 或数据库。完整操作与故障判断见
+[M3.7b/c 学习章节](m3-7bc-controlled-writing-style-experiment.zh-CN.md)。
+
 用户反馈与自动报告分开保存。自动 E2E 使用的 `synthetic_test` 永远是
 `human_signal_eligible=false`。当前无鉴权 MVP 的 origin 是调用方自报标签，
 不是已验证真人身份。详细原理、Swagger 和测试命令见
@@ -283,8 +292,8 @@ Run 使用 16,667 input tokens、9,468 output tokens、73,018 ms Provider
 - Flash 与 Pro 属于同一 DeepSeek 家族，不等于跨家族独立裁判；
 - 已能显式生成 Revision 子 Run，但尚未做真实 DeepSeek M3.6 E2E 与本人
   写作样本内容复核；
-- M3.7a 只证明 A/B 输入受控；尚未执行两次 Editor、两次 Reviewer，也还没有
-  进行候选稿盲评；
+- M3.7b/c 的执行与盲评工具及一次真实 DeepSeek 单 pair 已完成，但尚未保存
+  本人盲评和揭盲结论；单 pair 也不能证明对所有主题有效；
 - comparison 只给出差异证据，不会替用户选择最终稿；
 - 尚未提供可视化采访脚手架和播客稿 editor；
 - M3.2 的 Editor 已通过合成素材真实调用，但尚未使用个人隐私素材验收；

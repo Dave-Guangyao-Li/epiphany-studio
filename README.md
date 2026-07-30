@@ -518,9 +518,23 @@ python -m epiphany.writing_style_ab \
   --database data/epiphany.db
 ```
 
-This preflight does not claim that the sample improves the Draft. M3.7b will
-add the bounded two-Editor/two-Reviewer executor, and M3.7c will blind the
-candidates before human voice-match and recordability ratings.
+This preflight does not claim that the sample improves the Draft. M3.7b/c now
+adds one deliberately local experiment: exactly two Flash Editor calls and two
+Pro Reviewer calls, with randomized arm order, an atomically persisted private
+manifest, and no automatic retry. The two Drafts are then randomized as
+Candidate A/B. Reviewer scores and treatment identity remain hidden until a
+human has stored voice-match, recordability, and forced-choice ratings.
+
+The experiment does not mutate the source Run, add an API, or create a second
+production workflow. Its Draft, quality, blind-mapping, and rating files live
+under the gitignored `artifacts/` directory with private permissions. A
+`started` call in the manifest means billing is unknown after a crash and must
+be reconciled with the provider dashboard before any rerun.
+
+The first bounded live pair completed all four calls without retry: 42,503
+input tokens, 9,579 output tokens, and an estimated CNY 0.117905. Both Drafts
+remained duration-blocked despite high model-review scores. Candidate A/B are
+prepared, but treatment stays hidden until the human blind rating is stored.
 
 See the
 [M3.6 learning chapter](docs/learning/m3-6-guided-revision-writing-style.zh-CN.md)
@@ -530,6 +544,9 @@ for the controlled-input proof. The earlier calibration details remain in the
 [M3.5 learning chapter](docs/learning/m3-5-chinese-quality-calibration.zh-CN.md)
 and the
 [Chinese podcast style research note](docs/research/chinese-podcast-style-signals.zh-CN.md).
+The bounded execution, local ledger, blind-rating contract, commands, and M3
+exit criteria are in the
+[M3.7b/c learning chapter](docs/learning/m3-7bc-controlled-writing-style-experiment.zh-CN.md).
 
 ## License
 

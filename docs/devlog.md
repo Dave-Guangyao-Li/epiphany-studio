@@ -2,6 +2,48 @@
 
 ## 2026-07-30
 
+### M3.7b/c bounded writing-style A/B execution and blind rating
+
+- Kept the final M3 experiment out of the production API, database, and
+  workflow state machine. One local runner reuses a completed v8 Editor input
+  and performs at most two Flash Editor plus two Pro Reviewer calls.
+- Extended the experiment contract to freeze both rendered Editor prompt
+  hashes, the style-aware Reviewer contract/prompt/formula versions, API base
+  URL, billing currency, timeout, and existing model/token/bundle settings.
+  Paid execution recomputes the contract and blocks with zero calls on drift.
+- Randomized Editor and Reviewer arm order by default so treatment is not
+  permanently tied to first/second request order. Both Reviewers still receive
+  the same ready style Sample, while only the Editor treatment differs.
+- Added a private atomic experiment ledger. The output directory is exclusively
+  claimed; manifest and result files use `0700`/`0600`; each request is
+  persisted as `started` before it may incur cost and then as
+  `succeeded`/`failed`. A crashed `started` request requires provider-dashboard
+  reconciliation rather than an automatic retry.
+- Corrected privacy metadata: the public-safe manifest contains no Source,
+  Sample, Prompt, model text, or Key, while private Draft files contain model
+  text and private Quality files may contain quoted Source/Sample evidence.
+- Added a local blind layer that validates the execution hashes, randomly maps
+  the scripts to Candidate A/B, separates a salted private mapping from a
+  public commitment, and exports only escaped script text before reveal.
+- Required both candidate voice-match and recordability ratings plus a forced
+  voice choice before reveal. Candidate/mapping tampering and conflicting
+  rating replays are rejected; reveal presents evidence but never selects a
+  winner.
+- Added 17 focused tests covering the frozen input, four-call order and shared
+  Reviewer Sample, contract drift, Editor/Reviewer failure accounting, output
+  exclusivity and permissions, blind redaction/escaping, tamper detection,
+  idempotent rating, rating conflicts, and reveal gating.
+- Ran one explicitly approved DeepSeek pair from frozen Run
+  `run_1bbe5ae81b0e4f118331461ab61dd656`: 2/2 Flash Editor and 2/2 Pro Reviewer
+  calls succeeded with no retry, using 42,503 input and 9,579 output tokens,
+  81,387 ms provider time, and an estimated CNY 0.117905. Both anonymous Drafts
+  remained duration-blocked at 5.64--6.02 minutes despite equal 84.67 model
+  scores; their deterministic score was 58 and capped overall score was 39.
+- Prepared two private Candidate A/B files and a salted mapping commitment
+  without revealing treatment. One human blind rating and post-rating reveal
+  remain the hard M3 exit criterion; general benchmarking and blind-rating UI
+  are out of scope.
+
 ### M3.7a frozen-input writing-style A/B preflight
 
 - Split the writing-sample experiment into three reviewable slices instead of
