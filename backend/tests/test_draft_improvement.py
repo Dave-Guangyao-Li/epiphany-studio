@@ -560,6 +560,8 @@ def test_insufficient_unused_material_recommends_supplement_and_lower_preset() -
     assert plan.duration_resolution == "reuse_then_supplement"
     options = {option.kind: option for option in plan.options}
     assert options["reuse_unused_material"].recommended is False
+    assert "仍低于当前时长缺口" in options["reuse_unused_material"].explanation
+    assert "补充材料或降低目标时长" in options["reuse_unused_material"].explanation
     assert options["add_supplemental_material"].recommended is True
     assert options["lower_target_duration"].recommended is False
     assert options["lower_target_duration"].suggested_target_duration_minutes == 10

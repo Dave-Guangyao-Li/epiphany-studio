@@ -455,13 +455,21 @@ def build_draft_improvement_plan(
 
     options: list[DraftImprovementOption] = []
     if missing_to_minimum_characters and priority_segments:
+        candidate_volume_supports_attempt = priority_characters >= missing_to_minimum_characters
         options.append(
             DraftImprovementOption(
                 kind="reuse_unused_material",
-                recommended=priority_characters >= missing_to_minimum_characters,
+                recommended=candidate_volume_supports_attempt,
                 explanation=(
-                    "已筛选的候选事实片段，其原始字数足以支持一次受控扩写尝试；"
-                    "这不保证修改后一定达到时长，仍需检查信息增量、重复与口播质量。"
+                    (
+                        "已筛选的候选事实片段，其原始字数足以支持一次受控扩写尝试；"
+                        "这不保证修改后一定达到时长，仍需检查信息增量、重复与口播质量。"
+                    )
+                    if candidate_volume_supports_attempt
+                    else (
+                        "可以先复用已筛选的候选事实片段增加具体内容，但其原始字数"
+                        "仍低于当前时长缺口；扩写后预计还需要补充材料或降低目标时长。"
+                    )
                 ),
                 source_refs=priority_refs,
             )
