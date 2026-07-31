@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import epiphany.length_recovery_e2e as length_recovery_e2e
 from epiphany.length_recovery_e2e import (
     DEFAULT_FIXTURE_PATH,
     _log_summary,
+    _non_duration_warning_count,
     _post_revision_plan_summary,
     _sensitive_log_fragments,
+    _warning_count,
     main,
 )
 from epiphany.realistic_style_experiment_e2e import load_realistic_style_fixture
@@ -74,6 +77,28 @@ def test_log_validation_rejects_a_partial_generated_paragraph_leak(
     assert valid is False
     assert summary["required_events_present"] is True
     assert summary["source_sample_prompt_and_key_absent"] is False
+
+
+def test_non_duration_warning_comparison_does_not_penalize_a_reduced_duration_severity() -> None:
+    parent = SimpleNamespace(
+        deterministic=SimpleNamespace(
+            findings=[
+                SimpleNamespace(code="duration.severe_deviation", status="blocker"),
+                SimpleNamespace(code="style.paragraph_length_cv", status="warning"),
+            ]
+        )
+    )
+    child = SimpleNamespace(
+        deterministic=SimpleNamespace(
+            findings=[
+                SimpleNamespace(code="duration.outside_target_range", status="warning"),
+                SimpleNamespace(code="style.zh.enumeration", status="warning"),
+            ]
+        )
+    )
+
+    assert _warning_count(child) > _warning_count(parent)
+    assert _non_duration_warning_count(child) == _non_duration_warning_count(parent) == 1
 
 
 def test_preflight_uses_the_realistic_fixture_and_caps_the_full_flow_at_seven_calls(

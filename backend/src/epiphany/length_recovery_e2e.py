@@ -195,6 +195,23 @@ def _warning_count(report: DraftQualityReport) -> int:
     return sum(finding.status == "warning" for finding in report.deterministic.findings)
 
 
+def _non_duration_warning_count(report: DraftQualityReport) -> int:
+    """Count quality warnings without penalizing an improved duration severity.
+
+    A Draft can legitimately move from a duration blocker to a duration warning.
+    Comparing raw warning counts would then treat that improvement as a new
+    warning, even when every non-duration quality signal stayed flat or improved.
+    Duration has its own explicit recovery checks, so this comparison only covers
+    the remaining deterministic findings.
+    """
+
+    return sum(
+        finding.status == "warning"
+        for finding in report.deterministic.findings
+        if finding.code != "draft.empty" and not finding.code.startswith("duration.")
+    )
+
+
 def _density_per_1000(*, count: int, character_count: int) -> float:
     return round(count / max(1, character_count) * 1_000, 4)
 
@@ -612,6 +629,7 @@ def _failed_child_revision_result(
                 "duration_status": _duration_finding(parent_quality),
                 "deterministic_score": parent_quality.deterministic.deterministic_score,
                 "warning_count": _warning_count(parent_quality),
+                "non_duration_warning_count": _non_duration_warning_count(parent_quality),
                 "template_phrase_density_per_1000_chars": parent_template_density,
                 "not_but_density_per_1000_chars": parent_not_but_density,
                 "chinese_style_density_per_1000_chars": _chinese_style_density(parent_quality),
@@ -1044,8 +1062,9 @@ async def _continue_with_revision(
             child_quality.deterministic.deterministic_score
             >= parent_quality.deterministic.deterministic_score
         ),
-        "warning_count_not_higher": (
-            _warning_count(child_quality) <= _warning_count(parent_quality)
+        "non_duration_warning_count_not_higher": (
+            _non_duration_warning_count(child_quality)
+            <= _non_duration_warning_count(parent_quality)
         ),
         "duration_blocker_removed": _duration_finding(child_quality) != "blocker",
         "new_priority_evidence_used": bool(newly_used_refs & priority_refs),
@@ -1183,6 +1202,7 @@ async def _continue_with_revision(
                 "duration_status": _duration_finding(parent_quality),
                 "deterministic_score": parent_quality.deterministic.deterministic_score,
                 "warning_count": _warning_count(parent_quality),
+                "non_duration_warning_count": _non_duration_warning_count(parent_quality),
                 "template_phrase_density_per_1000_chars": parent_template_density,
                 "not_but_density_per_1000_chars": parent_not_but_density,
                 "chinese_style_density_per_1000_chars": (parent_chinese_style_density),
@@ -1202,6 +1222,7 @@ async def _continue_with_revision(
                     child_metrics.filler_phrase_density_per_1000_chars
                 ),
                 "warning_count": _warning_count(child_quality),
+                "non_duration_warning_count": _non_duration_warning_count(child_quality),
                 "template_phrase_density_per_1000_chars": child_template_density,
                 "not_but_density_per_1000_chars": child_not_but_density,
                 "chinese_style_density_per_1000_chars": (child_chinese_style_density),
