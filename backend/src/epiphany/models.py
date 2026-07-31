@@ -29,12 +29,25 @@ class TimestampMixin:
 
 class Run(TimestampMixin, Base):
     __tablename__ = "runs"
-    __table_args__ = (Index("ix_runs_parent_run_id", "parent_run_id"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "submission_id",
+            name="uq_runs_project_submission_id",
+        ),
+        Index("ix_runs_parent_run_id", "parent_run_id"),
+        Index("ix_runs_project_id", "project_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: new_id("run"))
     parent_run_id: Mapped[str | None] = mapped_column(
         ForeignKey("runs.id", name="fk_runs_parent_run_id")
     )
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL", name="fk_runs_project_id")
+    )
+    submission_id: Mapped[str | None] = mapped_column(String(160))
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64))
     workflow_type: Mapped[str] = mapped_column(String(80), nullable=False)
     workflow_version: Mapped[str] = mapped_column(String(32), nullable=False, default="v1")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default=RunStatus.QUEUED)
@@ -66,6 +79,10 @@ class Run(TimestampMixin, Base):
         back_populates="run",
         cascade="all, delete-orphan",
         foreign_keys="ModelCall.run_id",
+    )
+    project: Mapped[Project | None] = relationship(
+        back_populates="runs",
+        foreign_keys=[project_id],
     )
 
 
@@ -198,6 +215,10 @@ class Source(TimestampMixin, Base):
         cascade="all, delete-orphan",
         order_by="SourceSegment.position",
     )
+    project_links: Mapped[list[ProjectSource]] = relationship(
+        back_populates="source",
+        cascade="all, delete-orphan",
+    )
 
 
 class SourceSegment(Base):
@@ -224,3 +245,47 @@ class SourceSegment(Base):
     )
 
     source: Mapped[Source] = relationship(back_populates="segments")
+
+
+class Project(TimestampMixin, Base):
+    __tablename__ = "projects"
+    __table_args__ = (Index("ix_projects_created_at", "created_at"),)
+
+    id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=lambda: new_id("proj"),
+    )
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+
+    source_links: Mapped[list[ProjectSource]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    runs: Mapped[list[Run]] = relationship(
+        back_populates="project",
+        foreign_keys="Run.project_id",
+    )
+
+
+class ProjectSource(Base):
+    __tablename__ = "project_sources"
+    __table_args__ = (Index("ix_project_sources_source_id", "source_id"),)
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+
+    project: Mapped[Project] = relationship(back_populates="source_links")
+    source: Mapped[Source] = relationship(back_populates="project_links")
