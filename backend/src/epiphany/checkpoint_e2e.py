@@ -493,6 +493,9 @@ def _forbidden_log_fragments(
 
     fragments = {"Authorization", "Bearer "}
     sources = [*fixture["initial_sources"], fixture["supplemental_source"]]
+    for writing_sample in fixture.get("writing_samples", []):
+        if isinstance(writing_sample, dict) and isinstance(writing_sample.get("source"), dict):
+            sources.append(writing_sample["source"])
     for source in sources:
         text = str(source["text"]).strip()
         if not text:
