@@ -1,6 +1,110 @@
 # Development Log
 
+## 2026-07-31
+
+### M3.7d realistic synthetic-persona E2E
+
+- Froze one fictional but realistic corpus with three factual Sources, one
+  full supplemental transcript, and four independent style-only samples.
+  Facts and style remain disjoint.
+- Added a resumable local driver for Research, deterministic fan-in,
+  Interviewer, durable checkpoint, restart, supplemental Source, idempotent
+  Resume, Editor, quality metrics, Reviewer, exports, and frozen A/B preflight.
+- Isolated Dry Run, Fake, live main, A/B, and blind evaluation into unique
+  ignored databases and artifact directories, preserving evidence across
+  crashes or conversation disconnects.
+- Found and fixed experiment-driver configuration drift: preflight advertised
+  the product's 48,000-character Editor limit while execution inherited an old
+  32,000-character checkpoint default. The original 37,091-character bundle
+  was blocked locally before an Editor request; the driver now passes and
+  verifies the effective Settings limits without changing old E2E defaults.
+- Completed a live DeepSeek main Run with 5/5 accepted calls: 48,663 input
+  tokens, 12,121 output tokens, 89,327 ms provider time, and locally estimated
+  CNY 0.113035. One Pro Reviewer response violated the verbatim evidence
+  contract; the workflow retained deterministic results and degraded model
+  review to unavailable rather than accepting a paraphrase or silently
+  retrying.
+- Confirmed that 4,679 grounded characters could conservatively support
+  14.2--19.2 minutes, while the Editor used only 1,893 spoken characters
+  (6.76 minutes). The next product action should be a Revision using untouched
+  evidence, not another generic request for user material.
+- Completed the frozen DeepSeek A/B with 4/4 calls and no retry. Both arms were
+  duration-blocked and capped at 39, but exact spoken-unit overlap fell from
+  the earlier 0.90 to 0.1875, making the candidates distinguishable.
+- Persisted a non-human blind audit before reveal. It directionally preferred
+  the Sample candidate for voice and recordability; the record explicitly
+  remains `human_rating=false`, not user feedback or a product winner.
+- The complete experiment sequence used a locally estimated CNY 0.283416.
+  Passed all 315 backend tests, Ruff lint, the 99-file format check, and Fake
+  v8 E2E. Corpus design, commands, failures, costs, metrics, and privacy
+  boundaries are recorded in
+  `docs/experiments/m3-7d-realistic-persona-e2e.zh-CN.md`. M3 remains frozen;
+  the next product slice is M4.1 replayable SSE.
+
 ## 2026-07-30
+
+### M3.7b/c bounded writing-style A/B execution and blind rating
+
+- Kept the final M3 experiment out of the production API, database, and
+  workflow state machine. One local runner reuses a completed v8 Editor input
+  and performs at most two Flash Editor plus two Pro Reviewer calls.
+- Extended the experiment contract to freeze both rendered Editor prompt
+  hashes, the style-aware Reviewer contract/prompt/formula versions, API base
+  URL, billing currency, timeout, and existing model/token/bundle settings.
+  Paid execution recomputes the contract and blocks with zero calls on drift.
+- Randomized Editor and Reviewer arm order by default so treatment is not
+  permanently tied to first/second request order. Both Reviewers still receive
+  the same ready style Sample, while only the Editor treatment differs.
+- Added a private atomic experiment ledger. The output directory is exclusively
+  claimed; manifest and result files use `0700`/`0600`; each request is
+  persisted as `started` before it may incur cost and then as
+  `succeeded`/`failed`. A crashed `started` request requires provider-dashboard
+  reconciliation rather than an automatic retry.
+- Corrected privacy metadata: the public-safe manifest contains no Source,
+  Sample, Prompt, model text, or Key, while private Draft files contain model
+  text and private Quality files may contain quoted Source/Sample evidence.
+- Added a local blind layer that validates the execution hashes, randomly maps
+  the scripts to Candidate A/B, separates a salted private mapping from a
+  public commitment, and exports only escaped script text before reveal.
+- Required both candidate voice-match and recordability ratings plus a forced
+  voice choice before reveal. Candidate/mapping tampering and conflicting
+  rating replays are rejected; reveal presents evidence but never selects a
+  winner.
+- Added 17 focused tests covering the frozen input, four-call order and shared
+  Reviewer Sample, contract drift, Editor/Reviewer failure accounting, output
+  exclusivity and permissions, blind redaction/escaping, tamper detection,
+  idempotent rating, rating conflicts, and reveal gating.
+- Ran one explicitly approved DeepSeek pair from frozen Run
+  `run_1bbe5ae81b0e4f118331461ab61dd656`: 2/2 Flash Editor and 2/2 Pro Reviewer
+  calls succeeded with no retry, using 42,503 input and 9,579 output tokens,
+  81,387 ms provider time, and an estimated CNY 0.117905. Both anonymous Drafts
+  remained duration-blocked at 5.64--6.02 minutes despite equal 84.67 model
+  scores; their deterministic score was 58 and capped overall score was 39.
+- The source material and writing Sample in that source Run are complete
+  synthetic fixtures. The run validates real Provider behavior and the
+  experiment mechanism, not the effectiveness of a user's private writing
+  Sample. A blind human can still assess naturalness and recordability, while
+  genuine personal-style validation is deferred until consented UI onboarding.
+- Stored the human rating before reveal. Candidate A received voice-match 3/5
+  and recordability 3/5; Candidate B received 2/5 and 3/5. The user made a
+  low-confidence forced choice for A, noting that its opening was slightly
+  closer but still needed more concrete lived detail and that the latter parts
+  of both Drafts were nearly identical.
+- Revealed A as `with_sample` and B as `without_sample`, but did not report a
+  winner. Deterministic comparison found 9 of 10 spoken units exactly equal,
+  exact overlap 0.90, normalized character similarity 0.9638, and only the
+  opening as a different spoken unit.
+- Versioned the blind manifest and reveal as v2. Distinctness is committed with
+  the mapping and candidate hashes; exact overlap >= 0.70 or normalized
+  character similarity >= 0.90 produces
+  `inconclusive_low_distinctness / directional_only`. The original v1 rating
+  evidence was preserved rather than rewritten or regenerated.
+- Passed all 310 backend tests, focused experiment tests, Ruff lint/format,
+  diff check, a clean Alembic upgrade through `0004_run_lineage`, and
+  `alembic check`.
+- Closed and froze M3. General benchmarking, automatic winner selection, more
+  paid pairs, and a blind-rating UI remain out of scope. The next slice is
+  M4.1 replayable SSE, followed by the M5.1 minimal Run Trace UI.
 
 ### M3.7a frozen-input writing-style A/B preflight
 

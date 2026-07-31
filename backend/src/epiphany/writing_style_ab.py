@@ -14,6 +14,10 @@ from sqlalchemy import select
 
 from epiphany.config import Settings
 from epiphany.db import Database
+from epiphany.draft_quality_schemas import (
+    STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
+    STYLE_AWARE_MODEL_REVIEW_TASK_VERSION,
+)
 from epiphany.editor_schemas import (
     BUILD_PODCAST_DRAFT,
     PodcastDraftTaskInput,
@@ -23,6 +27,9 @@ from epiphany.models import Artifact, Run, Task
 from epiphany.research_schemas import EpisodeResearchPayload
 from epiphany.runtime.editor_prompts import build_editor_prompt
 from epiphany.runtime.orchestrator import GUIDED_REVISION_WORKFLOW_VERSION
+from epiphany.runtime.quality_prompts import (
+    STYLE_AWARE_QUALITY_REVIEW_PROMPT_VERSION,
+)
 from epiphany.writing_style_ab_schemas import (
     FrozenWritingStyleABInput,
     WritingStyleABArm,
@@ -33,6 +40,7 @@ REVIEWER_MODEL = "deepseek-v4-pro"
 EDITOR_TEMPERATURE = 0.2
 REVIEWER_TEMPERATURE = 0.0
 PLANNED_LIVE_CALL_COUNT = 4
+EXPERIMENT_REQUEST_TIMEOUT_SECONDS = 180.0
 
 
 class WritingStyleABError(RuntimeError):
@@ -98,6 +106,9 @@ def build_preflight(
     max_quality_tokens: int,
     api_key_present: bool,
     database_path: Path,
+    provider_base_url: str = "https://api.deepseek.com",
+    billing_currency: str = "USD",
+    request_timeout_seconds: float = EXPERIMENT_REQUEST_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Build a content-free, zero-network proof that the experiment is controlled."""
 
@@ -138,6 +149,10 @@ def build_preflight(
 
     common_experiment_contract = {
         "editor_input_without_style": _common_editor_payload(arms["with_sample"]),
+        # The common input hash alone cannot detect an Editor prompt change
+        # between dry-run approval and paid execution. Freeze both rendered
+        # prompt treatments as part of the contract as well.
+        "editor_prompt_sha256_by_arm": prompt_hashes,
         "quality_config": frozen.quality_config.model_dump(mode="json"),
         "editor": {
             "model": EDITOR_MODEL,
@@ -151,6 +166,14 @@ def build_preflight(
             "max_tokens": max_quality_tokens,
             "max_bundle_chars": max_quality_bundle_chars,
             "shared_style_context_sha256": _sha256(style_payload),
+            "review_contract_version": STYLE_AWARE_MODEL_REVIEW_TASK_VERSION,
+            "prompt_version": STYLE_AWARE_QUALITY_REVIEW_PROMPT_VERSION,
+            "scoring_formula_version": STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
+        },
+        "transport": {
+            "provider_base_url": provider_base_url.rstrip("/"),
+            "billing_currency": billing_currency.upper(),
+            "request_timeout_seconds": request_timeout_seconds,
         },
     }
 
@@ -369,6 +392,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_quality_tokens=settings.deepseek_quality_review_max_tokens,
             api_key_present=api_key_present,
             database_path=database_path,
+            provider_base_url=settings.deepseek_base_url,
+            billing_currency=settings.deepseek_billing_currency,
         )
     except Exception as error:
         _print_json(

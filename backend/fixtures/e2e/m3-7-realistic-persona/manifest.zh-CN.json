@@ -1,0 +1,185 @@
+{
+  "fixture_id": "m3-7-realistic-persona-moving-out",
+  "persona": {
+    "name": "林澄",
+    "age": 30,
+    "city": "上海",
+    "occupation": "内容运营",
+    "synthetic": true,
+    "life_context": "正处在工作与居住方式同时变化的阶段，习惯用日记和语音备忘录整理感受。",
+    "voice_signature": [
+      "从具体时间、物件或动作进入，不先宣布主题",
+      "先还原场景，再承认情绪和矛盾",
+      "长句之后常用一个短句收住",
+      "允许改口、括号和轻微自嘲",
+      "不把个人经验包装成普遍答案",
+      "结尾停在一个物件、动作或尚未回答的问题上"
+    ],
+    "avoid_signature": [
+      "整齐排比",
+      "连续对仗",
+      "密集使用不是而是",
+      "空泛鼓励",
+      "强行完成成长闭环"
+    ]
+  },
+  "topic": "退掉住了六年的出租屋后，我为什么在楼下坐了四十分钟",
+  "creative_brief": {
+    "target_duration_minutes": 15,
+    "speaking_rate_chars_per_minute": 280,
+    "scenario": "reflective_solo",
+    "target_audience": "25到35岁、正在搬家、换城市、换工作或结束一段长期生活，并对离开熟悉事物感到矛盾的听众",
+    "communication_goal": "通过退租当天、六年生活留下的物件和楼下四十分钟三个具体层次，讲清楚离开为什么既是主动选择，也会让人短暂失去坐标；提供陪伴而不是建议。",
+    "tone": [
+      "克制",
+      "具体",
+      "亲密，允许矛盾和轻微自嘲"
+    ],
+    "must_include": [
+      "2026年7月18日退租当天的交接",
+      "墙上被书桌挡住六年的浅色方块",
+      "装着门禁卡和两把钥匙的透明自封袋",
+      "在楼下花坛边坐了四十分钟",
+      "离开是主动选择但情绪没有同步完成",
+      "给处在人生过渡期听众的陪伴"
+    ],
+    "avoid_patterns": [
+      "首先其次最后",
+      "离开不是结束而是新的开始",
+      "人生的每一次告别都是成长",
+      "在这个快节奏的时代",
+      "希望以上内容能对你有所帮助",
+      "连续使用不是而是",
+      "没有场景支撑的升华",
+      "把六年生活写成完整成功叙事"
+    ]
+  },
+  "writing_samples": [
+    {
+      "sample_kind": "written_prose",
+      "source": {
+        "title": "写作样本一｜凌晨一点，冰箱里只剩半颗柠檬",
+        "source_type": "writing_sample",
+        "text_file": "style-01-half-lemon.md",
+        "metadata": {
+          "fixture": "m3-7-realistic-persona",
+          "synthetic": true,
+          "contains_personal_data": false,
+          "role": "style_only",
+          "subject": "late-night-work-and-self-correction"
+        }
+      }
+    },
+    {
+      "sample_kind": "written_prose",
+      "source": {
+        "title": "写作样本二｜我妈把视频电话对准阳台上的葱",
+        "source_type": "writing_sample",
+        "text_file": "style-02-balcony-scallions.md",
+        "metadata": {
+          "fixture": "m3-7-realistic-persona",
+          "synthetic": true,
+          "contains_personal_data": false,
+          "role": "style_only",
+          "subject": "family-video-call"
+        }
+      }
+    },
+    {
+      "sample_kind": "written_prose",
+      "source": {
+        "title": "写作样本三｜下雨天去修一把伞",
+        "source_type": "writing_sample",
+        "text_file": "style-03-repair-an-umbrella.md",
+        "metadata": {
+          "fixture": "m3-7-realistic-persona",
+          "synthetic": true,
+          "contains_personal_data": false,
+          "role": "style_only",
+          "subject": "repair-and-disposability"
+        }
+      }
+    },
+    {
+      "sample_kind": "spoken_transcript",
+      "source": {
+        "title": "写作样本四｜语音备忘录：我为什么一直没回那条消息",
+        "source_type": "writing_sample",
+        "text_file": "style-04-unanswered-message.md",
+        "metadata": {
+          "fixture": "m3-7-realistic-persona",
+          "synthetic": true,
+          "contains_personal_data": false,
+          "role": "style_only",
+          "subject": "spoken-self-correction-and-avoidance"
+        }
+      }
+    }
+  ],
+  "style_reference": {
+    "ownership_attested": true,
+    "model_processing_consent": true,
+    "usage": "style_only"
+  },
+  "initial_sources": [
+    {
+      "title": "事实素材一｜入住、六年时间线与退租当天",
+      "source_type": "journal",
+      "text_file": "source-01-timeline.md",
+      "metadata": {
+        "fixture": "m3-7-realistic-persona",
+        "synthetic": true,
+        "contains_personal_data": false,
+        "role": "factual_timeline"
+      }
+    },
+    {
+      "title": "事实素材二｜房间里留下来的物件和生活痕迹",
+      "source_type": "journal",
+      "text_file": "source-02-objects.md",
+      "metadata": {
+        "fixture": "m3-7-realistic-persona",
+        "synthetic": true,
+        "contains_personal_data": false,
+        "role": "factual_objects_and_scenes"
+      }
+    },
+    {
+      "title": "事实素材三｜为什么离开，以及我不想讲成什么",
+      "source_type": "voice_note_transcript",
+      "text_file": "source-03-reflection.md",
+      "metadata": {
+        "fixture": "m3-7-realistic-persona",
+        "synthetic": true,
+        "contains_personal_data": false,
+        "role": "factual_belief_change_and_boundaries"
+      }
+    }
+  ],
+  "supplemental_source": {
+    "title": "补充口述｜楼下四十分钟、没有同步完成的告别和节目边界",
+    "source_type": "voice_note_transcript",
+    "text_file": "supplemental-voice-note.md",
+    "metadata": {
+      "fixture": "m3-7-realistic-persona",
+      "synthetic": true,
+      "contains_personal_data": false,
+      "role": "interview_response",
+      "round": 1
+    }
+  },
+  "submission_id": "m3-7-realistic-persona-round-1",
+  "expected": {
+    "initial_readiness_status": "needs_more_material",
+    "final_readiness_status": "ready",
+    "waiting_status": "waiting_for_user",
+    "waiting_step": "awaiting_more_material",
+    "workflow_version": "v8",
+    "initial_task_count": 4,
+    "initial_artifact_count": 6,
+    "initial_model_call_count": 3,
+    "final_task_count": 6,
+    "final_artifact_count": 12,
+    "final_model_call_count": 5
+  }
+}

@@ -148,6 +148,9 @@ M2 完成标准：以上四个小步全部通过测试和演示后，才进入 M
 
 ## M3：Human-in-the-loop
 
+状态：**完成并冻结（2026-07-30）**。后续发现的产品想法进入新 Milestone，
+不再继续扩张 M3。
+
 - [x] `waiting_for_user`
 - [x] Resume API
 - [x] 用户新增素材
@@ -406,22 +409,46 @@ M3.7a 不生成候选稿，也不声称写作样本已经有效。它只把实�
 
 #### M3.7b：有界生成与同条件 Reviewer
 
-- [ ] 同一 Flash Editor 分别生成两份候选稿
-- [ ] 两稿分别执行严格来源校验、Sample 泄漏检查和确定性质量分析
-- [ ] 同一 Pro Reviewer 在相同 ready Sample 下评价两稿
-- [ ] 把真实调用严格限制为 2 次 Editor + 2 次 Reviewer
-- [ ] 付费调用前重新计算并核对预检合同 hash，阻止预检后的输入/配置漂移
-- [ ] 用 scripted Provider 覆盖失败、记账、顺序与日志脱敏
+- [x] 同一 Flash Editor 分别生成两份候选稿
+- [x] 两稿分别执行严格来源校验、Sample 泄漏检查和确定性质量分析
+- [x] 同一 Pro Reviewer 在相同 ready Sample 下评价两稿
+- [x] 把真实调用严格限制为 2 次 Editor + 2 次 Reviewer
+- [x] 付费调用前重新计算并核对预检合同 hash，阻止预检后的输入/配置漂移
+- [x] 用 scripted Provider 覆盖失败、记账、顺序与日志脱敏
 
 #### M3.7c：匿名候选与真人揭盲
 
-- [ ] 随机映射 Candidate A / B，并把私有映射与候选正文分开保存
-- [ ] 用户在揭盲前提交 `voice_match_rating`、可录性与 forced choice
-- [ ] 以真人声音匹配为主证据，模型第七维只作辅助
-- [ ] 完成一次真实 DeepSeek 单 pair 实验并记录 tokens、费用与限制
+- [x] 随机映射 Candidate A / B，并把私有映射与候选正文分开保存
+- [x] 用户在揭盲前提交 `voice_match_rating`、可录性与 forced choice
+- [x] 以真人声音匹配为主证据，模型第七维只作辅助
+- [x] 完成一次真实 DeepSeek 单 pair 实验并记录 tokens、费用与限制
+- [x] 保存一次真人盲评并在评分后揭盲
+- [x] 检测候选区分度不足，并阻止从高度相似的两稿中宣布 winner
 
-单个 pair 只能算一个人的一次方向性案例，不能证明模型或写作 Sample 对所有
-主题都稳定有效。更强结论需要至少三个主题或三个独立 pair。
+揭盲结果为 A=`with_sample`、B=`without_sample`。真人声音匹配为 3/5 与
+2/5，可录性均为 3/5；用户低置信度偏好 A。但 10 个口播单元中有 9 个逐字
+相同，逐字重合率 0.90，规范化字符相似度 0.9638，因此最终结论是
+`inconclusive_low_distinctness`，不是“Sample 获胜”。这次合成 Sample 的
+单 pair 不能证明真实个人写作样本有效。
+
+#### M3.7d：收口后的真实量级合成人设复验
+
+- [x] 冻结三份事实 Source、一份完整补充口述和四篇独立写作 Sample
+- [x] 跑通真实 checkpoint、进程重启、Resume 与 Editor；Reviewer 调用返回后
+  因证据合同失败而按设计降级
+- [x] 发现并修复实验驱动器 32k 与产品配置 48k 的限制漂移
+- [x] 用同一冻结输入完成四调用 DeepSeek A/B 与匿名合成评审
+
+复验得到的是方向性证据：Sample arm 已产生可辨识差异，匿名合成评审也偏好
+它的声音与可录性，但这仍不是真人证明。两稿都只有约 6.4—6.7 分钟，远低于
+15 分钟目标，最终分被硬性封顶为 39；一次 Reviewer 输出也因
+`exact_quote` 不是 Draft 逐字子串而被严格降级。这些状态应在 M4/M5 的 Trace
+界面中被看见，而不是继续用 Prompt 隐藏。完整记录见
+[M3.7d 实验报告](experiments/m3-7d-realistic-persona-e2e.zh-CN.md)。
+
+M3.7d 后已达到 M3 的硬性收口点。不在本阶段继续建设通用 benchmark、自动
+winner、多用户统计或盲评 UI；下一步转入 M4.1 可回放 SSE，再进入 M5.1
+最小可视化 Run Trace 页面。
 
 ## M4：可靠性与 Trace
 

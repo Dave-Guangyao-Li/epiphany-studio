@@ -518,9 +518,47 @@ python -m epiphany.writing_style_ab \
   --database data/epiphany.db
 ```
 
-This preflight does not claim that the sample improves the Draft. M3.7b will
-add the bounded two-Editor/two-Reviewer executor, and M3.7c will blind the
-candidates before human voice-match and recordability ratings.
+This preflight does not claim that the sample improves the Draft. M3.7b/c now
+adds one deliberately local experiment: exactly two Flash Editor calls and two
+Pro Reviewer calls, with randomized arm order, an atomically persisted private
+manifest, and no automatic retry. The two Drafts are then randomized as
+Candidate A/B. Reviewer scores and treatment identity remain hidden until a
+human has stored voice-match, recordability, and forced-choice ratings.
+
+The experiment does not mutate the source Run, add an API, or create a second
+production workflow. Its Draft, quality, blind-mapping, and rating files live
+under the gitignored `artifacts/` directory with private permissions. A
+`started` call in the manifest means billing is unknown after a crash and must
+be reconciled with the provider dashboard before any rerun.
+
+The first bounded live pair completed all four calls without retry: 42,503
+input tokens, 9,579 output tokens, and an estimated CNY 0.117905. Both Drafts
+remained duration-blocked despite high model-review scores. The stored human
+blind rating weakly preferred Candidate A; reveal showed A used the Sample and
+B did not. Voice-match ratings were 3/5 versus 2/5, while both recordability
+ratings were 3/5.
+
+That preference is intentionally **not** reported as a win. Nine of ten spoken
+units were exactly identical and normalized character similarity was 0.9638,
+so the experiment conclusion is `inconclusive_low_distinctness`. Blind v2 now
+commits deterministic distinctness metrics and treats exact overlap >= 0.70 or
+character similarity >= 0.90 as directional-only human evidence. The Source
+and writing Sample are synthetic fixtures, so this validates the live
+mechanism but not the effectiveness of a user's private Sample.
+
+A post-closure realism check then replaced that undersized corpus with one
+fixed synthetic persona: three factual Sources, one full supplemental
+transcript, and four independent writing samples. The live checkpoint-to-Editor
+path completed five DeepSeek calls, and a frozen Sample/No-Sample A/B completed
+four more. The candidates became distinguishable (18.75% exact spoken-unit
+overlap rather than 90%); an independent synthetic blind audit directionally
+preferred the Sample arm for voice and recordability. This is useful test
+evidence, not human proof. Both arms still produced only about 6.4--6.7 minutes
+against a 15-minute target and remained hard-capped at 39, so Reviewer scores
+could not hide the length failure.
+
+M3 is complete and frozen; the next slice is M4.1 replayable SSE, followed by
+the M5.1 minimal Run Trace UI.
 
 See the
 [M3.6 learning chapter](docs/learning/m3-6-guided-revision-writing-style.zh-CN.md)
@@ -530,6 +568,12 @@ for the controlled-input proof. The earlier calibration details remain in the
 [M3.5 learning chapter](docs/learning/m3-5-chinese-quality-calibration.zh-CN.md)
 and the
 [Chinese podcast style research note](docs/research/chinese-podcast-style-signals.zh-CN.md).
+The bounded execution, local ledger, blind-rating contract, commands, and M3
+exit criteria are in the
+[M3.7b/c learning chapter](docs/learning/m3-7bc-controlled-writing-style-experiment.zh-CN.md).
+The larger synthetic corpus, failure audit, costs, commands, and evidence
+boundaries are in the
+[M3.7d realistic-persona experiment](docs/experiments/m3-7d-realistic-persona-e2e.zh-CN.md).
 
 ## License
 

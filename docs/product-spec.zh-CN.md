@@ -528,6 +528,30 @@ Reviewer 也必须看见 Sample，否则两边的 `personal_style_match` 不可�
 为主；模型评分只是辅助证据。单个 pair 只能形成方向性案例，不能代表普遍
 效果。
 
+M3.7b/c 将这条验证实现为一次本地、受限实验，而不是新的生产工作流。Editor
+与 Reviewer 的 arm 顺序默认随机化；最多四次调用且不自动 retry。实验目录
+独占创建，每次请求前后原子更新私有 manifest。进程崩溃后若最后一条调用仍为
+`started`，表示是否计费未知，必须先核对厂商 Dashboard，不能自动重跑。
+
+两稿随后随机映射为 Candidate A/B。公开候选只含经过转义的口播正文，不含
+treatment、Reviewer 分数或内部 Source ID。私有映射使用 salt 和 commitment
+与候选 hash 绑定；候选被修改、映射被修改或评分不匹配时均不能揭盲。用户必须
+先提交两稿的声音匹配、可录性和 forced choice，之后才能看到 treatment 与模型
+辅助结果。系统不自动选择 winner。
+
+系统还必须先判断两稿是否真的形成了可比较的 treatment difference。blind v2
+只比较 opening、section paragraphs 与 closing：如果对齐口播单元逐字重合率
+达到 70%，或规范化字符相似度达到 90%，结果标记为
+`inconclusive_low_distinctness`，真人二选一只能作为 `directional_only`
+反馈，不能被解释成写作样本有效。
+
+M3.7 实验产物不写回原 Run，不进入生产 `model_calls` 表，也不新增 API、数据库
+表或 workflow 版本。它们只保存在 `.gitignore` 覆盖的本地私有目录。完成一个
+首个真实单 pair 的揭盲结果为用户低置信度偏好有 Sample 的 A，但 10 个口播
+单元中 9 个逐字相同，字符相似度为 0.9638，因此结论是不确定而非 Sample
+获胜。这也完成了 M3 的实验退出条件。M3 停止扩展，转入可靠性 Trace 与最小
+Web UI。
+
 ## 7. 成功标准
 
 完成 MVP 时，应能演示：

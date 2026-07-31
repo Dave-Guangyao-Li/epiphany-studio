@@ -166,7 +166,12 @@ def _fixture_segments(
 
 
 def load_quality_contract_fixture(path: Path) -> dict[str, Any]:
-    fixture = load_fixture(path)
+    return validate_quality_contract_fixture(load_fixture(path))
+
+
+def validate_quality_contract_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
+    """Validate and enrich a synthetic quality-contract fixture payload."""
+
     try:
         creative_brief = CreativeBrief.model_validate(fixture.get("creative_brief")).model_dump(
             mode="json"
@@ -443,6 +448,7 @@ def _quality_report_contract_valid(
     report: object,
     *,
     expected_reviewer_relation: str,
+    expected_writing_style_context_status: str = "not_provided",
 ) -> bool:
     try:
         parsed = DraftQualityReport.model_validate(report)
@@ -452,9 +458,10 @@ def _quality_report_contract_valid(
         parsed.model_review_status == "completed"
         and parsed.reviewer_relation == expected_reviewer_relation
         and parsed.scoring_formula_version == STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION
-        and parsed.writing_style_context_status == "not_provided"
+        and parsed.writing_style_context_status == expected_writing_style_context_status
         and parsed.model_self_review is not None
-        and len(parsed.model_self_review.dimensions) == 6
+        and len(parsed.model_self_review.dimensions)
+        == (7 if expected_writing_style_context_status == "ready" else 6)
     )
 
 
@@ -595,6 +602,7 @@ async def execute_e2e(
     application_logger.addHandler(file_handler)
 
     imported_initial: list[dict[str, Any]]
+    imported_style: list[dict[str, Any]] = []
     waiting: dict[str, Any]
     waiting_events: list[dict[str, Any]]
     scaffold_before: str
@@ -633,6 +641,38 @@ async def execute_e2e(
                     )
                 ]
                 source_ids = [str(imported["source"]["id"]) for imported in imported_initial]
+                writing_samples = fixture.get("writing_samples", [])
+                imported_style = [
+                    await _import_source(
+                        client,
+                        writing_sample["source"],
+                        stage=f"import_writing_sample_{index}",
+                        request_id=f"req_m37_style_{index}",
+                    )
+                    for index, writing_sample in enumerate(
+                        writing_samples,
+                        start=1,
+                    )
+                ]
+                writing_style_reference = None
+                if imported_style:
+                    style_safety = fixture["style_reference"]
+                    writing_style_reference = {
+                        "samples": [
+                            {
+                                "source_id": str(imported["source"]["id"]),
+                                "sample_kind": writing_sample["sample_kind"],
+                            }
+                            for imported, writing_sample in zip(
+                                imported_style,
+                                writing_samples,
+                                strict=True,
+                            )
+                        ],
+                        "ownership_attested": style_safety["ownership_attested"],
+                        "model_processing_consent": style_safety["model_processing_consent"],
+                        "usage": style_safety["usage"],
+                    }
                 created = await _request_json(
                     client,
                     "POST",
@@ -647,6 +687,11 @@ async def execute_e2e(
                             "source_ids": source_ids,
                             "creative_brief": fixture["creative_brief"],
                             "draft_quality": {"enabled": quality_review},
+                            **(
+                                {"writing_style_reference": writing_style_reference}
+                                if writing_style_reference is not None
+                                else {}
+                            ),
                         },
                     },
                 )
@@ -1014,7 +1059,7 @@ async def execute_e2e(
         )
 
     expected = dict(fixture["expected"])
-    if quality_review:
+    if quality_review and not imported_style:
         expected.update(
             {
                 "workflow_version": QUALITY_REVIEW_WORKFLOW_VERSION,
@@ -1062,6 +1107,32 @@ async def execute_e2e(
 
     checks = {
         "initial_sources_imported": len(imported_initial) == len(fixture["initial_sources"]),
+        "writing_samples_imported": (
+            len(imported_style) == len(fixture.get("writing_samples", []))
+        ),
+        "writing_style_reference_persisted": (
+            (
+                waiting.get("input_json", {}).get("writing_style_reference", {}).get("samples")
+                == writing_style_reference["samples"]
+                and waiting.get("input_json", {})
+                .get("writing_style_reference", {})
+                .get("ownership_attested")
+                is True
+                and waiting.get("input_json", {})
+                .get("writing_style_reference", {})
+                .get("model_processing_consent")
+                is True
+                and waiting.get("input_json", {}).get("writing_style_reference", {}).get("usage")
+                == "style_only"
+                and waiting.get("input_json", {})
+                .get("writing_style_profile", {})
+                .get("readiness", {})
+                .get("status")
+                == "ready"
+            )
+            if imported_style
+            else waiting.get("input_json", {}).get("writing_style_reference") is None
+        ),
         "creative_brief_persisted": (
             waiting.get("input_json", {}).get("creative_brief") == fixture["creative_brief"]
         ),
@@ -1194,9 +1265,11 @@ async def execute_e2e(
                     and editor_checkpoint_run.get("current_step") == "review_podcast_draft"
                     and len(reviewer_tasks) == 1
                     and reviewer_tasks[0].get("status") == "queued"
-                    and len(editor_checkpoint_run.get("tasks", [])) == 6
-                    and len(editor_checkpoint_run.get("artifacts", [])) == 9
-                    and len(editor_checkpoint_run.get("model_calls", [])) == 4
+                    and len(editor_checkpoint_run.get("tasks", [])) == expected["final_task_count"]
+                    and len(editor_checkpoint_run.get("artifacts", []))
+                    == expected["final_artifact_count"] - 2
+                    and len(editor_checkpoint_run.get("model_calls", []))
+                    == expected["final_model_call_count"] - 1
                 ),
                 "reviewer_queue_survived_second_restart": (
                     editor_checkpoint_summary is not None
@@ -1209,6 +1282,9 @@ async def execute_e2e(
                 "quality_report_contract_valid": _quality_report_contract_valid(
                     report,
                     expected_reviewer_relation=expected_reviewer_relation,
+                    expected_writing_style_context_status=(
+                        "ready" if imported_style else "not_provided"
+                    ),
                 ),
                 "quality_markdown_readable_and_private": (
                     quality_report_markdown.startswith("# 口播稿质量报告")
@@ -1228,9 +1304,12 @@ async def execute_e2e(
                 ),
                 "feedback_adds_only_one_artifact": (
                     final_run_after_feedback is not None
-                    and len(final_run_after_feedback.get("artifacts", [])) == 12
-                    and len(final_run_after_feedback.get("tasks", [])) == 6
-                    and len(final_run_after_feedback.get("model_calls", [])) == 5
+                    and len(final_run_after_feedback.get("artifacts", []))
+                    == expected["final_artifact_count"] + 1
+                    and len(final_run_after_feedback.get("tasks", []))
+                    == expected["final_task_count"]
+                    and len(final_run_after_feedback.get("model_calls", []))
+                    == expected["final_model_call_count"]
                     and final_run_after_feedback.get("output_artifact_id") == final_output
                 ),
                 "quality_events_emitted_once": (
@@ -1275,6 +1354,7 @@ async def execute_e2e(
             "path": str(paths.fixture),
             "synthetic": True,
             "initial_source_count": len(fixture["initial_sources"]),
+            "writing_sample_source_count": len(fixture.get("writing_samples", [])),
             "supplemental_source_count": 1,
         },
         "creative_brief": fixture["creative_brief"],
