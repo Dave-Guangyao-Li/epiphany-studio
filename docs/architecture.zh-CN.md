@@ -85,8 +85,10 @@ create_run
 
 optional explicit revision
   -> build deterministic Improvement Plan
+  -> inventory factual refs wholly absent from spoken units
   -> user selects actions and submits an idempotent request
   -> create podcast-revision child Run with parent_run_id
+  -> when reusing material, attach exact spoken-length Recovery Plan
   -> revise_podcast_draft (serial root Revision Editor)
   -> metrics + Reviewer + code-owned quality report
   -> lazily persist parent/revision comparison
@@ -95,7 +97,8 @@ optional explicit revision
 
 其中 `prepare_sources`、`fan_in` 和状态更新是普通代码；
 `timeline_research`、`theme_research`、`build_interview_scaffold`、
-`build_podcast_draft` 和 `review_podcast_draft` 才调用模型。
+`build_podcast_draft`、`revise_podcast_draft` 和
+`review_podcast_draft` 才调用模型。
 `assess_material_readiness`、写作风格 profile、Improvement Plan 和新旧稿
 comparison 都不调用模型。
 
@@ -161,9 +164,13 @@ blocker 时 decision 仍为 `blocked`，否则为
 
 M3.5 为新质量 Run 使用 workflow v7，不增加 Task、Artifact 类型或
 migration。版本升级冻结了持久化语义：v6 继续使用 M3.4 的 Reviewer Task
-v1、Prompt v1、`draft_quality_rules_v1` 和报告公式 v1；v7 使用带可信
+v1、Prompt v1、`draft_quality_rules_v1` 和报告公式 v1；M3.5 最初使用带可信
 确定性事实的 Task/Prompt v2、`draft_quality_rules_v2_chinese_calibration`
-和非补偿报告公式 v2。变化发生在质量边界内部：
+和非补偿报告公式 v2。M3.8 新生成的质量 Artifact 使用
+`draft_quality_rules_v3_editorial_instruction`、
+`zh_podcast_style_v2_enumeration_precision` 和
+`deterministic_quality_facts_v2_editorial_instruction`；旧 v1/v2 Artifact
+继续按各自版本恢复。变化发生在质量边界内部：
 
 恢复时以持久 Reviewer Task 的合同为准，而不是只看 Run 的版本标签。这样既
 能恢复纯 M3.4 v6，也能正确恢复 M3.5 预发布期间曾写出的
@@ -183,9 +190,11 @@ v1、Prompt v1、`draft_quality_rules_v1` 和报告公式 v1；v7 使用带可�
    warning 上限 79；多个条件取最严格者。
 5. `DraftQualityReport` 在写入和读回时重新推导模型分、未封顶分、cap、
    cap reasons、最终分和 decision，拒绝类型合法但彼此矛盾的 JSON。
-6. 中文启发式以 `zh_podcast_style_v1` 版本化。它只观察可复现的表达模式，
-   不是 AI 作者检测器。历史 `template_phrases` / `not_but_pattern` 与新分类
-   重叠时只保留 `info` 展示，避免重复扣分。
+6. 中文启发式按版本恢复：历史 `zh_podcast_style_v1` 保持原枚举语义，当前
+   `zh_podcast_style_v2_enumeration_precision` 要求列举标记后有标点，并新增
+   编辑指令泄漏检查。它们只观察可复现的表达模式，不是 AI 作者检测器。历史
+   `template_phrases` / `not_but_pattern` 与新分类重叠时只保留 `info` 展示，
+   避免重复扣分。
 
 配置可让 Reviewer 独立路由到另一个受支持的 DeepSeek tier。Worker 仅对
 可信 Task kind `review_podcast_draft` 选择 reviewer provider；其他 Task
@@ -282,6 +291,31 @@ M3.6 的 Revision Editor 同样是一个串行根 Task。它只读取父 Draft�
 返回完整的新候选而不是原地 patch，并且不能把父 Draft 当作新增事实来源。
 随后创建的 Reviewer Task 与 Revision Editor 属于同一个子 Run，因而预算、
 重试、取消、恢复和 trace 都不会借用父 Run。
+
+M3.8 没有增加新的 Agent、状态机循环、API 或数据库表。它收紧了
+`reuse_unused_material` 进入 Revision Editor 前的确定性输入：
+
+- 口播字符只来自 opening、Section Paragraph 和 closing；
+- “已使用引用”也只来自这些口播单元，Section 元数据和 Show Notes 不计入；
+- 完全未被口播引用的事实 Segment 保留为可审计 inventory；
+- 去除完全重复和已经复制进口播的文本后，普通代码最多选 12 个候选；
+- 候选按缺失 must-include、Scaffold gap、补充素材、数字/标点/长度等信号排序；
+- 普通代码根据 Creative Brief 生成当前、85% 最低、目标、115% 最高和缺口；
+- Revision 后沿用同一套 metrics、Reviewer、非补偿 cap 与 comparison。
+
+该盘点是 ref-level，不是 claim-level。只要一个 Segment 在任一口播单元被引用，
+系统就把整段视为 used，无法识别“已引用但展开不足”。未使用 Segment 的非空白
+字符总量也只表示候选输入容量，不代表相关性、信息密度或可写成的正文长度。
+因此 `existing_material_sufficient` 只允许用户尝试一次有界 Revision，不是
+成功承诺。Improvement Plan v2 还会持久化
+`prior_length_recovery_attempted`：一次恢复后仍短时，即使 inventory 里还有
+片段，也不再推荐连续复用，而是转向补充具体材料或降低目标时长。系统不会自动
+让 Reviewer 驱动 Editor 循环重写。
+
+当前 Source Segment 没有结构化 `material_kind`，无法可靠区分事实、反思、
+编辑指令和隐私边界。系统不会用脆弱的中文关键词过滤 Source；它会在成稿侧用
+`style.editorial_instruction_leakage` 报告明显的元编辑语句。普通“最后一个”
+不再被误判为列举，只有“最后，”等带列举标记的表达才计入该启发式。
 
 ## 6. 持久化模型
 
@@ -598,6 +632,15 @@ M3.6 的三个新 endpoint 都保持“读取不偷偷执行”的边界：
 - `POST revisions` 才是唯一创建子 Run 和模型工作的动作；
 - comparison 只在子 Run 成功后按需持久化摘要，不自动选择或再触发修订。
 
+M3.8 复用同一组 endpoint。读取 Improvement Plan 时可以计算未进入 spoken
+units 的事实引用和候选字符总量，但不会创建 Task 或产生模型费用。只有显式
+Revision 请求选择 `reuse_unused_material` 时，服务层才把匹配该父稿的
+Recovery Plan 写进子 Run Task input；Schema 会重新验证目标时长、父稿实际
+字符、引用范围和候选字符总量，防止旧 Plan、越权 Source 或客户端篡改数字。
+子 Run 的 Improvement Plan 会记录已经发生过一次时长恢复；如果仍未达标，
+`reuse_unused_material` 仍可供人工查看但不再推荐，默认下一步是补材料或降低
+时长。读取这个 Plan 不会排队第二个 Revision。
+
 写作样本不是事实 Source 通道。即便被选片段为了可恢复执行而持久化在受限
 Editor/Reviewer Task input 中，也不能进入 `allowed_source_refs`、最终引用
 或 Plan 的未使用事实列表。
@@ -712,6 +755,12 @@ M3.6 新增
 Run/Task/Artifact ID、动作数量和 comparison 元数据，不记录写作样本、
 feedback comment、修订指令或 Draft 正文。幂等 replay 只写脱敏操作日志，
 不会重复创建持久 Artifact、Event 或子 Run。
+
+M3.8 不新增事件名。`workflow.draft_revision.requested` 复用现有 Event，并在
+有 Recovery Plan 时增加 `length_recovery_readiness`、
+`length_recovery_missing_to_minimum` 和
+`length_recovery_priority_source_count` 等状态与计数字段；不记录 Source
+正文、Prompt 或 Draft 正文。
 
 ## 13. 升级触发条件
 

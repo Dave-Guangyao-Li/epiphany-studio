@@ -56,7 +56,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 20. [M3.7a：写作样本 A/B 的冻结输入与零费用预检](m3-7a-writing-style-ab-preflight.zh-CN.md)
 21. [M3.7b/c：受控写作样本 A/B 与匿名盲评](m3-7bc-controlled-writing-style-experiment.zh-CN.md)
 22. [M3.7d：真实量级合成人设、写作样本 A/B 与匿名合成评审](../experiments/m3-7d-realistic-persona-e2e.zh-CN.md)
-23. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+23. [M3.8：基于现有证据恢复口播时长](m3-8-grounded-length-recovery.zh-CN.md)
+24. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -84,6 +85,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M3.7a | 冻结同一份 v8 Editor 输入，证明 Sample A/B 只改变写作风格上下文 | 308 tests + Fake v8 手动预检通过；零模型调用 | 本次 focused commit |
 | M3.7b/c | 有界生成两稿、同条件 Reviewer、匿名真人盲评与揭盲 | 310 tests + DeepSeek 4/4 调用 + 真人揭盲通过；因区分度不足结论为 inconclusive，M3 已冻结 | 本次 focused commit |
 | M3.7d | 用完整虚构人设复跑持久化主流程和 Sample A/B | 315 tests + DeepSeek 主流程 5 次调用 + A/B 4/4；候选可区分并有方向性合成证据，M3 仍冻结 | `3fdf8c1`—`3b01f9b` |
+| M3.8 | 初稿偏短时先复用口播正文完全未引用的事实；一次后转补材料或降时长 | Fake v8 workflow pass/content fail；DeepSeek 1,310→2,371，7 calls，¥0.201153 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -118,6 +120,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
   -> 用户单独提交声音匹配与可录性反馈
   -> 确定性生成 Improvement Plan，不调用模型、不偷偷创建 Run
   -> 用户明确选择动作后创建带 parent_run_id 的 Revision 子 Run
+  -> 偏短时把 spoken-only 缺口和完全未引用事实传给一次显式 Revision
   -> 子 Run 用独立预算生成新候选并重新走质量检查
   -> 按需保存新旧摘要与 delta；不自动选 winner
   -> 可从一个已完成 v8 Run 冻结 Editor 输入
@@ -189,7 +192,10 @@ M3.5 把新的质量流程升级为 workflow v7，因为持久化 Reviewer Task�
 平均、未封顶 60/40 分、代码上限和封顶分；blocker、低于 60% 的时长覆盖、
 任一 warning 分别设置 39 / 59 / 79 的最高分，严格者优先。
 
-中文规则 `zh_podcast_style_v1` 只报告可观察的风格风险，不判断作者身份。
+M3.5 引入的中文规则 `zh_podcast_style_v1` 只报告可观察的风格风险，不判断
+作者身份。M3.8 将当前新产物升级到
+`zh_podcast_style_v2_enumeration_precision` 和
+`draft_quality_rules_v3_editorial_instruction`，同时继续兼容读取旧版本。
 `must_include` 的逐字未命中是 `info`，语义覆盖交给 Reviewer；旧模板与
 `not_but` 指标保留显示但不重复扣分。Reviewer 可以单独选择 Flash 或 Pro，
 同一家族不同档位只记为 `cross_tier_same_family`，不能包装成独立裁判。
@@ -250,6 +256,20 @@ M3.7d 没有继续扩张生产功能，而是用一个更接近真实用户规�
 却只写出约 6.4—6.7 分钟，因此下一步应先用现有未充分利用的素材创建 Revision，
 而不是机械要求用户继续补充。完整复现命令、费用和失败分析见
 [M3.7d 实验报告](../experiments/m3-7d-realistic-persona-e2e.zh-CN.md)。
+
+M3.8 将这个发现收敛成一个有边界的产品修正。Improvement Plan 只把从未出现在
+opening、正文 Paragraph 或 closing 引用中的事实 Segment 记为 `unused`；
+Show Notes 和 Section 元数据不能假装正文已经使用素材。显式
+`reuse_unused_material` Revision 会收到当前、85% 最低、目标、115% 最高和
+优先事实引用，完成后重新经过 metrics 与 Reviewer。系统不自动循环扩写。
+
+当前它不能识别“某 Segment 已被引用，但稿子只展开了其中一小部分”；候选未使用
+字符数也只说明数量上可能够用，不保证相关性、信息密度或最终质量。最终 Fake
+v8 从 456 增至 2,083，使用 12/12 个候选仍未越过 3,570 下限，并识别出进入
+口播的编辑指令；它将下一步改为补材料。真实 DeepSeek v2 从 1,310 增至 2,371，
+七次调用估算 ¥0.201153，工作流通过但 15 分钟内容验收未通过。当前规则还修正了
+普通“最后”的列举误报，并只比较非时长 warning。详细原理和测试方法见
+[M3.8 学习章节](m3-8-grounded-length-recovery.zh-CN.md)。
 
 用户反馈与自动报告分开保存。自动 E2E 使用的 `synthetic_test` 永远是
 `human_signal_eligible=false`。当前无鉴权 MVP 的 origin 是调用方自报标签，
@@ -312,6 +332,10 @@ Run 使用 16,667 input tokens、9,468 output tokens、73,018 ms Provider
   真实量级合成人设已产生可区分候选和方向性正信号，但合成评审仍不能代表
   真实用户私有 Sample 的“像不像我、愿不愿意录”；
 - comparison 只给出差异证据，不会替用户选择最终稿；
+- M3.8 只能识别口播正文完全未引用的 Segment，尚不能识别已引用但展开不足；
+  真实 DeepSeek 时长恢复已完成但仍短，真人可录性验收尚未完成；
+- Source Segment 还没有结构化 `material_kind`，当前只能在成稿侧检测明显的
+  editorial instruction 泄漏；
 - 尚未提供可视化采访脚手架和播客稿 editor；
 - M3.2 的 Editor 已通过合成素材真实调用，但尚未使用个人隐私素材验收；
 - 尚未提供麦克风录音、音频上传、STT 或语音克隆；
