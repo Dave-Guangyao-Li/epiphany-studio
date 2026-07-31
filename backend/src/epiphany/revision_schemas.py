@@ -99,7 +99,9 @@ def _spoken_script_character_count(draft: PodcastDraftOutput) -> int:
     return sum(_non_whitespace_character_count(text) for text in texts)
 
 
-def _duration_character_bounds(target_character_count: int) -> tuple[int, int]:
+def duration_character_bounds(target_character_count: int) -> tuple[int, int]:
+    """Return the code-owned spoken-character acceptance interval."""
+
     tolerance = Decimal(str(DURATION_TOLERANCE_RATIO))
     target = Decimal(target_character_count)
     return (
@@ -279,7 +281,7 @@ class DraftImprovementPlan(BaseModel):
             raise ValueError("targeted questions must be unique")
         if ("apply_selected_feedback" in option_kinds) != bool(self.selected_feedback_codes):
             raise ValueError("apply_selected_feedback must match selected_feedback_codes")
-        minimum_characters, _maximum_characters = _duration_character_bounds(
+        minimum_characters, _maximum_characters = duration_character_bounds(
             self.duration.target_script_character_count
         )
         below_minimum = self.duration.actual_script_character_count < minimum_characters
@@ -288,10 +290,16 @@ class DraftImprovementPlan(BaseModel):
                 raise ValueError(
                     "not_needed requires the spoken script to reach the duration lower bound"
                 )
-        elif not below_minimum:
-            raise ValueError(
-                "a duration resolution requires the spoken script to be below the lower bound"
-            )
+        elif (
+            not below_minimum
+            and self.duration.actual_script_character_count
+            >= self.duration.target_script_character_count
+        ):
+            raise ValueError("a duration resolution requires a spoken-script shortfall")
+        # Compatibility: pre-M3.8 v1 plans used the center target, not the 85%
+        # lower bound, when deciding whether a duration resolution was needed.
+        # Such persisted plans remain readable, while the current builder below
+        # always emits ``not_needed`` once the lower bound has been reached.
         return self
 
 
@@ -445,7 +453,7 @@ class DraftLengthRecoveryPlan(BaseModel):
 
     @model_validator(mode="after")
     def counts_and_readiness_must_be_consistent(self) -> DraftLengthRecoveryPlan:
-        expected_minimum, expected_maximum = _duration_character_bounds(
+        expected_minimum, expected_maximum = duration_character_bounds(
             self.target_script_character_count
         )
         if self.minimum_script_character_count != expected_minimum:
@@ -488,7 +496,7 @@ def build_draft_length_recovery_plan(
     rate = improvement_plan.duration.speaking_rate_chars_per_minute
     actual = improvement_plan.duration.actual_script_character_count
     target = target_duration_minutes * rate
-    minimum, maximum = _duration_character_bounds(target)
+    minimum, maximum = duration_character_bounds(target)
     missing_to_minimum = max(0, minimum - actual)
     available = improvement_plan.material.unused_factual_character_count
     if not missing_to_minimum:
@@ -570,8 +578,12 @@ class PodcastRevisionTaskInput(PodcastDraftTaskInput):
             raise ValueError("selected feedback artifacts must be unique")
         if len({gap.code for gap in self.selected_quality_gaps}) != len(self.selected_quality_gaps):
             raise ValueError("selected quality gaps must be unique")
-        if ("reuse_unused_material" in actions) != (self.length_recovery_plan is not None):
-            raise ValueError("reuse_unused_material must match a length_recovery_plan")
+        if self.length_recovery_plan is not None and "reuse_unused_material" not in actions:
+            raise ValueError("a length_recovery_plan requires reuse_unused_material")
+        # Compatibility: already-persisted v8 Revision Tasks created before
+        # M3.8 may select reuse_unused_material without the new deterministic
+        # length_recovery_plan. Internal creation now always adds the plan, but
+        # the parser keeps those queued Tasks resumable.
 
         if self.length_recovery_plan is not None:
             recovery = self.length_recovery_plan

@@ -69,6 +69,7 @@ from epiphany.revision_schemas import (
     build_draft_length_recovery_plan,
     build_draft_revision_candidate_summary,
     build_draft_revision_comparison,
+    duration_character_bounds,
 )
 from epiphany.runtime.orchestrator import (
     EDITOR_RESEARCH_WORKFLOW_VERSION,
@@ -702,6 +703,9 @@ class RunService:
                     )
                     session.add(artifact)
                     await session.flush()
+                    minimum_characters, _maximum_characters = duration_character_bounds(
+                        plan.duration.target_script_character_count
+                    )
                     await append_event(
                         session,
                         run_id=run.id,
@@ -714,6 +718,10 @@ class RunService:
                             "duration_resolution": plan.duration_resolution,
                             "missing_script_character_count": (
                                 plan.duration.missing_script_character_count
+                            ),
+                            "missing_to_minimum_character_count": max(
+                                0,
+                                minimum_characters - plan.duration.actual_script_character_count,
                             ),
                             "unused_factual_segment_count": (
                                 plan.material.unused_factual_segment_count
@@ -732,6 +740,9 @@ class RunService:
                     ) from error
                 artifact_view = ArtifactView.model_validate(artifact)
 
+        minimum_characters, _maximum_characters = duration_character_bounds(
+            plan.duration.target_script_character_count
+        )
         logger.info(
             "Draft improvement plan ready",
             extra={
@@ -740,6 +751,10 @@ class RunService:
                 "artifact_id": artifact_view.id,
                 "duration_resolution": plan.duration_resolution,
                 "missing_script_character_count": (plan.duration.missing_script_character_count),
+                "missing_to_minimum_character_count": max(
+                    0,
+                    minimum_characters - plan.duration.actual_script_character_count,
+                ),
                 "unused_factual_segment_count": (plan.material.unused_factual_segment_count),
             },
         )
@@ -843,12 +858,23 @@ class RunService:
                         raise DraftRevisionNotAllowed(
                             f"selected improvement gap is unavailable: {missing_gap_codes[0]}"
                         )
-                    if (
-                        "reuse_unused_material" in request.selected_actions
-                        and plan_record.plan.material.unused_factual_segment_count == 0
+                    reuse_requested = "reuse_unused_material" in request.selected_actions
+                    reuse_option_available = any(
+                        option.kind == "reuse_unused_material"
+                        for option in plan_record.plan.options
+                    )
+                    minimum_characters, _maximum_characters = duration_character_bounds(
+                        plan_record.plan.duration.target_script_character_count
+                    )
+                    parent_is_below_duration_minimum = (
+                        plan_record.plan.duration.actual_script_character_count < minimum_characters
+                    )
+                    if reuse_requested and (
+                        not reuse_option_available or not parent_is_below_duration_minimum
                     ):
                         raise DraftRevisionNotAllowed(
-                            "improvement plan has no unused factual material to reuse"
+                            "improvement plan does not offer unused factual material "
+                            "for length recovery"
                         )
 
                     feedback_artifacts = (

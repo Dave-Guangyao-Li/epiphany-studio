@@ -693,9 +693,13 @@ class FakeProvider:
                 for segment in factual_segments
             }
             existing_texts = {
-                _clean_text(str(paragraph["text"]))
-                for section in revised["podcast_script"]["sections"]
-                for paragraph in section["paragraphs"]
+                _clean_text(str(revised["podcast_script"]["opening"]["text"])),
+                _clean_text(str(revised["podcast_script"]["closing"]["text"])),
+                *(
+                    _clean_text(str(paragraph["text"]))
+                    for section in revised["podcast_script"]["sections"]
+                    for paragraph in section["paragraphs"]
+                ),
             }
             current_characters = _spoken_script_character_count(revised)
             minimum_characters = parsed.length_recovery_plan.minimum_script_character_count

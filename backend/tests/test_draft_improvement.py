@@ -310,6 +310,39 @@ def test_duration_inside_tolerance_does_not_require_center_target_recovery() -> 
     }
 
 
+def test_pre_m38_v1_plan_inside_tolerance_remains_readable() -> None:
+    target_characters = 2_800
+    desired_characters = 2_500
+    base = _draft()
+    draft = _draft(
+        extra_text="甲" * (desired_characters - _script_character_count(base)),
+    )
+    current = _build(
+        target_minutes=10,
+        unused_text="旧版本会把距离中心目标仍有缺口视为需要继续复用素材。" * 30,
+        draft=draft,
+    )
+    legacy = current.model_dump(mode="json")
+    legacy["duration_resolution"] = "reuse_unused_material"
+    legacy["options"].insert(
+        0,
+        {
+            "kind": "reuse_unused_material",
+            "recommended": True,
+            "explanation": "这是升级前已经持久化的 v1 计划。",
+            "source_refs": legacy["material"]["unused_source_refs"],
+            "suggested_target_duration_minutes": None,
+        },
+    )
+
+    parsed = DraftImprovementPlan.model_validate(legacy)
+
+    assert parsed.schema_version == "draft_improvement_plan_v1"
+    assert parsed.duration.actual_script_character_count == desired_characters
+    assert parsed.duration.actual_script_character_count < target_characters
+    assert parsed.duration_resolution == "reuse_unused_material"
+
+
 def test_unused_material_that_reaches_minimum_is_sufficient_for_recovery() -> None:
     target_characters = 2_800
     minimum_characters = 2_380

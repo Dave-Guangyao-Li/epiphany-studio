@@ -20,7 +20,7 @@ from epiphany.editor_schemas import (
     PodcastDraftOutput,
     editor_output_reference_keys,
 )
-from epiphany.models import Run, Task
+from epiphany.models import ModelCall, Run, Task
 from epiphany.revision_schemas import (
     REVISE_PODCAST_DRAFT,
     CreateDraftRevisionRequest,
@@ -30,6 +30,7 @@ from epiphany.runtime.orchestrator import GUIDED_REVISION_WORKFLOW_VERSION
 from epiphany.runtime.worker import Worker
 from epiphany.services import (
     DraftRevisionConflict,
+    DraftRevisionNotAllowed,
     RunService,
 )
 from epiphany.source_service import SourceService
@@ -300,17 +301,14 @@ async def test_reuse_unused_material_revision_receives_exact_length_recovery_pla
 
     without_recovery = deepcopy(revision_task.input_json)
     without_recovery.pop("length_recovery_plan")
-    with pytest.raises(
-        ValidationError,
-        match="reuse_unused_material must match a length_recovery_plan",
-    ):
-        PodcastRevisionTaskInput.model_validate(without_recovery)
+    legacy_task = PodcastRevisionTaskInput.model_validate(without_recovery)
+    assert legacy_task.length_recovery_plan is None
 
     recovery_without_action = deepcopy(revision_task.input_json)
     recovery_without_action["selected_actions"] = ["add_supplemental_material"]
     with pytest.raises(
         ValidationError,
-        match="reuse_unused_material must match a length_recovery_plan",
+        match="a length_recovery_plan requires reuse_unused_material",
     ):
         PodcastRevisionTaskInput.model_validate(recovery_without_action)
 
@@ -397,6 +395,69 @@ async def test_reuse_unused_material_revision_expands_spoken_script_with_new_evi
         count - 1 for count in Counter(child_spoken_texts).values() if count > 1
     )
     assert child_exact_repeat_count <= parent_exact_repeat_count
+
+
+async def test_reuse_unused_material_is_rejected_when_plan_does_not_offer_it(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    (
+        parent_run_id,
+        _style_source_id,
+        _supplemental_source_id,
+    ) = await _create_completed_parent_with_style(
+        database,
+        service,
+        worker,
+        supplemental_paragraph_count=15,
+    )
+    parent_plan = (await service.get_draft_improvement_plan(parent_run_id)).plan
+    assert parent_plan.duration_resolution == "reuse_unused_material"
+
+    recovered = await service.create_draft_revision(
+        parent_run_id,
+        request=CreateDraftRevisionRequest(
+            submission_id="m3.8-create-recovered-parent",
+            selected_actions=["reuse_unused_material"],
+            revision_instruction="只展开已有的具体事实，不重复、不虚构。",
+        ),
+    )
+    worker.max_model_calls_per_run = 2
+    assert await worker.run_until_idle() == 2
+    recovered_run = await service.get_run(recovered.run.id)
+    assert recovered_run.status == "succeeded"
+
+    recovered_plan = (await service.get_draft_improvement_plan(recovered_run.id)).plan
+    assert recovered_plan.duration_resolution == "not_needed"
+    assert "reuse_unused_material" not in {option.kind for option in recovered_plan.options}
+
+    async with database.sessions() as session:
+        before_counts = {
+            "runs": len((await session.execute(select(Run.id))).scalars().all()),
+            "tasks": len((await session.execute(select(Task.id))).scalars().all()),
+            "model_calls": len((await session.execute(select(ModelCall.id))).scalars().all()),
+        }
+
+    with pytest.raises(
+        DraftRevisionNotAllowed,
+        match="improvement plan does not offer unused factual material",
+    ):
+        await service.create_draft_revision(
+            recovered_run.id,
+            request=CreateDraftRevisionRequest(
+                submission_id="m3.8-reject-unavailable-reuse",
+                selected_actions=["reuse_unused_material"],
+                revision_instruction="继续展开现有素材。",
+            ),
+        )
+
+    async with database.sessions() as session:
+        after_counts = {
+            "runs": len((await session.execute(select(Run.id))).scalars().all()),
+            "tasks": len((await session.execute(select(Task.id))).scalars().all()),
+            "model_calls": len((await session.execute(select(ModelCall.id))).scalars().all()),
+        }
+    assert after_counts == before_counts
 
 
 async def test_guided_revision_is_explicit_idempotent_scored_and_style_only(
