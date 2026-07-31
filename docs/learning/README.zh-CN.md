@@ -57,7 +57,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 21. [M3.7b/c：受控写作样本 A/B 与匿名盲评](m3-7bc-controlled-writing-style-experiment.zh-CN.md)
 22. [M3.7d：真实量级合成人设、写作样本 A/B 与匿名合成评审](../experiments/m3-7d-realistic-persona-e2e.zh-CN.md)
 23. [M3.8：基于现有证据恢复口播时长](m3-8-grounded-length-recovery.zh-CN.md)
-24. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+24. [M3.9：根据最新稿定向追问，再用回答继续修订](m3-9-draft-aware-supplemental-interview.zh-CN.md)
+25. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -86,6 +87,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M3.7b/c | 有界生成两稿、同条件 Reviewer、匿名真人盲评与揭盲 | 310 tests + DeepSeek 4/4 调用 + 真人揭盲通过；因区分度不足结论为 inconclusive，M3 已冻结 | 本次 focused commit |
 | M3.7d | 用完整虚构人设复跑持久化主流程和 Sample A/B | 315 tests + DeepSeek 主流程 5 次调用 + A/B 4/4；候选可区分并有方向性合成证据，M3 仍冻结 | `3fdf8c1`—`3b01f9b` |
 | M3.8 | 初稿偏短时先复用口播正文完全未引用的事实；一次后转补材料或降时长 | Fake v8 workflow pass/content fail；DeepSeek 1,310→2,371，7 calls，¥0.201153 | 本次 focused commit |
+| M3.9 | 既有素材修订后仍短时，围绕最新稿原句生成具体追问；回答作为新 Source 再显式修订，最多两轮 | 354 tests + Fake v9 完整闭环 2,509→3,073→3,637；失败回退、轮次和 provenance 已验证 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -122,6 +124,9 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
   -> 用户明确选择动作后创建带 parent_run_id 的 Revision 子 Run
   -> 偏短时把 spoken-only 缺口和完全未引用事实传给一次显式 Revision
   -> 子 Run 用独立预算生成新候选并重新走质量检查
+  -> 若仍短，围绕最新稿的具体原句生成 3—6 个补充采访问题
+  -> 用户回答问题并导入新 Source，再显式创建下一版 Revision
+  -> 最多两轮；达到 85% 时长下限后停止追问
   -> 按需保存新旧摘要与 delta；不自动选 winner
   -> 可从一个已完成 v8 Run 冻结 Editor 输入
   -> 派生“无 Sample / 有 Sample”两个实验输入，并用 hash 证明只有风格上下文不同
@@ -271,6 +276,20 @@ v8 从 456 增至 2,083，使用 12/12 个候选仍未越过 3,570 下限，并�
 普通“最后”的列举误报，并只比较非时长 warning。详细原理和测试方法见
 [M3.8 学习章节](m3-8-grounded-length-recovery.zh-CN.md)。
 
+M3.9 把 M3.8 的“补充具体素材”变成一条可执行但仍由用户控制的闭环。只有
+workflow v9 的 Revision 子 Run 在重新审稿后仍低于 85% 时长下限时，才会排队
+一个 Supplemental Interviewer。可信代码先从最新 Draft 的 opening、正文
+paragraph 与 closing 建立 Anchor；模型返回的问题必须逐字引用这些 Anchor，
+再由代码注入稳定 question ID。用户回答后，答案以新 Source 保存，并通过
+versioned Revision Request 记录 Plan、question 和 Source 的对应关系。
+
+系统最多规划两轮，不会自动代答或偷偷创建下一版稿子。Fake E2E 从 2,509 字开始，
+第一轮回答后达到 3,073 字，第二轮达到 3,637 字并越过 15 分钟目标的 85% 下限；
+非法 question ID、绕过已存在 Plan、重复 GET 产生模型调用和第三轮 Planner 都被
+回归测试拦截。Provider 失败时，已有 Draft 仍成功保存，并生成绑定最新原句的
+确定性 fallback Plan。完整原理、API 与本地验证见
+[M3.9 学习章节](m3-9-draft-aware-supplemental-interview.zh-CN.md)。
+
 用户反馈与自动报告分开保存。自动 E2E 使用的 `synthetic_test` 永远是
 `human_signal_eligible=false`。当前无鉴权 MVP 的 origin 是调用方自报标签，
 不是已验证真人身份。详细原理、Swagger 和测试命令见
@@ -334,6 +353,8 @@ Run 使用 16,667 input tokens、9,468 output tokens、73,018 ms Provider
 - comparison 只给出差异证据，不会替用户选择最终稿；
 - M3.8 只能识别口播正文完全未引用的 Segment，尚不能识别已引用但展开不足；
   真实 DeepSeek 时长恢复已完成但仍短，真人可录性验收尚未完成；
+- M3.9 能围绕最新稿原句追问并最多循环两轮，但问题质量尚未经过真实 DeepSeek
+  和真人回答验收；当前回答仍需先转成文字再导入 Source；
 - Source Segment 还没有结构化 `material_kind`，当前只能在成稿侧检测明显的
   editorial instruction 泄漏；
 - 尚未提供可视化采访脚手架和播客稿 editor；

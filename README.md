@@ -61,7 +61,10 @@ The first vertical slice will:
     absent from the spoken script and offer one explicit, source-grounded
     length-recovery Revision before asking for more material or lowering the
     target.
-12. Expose a replayable run/task event trace.
+12. If that Revision is still short, ask draft-anchored supplemental questions,
+    accept the user's answers as new Sources, and allow at most two explicit
+    answer-driven Revision rounds.
+13. Expose a replayable run/task event trace.
 
 Every extracted claim must point back to a source segment. Generated memories
 remain candidates until the user confirms them.
@@ -600,7 +603,31 @@ material or a lower duration, not another automatic reuse pass. No new paid
 call was made for these deterministic corrections. This validates the
 mechanism under a live Provider, not human recordability.
 
-After this corrective slice, the next product stage remains M4.1 replayable
+M3.9 makes that supplemental-material recommendation executable without
+creating an unbounded agent loop. A workflow-v9 Revision that remains below
+the 85% duration floor can queue one Supplemental Interviewer. Application
+code first extracts trusted anchors only from the latest spoken opening,
+paragraphs, and closing. Every generated question must bind one anchor and
+copy an exact quote from that latest Draft; code then assigns stable question
+IDs.
+
+The completed Draft remains the Run output. Reading the persisted Plan is
+free and read-only. A user may answer selected questions, import the answers
+as new factual Sources, and explicitly create another Revision whose request
+records the Plan, question IDs, and Source IDs. The server derives the round
+and stops after two rounds or as soon as the Draft reaches the duration floor.
+Planner failure cannot discard a valid Draft: a deterministic, draft-anchored
+fallback Plan is persisted instead.
+
+The zero-cost Fake E2E starts with a 2,509-character recovered Draft, grows to
+3,073 after the first answer-driven Revision, and reaches 3,637 after the
+second, crossing the 3,570-character floor for a 15-minute target. It also
+proves that repeated GETs create no model calls, unknown question IDs and Plan
+bypass are rejected, and no third Planner is queued. This validates the
+bounded workflow and provenance, not the real-world quality of model questions
+or a person's willingness to record the result.
+
+After M3.9, the next product stage remains M4.1 replayable
 SSE, followed by the M5.1 minimal Run Trace UI.
 
 See the
@@ -622,6 +649,9 @@ DeepSeek evidence, and remaining human-validation boundary are in the
 [M3.8 learning chapter](docs/learning/m3-8-grounded-length-recovery.zh-CN.md).
 The full frozen-corpus experiment is recorded in the
 [M3.8 E2E report](docs/experiments/m3-8-grounded-length-recovery-e2e.zh-CN.md).
+The draft-anchor contract, bounded answer loop, fallback behavior, API
+examples, and Fake E2E evidence are in the
+[M3.9 learning chapter](docs/learning/m3-9-draft-aware-supplemental-interview.zh-CN.md).
 
 ## License
 
