@@ -4,6 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+import epiphany.length_recovery_e2e as length_recovery_e2e
 from epiphany.length_recovery_e2e import (
     DEFAULT_FIXTURE_PATH,
     _log_summary,
@@ -11,6 +12,24 @@ from epiphany.length_recovery_e2e import (
     main,
 )
 from epiphany.realistic_style_experiment_e2e import load_realistic_style_fixture
+from epiphany.revision_schemas import REVISE_PODCAST_DRAFT
+from epiphany.runtime.providers.base import ProviderResult, TaskInvocation
+from epiphany.runtime.providers.fake import FakeProvider
+
+
+class _NoChangeRevisionProvider(FakeProvider):
+    async def generate(self, invocation: TaskInvocation) -> ProviderResult:
+        if invocation.kind == REVISE_PODCAST_DRAFT:
+            return ProviderResult(
+                content=invocation.input_json["parent_podcast_draft"],
+                provider=self.name,
+                model=self.model,
+                input_tokens=321,
+                output_tokens=123,
+                estimated_cost_micros=456,
+                cost_currency=self.billing_currency,
+            )
+        return await super().generate(invocation)
 
 
 def _database_counts(database_path: Path) -> dict[str, int]:
@@ -268,3 +287,128 @@ def test_fake_execute_closes_one_explicit_grounded_length_recovery_loop(
         assert source["text"] not in combined_logs
     for sample in fixture["writing_samples"]:
         assert sample["source"]["text"] not in combined_logs
+
+
+def test_failed_child_preserves_real_error_usage_and_safety_without_child_outputs(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    database_path = tmp_path / "failed-child.db"
+    output_dir = tmp_path / "failed-child-output"
+    provider = _NoChangeRevisionProvider()
+    monkeypatch.setattr(
+        length_recovery_e2e,
+        "build_realistic_provider",
+        lambda **_kwargs: provider,
+    )
+
+    exit_code = main(
+        [
+            "--provider",
+            "fake",
+            "--execute",
+            "--database",
+            str(database_path),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    safety = json.loads((output_dir / "safety-report.json").read_text(encoding="utf-8"))
+    revision_rows = [
+        json.loads(line)
+        for line in (output_dir / "revision-runtime.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert exit_code == 1
+    assert report["event"] == "length_recovery_e2e.completed"
+    assert report["passed"] is False
+    assert report["workflow_passed"] is False
+    assert report["content_acceptance_passed"] is False
+    assert report["child"]["status"] == "failed"
+    assert report["child"]["terminal_error_code"] == "podcast_revision_no_change"
+    assert report["child"]["tasks"] == [
+        {
+            "id": report["child"]["tasks"][0]["id"],
+            "kind": "revise_podcast_draft",
+            "status": "failed",
+            "attempt": 1,
+            "max_attempts": 1,
+            "output_artifact_id": None,
+            "error_code": "podcast_revision_no_change",
+        }
+    ]
+    assert report["child"]["model_calls_recorded"] == 1
+    assert report["workflow"]["reviewer_requested"] is False
+    assert report["workflow"]["comparison_requested"] is False
+    assert report["workflow"]["comparison_artifact_id"] is None
+    assert report["quality"]["parent"]["script_character_count"] > 0
+    assert report["quality"]["child"] == {
+        "status": "not_evaluated",
+        "reason": "child_run_failed_before_draft_commit",
+        "terminal_error_code": "podcast_revision_no_change",
+    }
+    assert report["quality"]["script_character_delta"] is None
+    assert report["usage"]["parent"]["model_call_count"] == 5
+    assert report["usage"]["child"]["model_call_count"] == 1
+    assert report["usage"]["total"]["model_call_count"] == 6
+    assert report["usage"]["child"]["input_tokens"] == 321
+    assert report["usage"]["child"]["output_tokens"] == 123
+    assert report["usage"]["child"]["estimated_costs"] == {
+        "USD": {"micros": 456, "amount": "0.000456"}
+    }
+    assert report["runtime"]["hidden_retry"] is False
+    assert report["workflow_checks"]["child_terminal_failure_preserved"] is True
+    assert report["workflow_checks"]["child_execution_is_one_call_without_retry"] is True
+    assert report["workflow_checks"]["reviewer_and_comparison_not_requested"] is True
+    assert report["workflow_checks"]["logs_structured_and_redacted"] is True
+    assert report["workflow_checks"]["child_revision_succeeded"] is False
+    assert report["content_checks"] == {"child_content_acceptance_available": False}
+    assert report["workflow_failures"] == ["child_revision_succeeded"]
+    assert report["content_failures"] == ["child_content_acceptance_available"]
+    child_id = report["child"]["id"]
+    assert not any(row.get("event") == "workflow.draft_revision.compared" for row in revision_rows)
+    assert not any(
+        row.get("path")
+        in {
+            f"/runs/{child_id}/quality-report",
+            f"/runs/{child_id}/revision-comparison",
+            f"/runs/{child_id}/exports/podcast-draft.md",
+            f"/runs/{child_id}/exports/show-notes.md",
+            f"/runs/{child_id}/exports/quality-report.md",
+        }
+        for row in revision_rows
+    )
+    assert "artifact_not_unique" not in json.dumps(report)
+    assert report["outputs"]["comparison"] is None
+    assert report["outputs"]["child_quality_json"] is None
+    assert set(report["outputs"]["markdown"]) == {
+        "parent-podcast-draft",
+        "parent-show-notes",
+        "parent-quality-report",
+    }
+    for absent_output in (
+        "child-podcast-draft.md",
+        "child-show-notes.md",
+        "child-quality-report.md",
+        "child-quality-report.json",
+        "revision-comparison.json",
+    ):
+        assert not (output_dir / absent_output).exists()
+    assert _database_counts(database_path) == {
+        "runs": 2,
+        "tasks": 7,
+        "model_calls": 6,
+    }
+    assert safety["passed"] is True
+    assert safety["source_sample_prompt_and_key_absent"] is True
+    assert safety["child_status"] == "failed"
+    assert safety["child_terminal_error_code"] == "podcast_revision_no_change"
+    assert safety["model_call_count"] == 6
+    assert safety["hidden_retry"] is False
+    assert '"event": "length_recovery_e2e.completed"' in captured.out
+    assert "podcast_revision_no_change" not in captured.err

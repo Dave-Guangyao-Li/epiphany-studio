@@ -228,6 +228,7 @@ def _log_summary(
     paths: Sequence[Path],
     *,
     forbidden_fragments: Sequence[str],
+    required_events: set[str] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     rows: list[dict[str, Any]] = []
     raw_parts: list[str] = []
@@ -246,7 +247,7 @@ def _log_summary(
             rows.append(row)
     combined = "\n".join(raw_parts)
     counts = Counter(str(row["event"]) for row in rows if row.get("event"))
-    required = {
+    required = required_events or {
         "run.waiting_for_user",
         "run.resume.accepted",
         "workflow.draft_improvement.planned",
@@ -265,6 +266,7 @@ def _log_summary(
             "paths": [str(path) for path in paths],
             "line_count": len(rows),
             "event_counts": dict(sorted(counts.items())),
+            "required_events": sorted(required),
             "required_events_present": required.issubset(counts),
             "source_sample_prompt_and_key_absent": redacted,
         },
@@ -350,6 +352,266 @@ def _revision_settings(
         model_provider=provider_name,
         deepseek_billing_currency=settings.deepseek_billing_currency,
     )
+
+
+def _terminal_error_code(run: dict[str, Any]) -> str:
+    for task in reversed(list(run.get("tasks", []))):
+        error_code = task.get("error_code")
+        if task.get("status") == "failed" and isinstance(error_code, str) and error_code:
+            return error_code
+    return f"child_run_{run.get('status') or 'terminal'}"
+
+
+def _usage_summary(
+    *,
+    parent_calls: list[dict[str, Any]],
+    child_calls: list[dict[str, Any]],
+) -> dict[str, Any]:
+    all_calls = [*parent_calls, *child_calls]
+
+    def summarize(calls: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "model_call_count": len(calls),
+            "input_tokens": sum(int(call.get("input_tokens") or 0) for call in calls),
+            "output_tokens": sum(int(call.get("output_tokens") or 0) for call in calls),
+            "duration_ms": sum(int(call.get("duration_ms") or 0) for call in calls),
+            "estimated_costs": _cost_summary(calls),
+        }
+
+    return {
+        "parent": summarize(parent_calls),
+        "child": summarize(child_calls),
+        "total": summarize(all_calls),
+    }
+
+
+def _failed_child_revision_result(
+    *,
+    paths: LengthRecoveryPaths,
+    fixture: dict[str, Any],
+    api_key: str,
+    parent_before: dict[str, Any],
+    parent_after: dict[str, Any],
+    parent_snapshot: dict[str, Any],
+    parent_draft: dict[str, Any],
+    parent_quality_payload: dict[str, Any],
+    plan: dict[str, Any],
+    revision_body: dict[str, Any],
+    created: dict[str, Any],
+    replay: dict[str, Any],
+    child: dict[str, Any],
+    markdown: dict[str, str],
+    provider: ModelProvider,
+    reviewer_provider: ModelProvider,
+) -> dict[str, Any]:
+    """Close a failed child Run without looking for artifacts that cannot exist."""
+
+    parent_quality = _quality_report(parent_quality_payload)
+    parent_metrics = parent_quality.deterministic.metrics
+    parent_refs = _script_reference_keys(parent_draft)
+    priority_refs = {
+        (item["source_id"], item["source_segment_id"])
+        for item in plan["plan"]["material"]["unused_source_refs"]
+    }
+    minimum, maximum = duration_character_bounds(
+        int(plan["plan"]["duration"]["target_script_character_count"])
+    )
+    persisted_parent_draft = _artifact(
+        parent_after,
+        artifact_id=str(parent_snapshot["output_artifact_id"]),
+    )
+    persisted_parent_quality = _artifact(
+        parent_after,
+        kind="draft_quality_report",
+    )
+    terminal_error_code = _terminal_error_code(child)
+    parent_calls = list(parent_before["model_calls"])
+    child_calls = list(child["model_calls"])
+    child_tasks = list(child["tasks"])
+
+    for name, content in markdown.items():
+        candidate, kind = name.split("-", maxsplit=1)
+        paths.markdown(candidate, kind).write_text(content, encoding="utf-8")
+    paths.json_artifact("improvement-plan").write_text(
+        json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    paths.json_artifact("revision-request").write_text(
+        json.dumps(
+            {
+                **revision_body,
+                "request_artifact_id": created["request_artifact_id"],
+                "child_run_id": child["id"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths.json_artifact("parent-quality-report").write_text(
+        json.dumps(parent_quality_payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    forbidden = [
+        *_forbidden_log_fragments(fixture, secret_values=(api_key,)),
+        *(item["source"]["text"] for item in fixture["writing_samples"]),
+        REVISION_INSTRUCTION,
+        *_sensitive_log_fragments(parent_draft["content_json"]),
+        *_sensitive_log_fragments(parent_quality_payload),
+        *(
+            fragment
+            for content in markdown.values()
+            for fragment in _sensitive_log_fragments(content.splitlines())
+        ),
+    ]
+    logs, logs_valid = _log_summary(
+        [paths.parent.log, paths.revision_log],
+        forbidden_fragments=forbidden,
+        required_events={
+            "run.waiting_for_user",
+            "run.resume.accepted",
+            "workflow.draft_improvement.planned",
+            "workflow.draft_revision.requested",
+            "workflow.draft_revision.queued",
+            "worker.task.failed",
+        },
+    )
+    workflow_checks = {
+        "parent_workflow_succeeded": parent_before["status"] == "succeeded",
+        "plan_reuses_existing_material": (
+            plan["plan"]["duration_resolution"] == "reuse_unused_material" and bool(priority_refs)
+        ),
+        "revision_request_is_explicit_and_idempotent": (
+            created["idempotent_replay"] is False
+            and replay["idempotent_replay"] is True
+            and created["run"]["id"] == replay["run"]["id"]
+        ),
+        "child_terminal_failure_preserved": (
+            child.get("status") in {"failed", "cancelled"} and bool(terminal_error_code)
+        ),
+        "child_execution_is_one_call_without_retry": (
+            len(child_tasks) == 1
+            and child_tasks[0].get("kind") == "revise_podcast_draft"
+            and child_tasks[0].get("attempt") == 1
+            and len(child_calls) == 1
+            and child_calls[0].get("attempt") == 1
+        ),
+        "child_call_matches_editor_provider": _model_calls_match_routed_providers(
+            model_calls=child_calls,
+            tasks=child_tasks,
+            primary_provider=provider,
+            reviewer_provider=reviewer_provider,
+            expected_model_calls=1,
+        ),
+        "reviewer_and_comparison_not_requested": (
+            all(task.get("kind") != "review_podcast_draft" for task in child_tasks)
+        ),
+        "parent_is_immutable": (
+            _canonical_sha256(persisted_parent_draft["content_json"])
+            == parent_snapshot["draft_sha256"]
+            and _canonical_sha256(persisted_parent_quality["content_json"])
+            == parent_snapshot["quality_sha256"]
+            and parent_after["output_artifact_id"] == parent_snapshot["output_artifact_id"]
+            and len(parent_after["model_calls"]) == parent_snapshot["model_calls"]
+            and len(parent_after["tasks"]) == parent_snapshot["tasks"]
+        ),
+        "logs_structured_and_redacted": logs_valid,
+        # This is intentionally false: a terminal child failure is a completed,
+        # analyzable experiment outcome, not a successful Revision.
+        "child_revision_succeeded": False,
+    }
+    content_checks = {
+        # No child Draft was committed, so content acceptance must not be
+        # inferred from the parent or from a provider response rejected locally.
+        "child_content_acceptance_available": False,
+    }
+    parent_template_density = _density_per_1000(
+        count=parent_metrics.template_phrase_count,
+        character_count=parent_metrics.script_character_count,
+    )
+    parent_not_but_density = _density_per_1000(
+        count=parent_metrics.not_but_pattern_count,
+        character_count=parent_metrics.script_character_count,
+    )
+    workflow_failures = sorted(name for name, passed in workflow_checks.items() if not passed)
+    content_failures = sorted(name for name, passed in content_checks.items() if not passed)
+    return {
+        "parent": _safe_run_summary(parent_after),
+        "child": {
+            **_safe_run_summary(child),
+            "terminal_error_code": terminal_error_code,
+        },
+        "workflow": {
+            "plan_artifact_id": plan["artifact"]["id"],
+            "revision_request_artifact_id": created["request_artifact_id"],
+            "comparison_artifact_id": None,
+            "reviewer_requested": False,
+            "comparison_requested": False,
+            "automatic_revision_count": 0,
+            "explicit_revision_count": 1,
+        },
+        "material_utilization": {
+            "priority_unused_ref_count": len(priority_refs),
+            "parent_spoken_ref_count": len(parent_refs),
+            "child_spoken_ref_count": None,
+            "newly_used_priority_ref_count": None,
+            "still_unused_priority_ref_count": len(priority_refs),
+            "all_material_used_required": False,
+            "status": "not_evaluated_child_failed",
+        },
+        "quality": {
+            "minimum_script_character_count": minimum,
+            "target_script_character_count": plan["plan"]["duration"][
+                "target_script_character_count"
+            ],
+            "maximum_script_character_count": maximum,
+            "parent": {
+                "script_character_count": parent_metrics.script_character_count,
+                "estimated_duration_minutes": parent_metrics.estimated_duration_minutes,
+                "decision": parent_quality.decision,
+                "duration_status": _duration_finding(parent_quality),
+                "deterministic_score": parent_quality.deterministic.deterministic_score,
+                "warning_count": _warning_count(parent_quality),
+                "template_phrase_density_per_1000_chars": parent_template_density,
+                "not_but_density_per_1000_chars": parent_not_but_density,
+                "chinese_style_density_per_1000_chars": _chinese_style_density(parent_quality),
+                "model_dimension_scores": _model_dimension_scores(parent_quality),
+            },
+            "child": {
+                "status": "not_evaluated",
+                "reason": "child_run_failed_before_draft_commit",
+                "terminal_error_code": terminal_error_code,
+            },
+            "script_character_delta": None,
+        },
+        "usage": _usage_summary(
+            parent_calls=parent_calls,
+            child_calls=child_calls,
+        ),
+        "logs": logs,
+        "workflow_checks": workflow_checks,
+        "content_checks": content_checks,
+        "workflow_failures": workflow_failures,
+        "content_failures": content_failures,
+        "outputs": {
+            "improvement_plan": str(paths.json_artifact("improvement-plan")),
+            "revision_request": str(paths.json_artifact("revision-request")),
+            "comparison": None,
+            "parent_quality_json": str(paths.json_artifact("parent-quality-report")),
+            "child_quality_json": None,
+            "markdown": {
+                name: str(paths.markdown(*name.split("-", maxsplit=1))) for name in markdown
+            },
+            "unavailable": {
+                "child_podcast_draft": "child_run_failed_before_draft_commit",
+                "child_show_notes": "child_run_failed_before_draft_commit",
+                "child_quality_report": "reviewer_not_requested",
+                "revision_comparison": "reviewer_not_requested",
+            },
+        },
+    }
 
 
 async def _continue_with_revision(
@@ -484,25 +746,38 @@ async def _continue_with_revision(
                     raise E2EFlowError(stage="create_revision", code="response_invalid")
                 child_run_id = str(created["run"]["id"])
                 child = await _poll_for_terminal(client, child_run_id)
-                child_draft = _artifact(
-                    child,
-                    artifact_id=str(child["output_artifact_id"]),
+                child_succeeded = child.get("status") == "succeeded"
+                child_draft = (
+                    _artifact(
+                        child,
+                        artifact_id=str(child["output_artifact_id"]),
+                    )
+                    if child_succeeded
+                    else None
                 )
-                child_quality_payload = await _request_json(
-                    client,
-                    "GET",
-                    f"/runs/{child_run_id}/quality-report",
-                    stage="child_quality",
-                    request_id="req_m38_child_quality",
-                    expected_statuses={200},
+                child_quality_payload = (
+                    await _request_json(
+                        client,
+                        "GET",
+                        f"/runs/{child_run_id}/quality-report",
+                        stage="child_quality",
+                        request_id="req_m38_child_quality",
+                        expected_statuses={200},
+                    )
+                    if child_succeeded
+                    else None
                 )
-                comparison = await _request_json(
-                    client,
-                    "GET",
-                    f"/runs/{child_run_id}/revision-comparison",
-                    stage="comparison",
-                    request_id="req_m38_comparison",
-                    expected_statuses={200},
+                comparison = (
+                    await _request_json(
+                        client,
+                        "GET",
+                        f"/runs/{child_run_id}/revision-comparison",
+                        stage="comparison",
+                        request_id="req_m38_comparison",
+                        expected_statuses={200},
+                    )
+                    if child_succeeded
+                    else None
                 )
                 parent_after = await _get_run(
                     client,
@@ -529,25 +804,30 @@ async def _continue_with_revision(
                         kind="quality-report",
                         request_id="req_m38_parent_quality_md",
                     ),
-                    "child-podcast-draft": await _markdown(
-                        client,
-                        run_id=child_run_id,
-                        kind="podcast-draft",
-                        request_id="req_m38_child_draft",
-                    ),
-                    "child-show-notes": await _markdown(
-                        client,
-                        run_id=child_run_id,
-                        kind="show-notes",
-                        request_id="req_m38_child_notes",
-                    ),
-                    "child-quality-report": await _markdown(
-                        client,
-                        run_id=child_run_id,
-                        kind="quality-report",
-                        request_id="req_m38_child_quality_md",
-                    ),
                 }
+                if child_succeeded:
+                    markdown.update(
+                        {
+                            "child-podcast-draft": await _markdown(
+                                client,
+                                run_id=child_run_id,
+                                kind="podcast-draft",
+                                request_id="req_m38_child_draft",
+                            ),
+                            "child-show-notes": await _markdown(
+                                client,
+                                run_id=child_run_id,
+                                kind="show-notes",
+                                request_id="req_m38_child_notes",
+                            ),
+                            "child-quality-report": await _markdown(
+                                client,
+                                run_id=child_run_id,
+                                kind="quality-report",
+                                request_id="req_m38_child_quality_md",
+                            ),
+                        }
+                    )
     finally:
         logger.removeHandler(handler)
         handler.close()
@@ -559,6 +839,26 @@ async def _continue_with_revision(
             item.setLevel(level)
         logger.setLevel(old_level)
         logger.propagate = old_propagate
+
+    if not child_succeeded:
+        return _failed_child_revision_result(
+            paths=paths,
+            fixture=fixture,
+            api_key=api_key,
+            parent_before=parent_before,
+            parent_after=parent_after,
+            parent_snapshot=parent_snapshot,
+            parent_draft=parent_draft,
+            parent_quality_payload=parent_quality_payload,
+            plan=plan,
+            revision_body=revision_body,
+            created=created,
+            replay=replay,
+            child=child,
+            markdown=markdown,
+            provider=provider,
+            reviewer_provider=reviewer_provider,
+        )
 
     parent_quality = _quality_report(parent_quality_payload)
     child_quality = _quality_report(child_quality_payload)
@@ -767,7 +1067,6 @@ async def _continue_with_revision(
 
     parent_calls = list(parent_before["model_calls"])
     child_calls = list(child["model_calls"])
-    all_calls = [*parent_calls, *child_calls]
     workflow_failures = sorted(name for name, passed in workflow_checks.items() if not passed)
     content_failures = sorted(name for name, passed in content_checks.items() if not passed)
     return {
@@ -829,26 +1128,10 @@ async def _continue_with_revision(
                 child_metrics.script_character_count - parent_metrics.script_character_count
             ),
         },
-        "usage": {
-            "parent": {
-                "input_tokens": sum(int(call.get("input_tokens") or 0) for call in parent_calls),
-                "output_tokens": sum(int(call.get("output_tokens") or 0) for call in parent_calls),
-                "duration_ms": sum(int(call.get("duration_ms") or 0) for call in parent_calls),
-                "estimated_costs": _cost_summary(parent_calls),
-            },
-            "child": {
-                "input_tokens": sum(int(call.get("input_tokens") or 0) for call in child_calls),
-                "output_tokens": sum(int(call.get("output_tokens") or 0) for call in child_calls),
-                "duration_ms": sum(int(call.get("duration_ms") or 0) for call in child_calls),
-                "estimated_costs": _cost_summary(child_calls),
-            },
-            "total": {
-                "input_tokens": sum(int(call.get("input_tokens") or 0) for call in all_calls),
-                "output_tokens": sum(int(call.get("output_tokens") or 0) for call in all_calls),
-                "duration_ms": sum(int(call.get("duration_ms") or 0) for call in all_calls),
-                "estimated_costs": _cost_summary(all_calls),
-            },
-        },
+        "usage": _usage_summary(
+            parent_calls=parent_calls,
+            child_calls=child_calls,
+        ),
         "logs": logs,
         "workflow_checks": workflow_checks,
         "content_checks": content_checks,
@@ -942,6 +1225,10 @@ async def execute_length_recovery_e2e(
         "source_sample_prompt_and_key_absent": revision["logs"][
             "source_sample_prompt_and_key_absent"
         ],
+        "child_status": revision["child"]["status"],
+        "child_terminal_error_code": revision["child"].get("terminal_error_code"),
+        "model_call_count": revision["usage"]["total"]["model_call_count"],
+        "hidden_retry": False,
         "automatic_revision_count": 0,
         "explicit_revision_count": 1,
     }
