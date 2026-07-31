@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
+import pytest
 
 from epiphany.config import Settings
 from epiphany.event_stream import encode_sse_event, stream_run_events
@@ -88,6 +89,31 @@ def test_sse_encoding_uses_sequence_as_reconnect_cursor() -> None:
     assert '"type":"workflow.user_input.requested"' in encoded
     assert "中文" in encoded
     assert encoded.endswith("\n\n")
+
+
+async def test_sse_stops_before_reading_state_when_client_disconnects() -> None:
+    class DisconnectedRequest:
+        async def is_disconnected(self) -> bool:
+            return True
+
+    class UnexpectedService:
+        async def get_run(self, _: str) -> SimpleNamespace:
+            raise AssertionError("a disconnected stream must not read Run state")
+
+        async def list_events(self, _: str, *, after: int) -> list[EventView]:
+            raise AssertionError(f"a disconnected stream must not replay after {after}")
+
+    stream = stream_run_events(
+        request=cast(Any, DisconnectedRequest()),
+        service=cast(Any, UnexpectedService()),
+        run_id="run_disconnected",
+        after=9,
+        poll_interval_seconds=0,
+        heartbeat_seconds=0,
+    )
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
 
 
 async def test_sse_emits_transport_heartbeat_without_persisting_fake_event() -> None:

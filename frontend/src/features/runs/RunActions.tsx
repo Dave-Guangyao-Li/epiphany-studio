@@ -3,6 +3,7 @@ import { projectsApi, runsApi, sourcesApi } from "../../api/epiphany";
 import type {
   EventView,
   ImprovementPlanRecord,
+  MaterialReadinessView,
   RunView,
   SupplementalInterviewPlanRecord,
   UserFeedbackRequest,
@@ -29,10 +30,12 @@ async function importAnswerSource(
 export function HumanCheckpointPanel({
   run,
   events,
+  readiness,
   onChanged,
 }: {
   run: RunView;
   events: EventView[];
+  readiness: MaterialReadinessView | null;
   onChanged: () => Promise<void>;
 }) {
   const retryRef = useRef<{ fingerprint: string; id: string } | null>(null);
@@ -72,6 +75,49 @@ export function HumanCheckpointPanel({
       <p className="eyebrow">HUMAN CHECKPOINT</p>
       <h3>Agent 暂停了，现在轮到你补充。</h3>
       <p>先把口述转成文字贴进来。它会成为新的 Source，之后 Run 才会继续。</p>
+      {checkpoint === "material_readiness" && readiness && (
+        <div className="readiness-summary" aria-label="素材充足度">
+          <div className="readiness-heading">
+            <div>
+              <strong>素材还不足以稳妥支撑 {readiness.targetDurationMinutes} 分钟</strong>
+              <p>
+                当前素材估计可支持 {readiness.estimatedSupportedMinutesLow}–{readiness.estimatedSupportedMinutesHigh} 分钟。
+                这是素材字符量估算，不是最终录音时长。
+              </p>
+            </div>
+            <span>{readiness.status === "ready" ? "已就绪" : "需要补充"}</span>
+          </div>
+          <dl className="readiness-metrics">
+            <div><dt>当前有效素材</dt><dd>{readiness.currentSourceCharCount.toLocaleString()} 字</dd></div>
+            <div><dt>最低需要</dt><dd>{readiness.requiredSourceCharCount.toLocaleString()} 字</dd></div>
+            <div><dt>仍需补充</dt><dd>{readiness.additionalSourceCharsNeeded.toLocaleString()} 字</dd></div>
+          </dl>
+          {readiness.gaps.length > 0 && (
+            <div className="readiness-gaps">
+              <h4>为什么现在暂停</h4>
+              {readiness.gaps.map((gap) => (
+                <article key={gap.code}>
+                  <strong>{gap.title}</strong>
+                  <p>{gap.detail}</p>
+                </article>
+              ))}
+            </div>
+          )}
+          {readiness.followUpQuestions.length > 0 && (
+            <div className="readiness-questions">
+              <h4>可以从这些具体问题开始讲</h4>
+              <ol>
+                {readiness.followUpQuestions.map((question, index) => (
+                  <li key={`${index}-${question.prompt}`}>
+                    <strong>{question.prompt}</strong>
+                    <small>{question.purpose}</small>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+        </div>
+      )}
       <form onSubmit={submit}>
         <label>素材标题<input value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
         <label>

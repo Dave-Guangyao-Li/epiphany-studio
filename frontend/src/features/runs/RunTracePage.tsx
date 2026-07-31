@@ -13,6 +13,13 @@ import { ErrorNotice } from "../../components/ErrorNotice";
 import { StatusBadge } from "../../components/StatusBadge";
 import { DURABLE_EVENT_NAMES, lastEventSequence, mergeEvents } from "../../lib/events";
 import {
+  latestMaterialReadiness,
+  isCurrentRunGeneration,
+  type RunRouteGeneration,
+  shouldLoadDerivedForRun,
+  supportsSupplementalInterview,
+} from "../../lib/runTrace";
+import {
   FeedbackPanel,
   HumanCheckpointPanel,
   RevisionPanel,
@@ -29,10 +36,29 @@ function formatDate(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "medium" }).format(new Date(value));
 }
 
+export function commitForCurrentRunRoute(
+  requested: RunRouteGeneration,
+  current: RunRouteGeneration,
+  commit: () => void,
+): boolean {
+  if (!isCurrentRunGeneration(requested, current)) return false;
+  commit();
+  return true;
+}
+
 export function RunTracePage() {
   const { runId = "" } = useParams();
   const sequenceRef = useRef(0);
   const eventStreamRef = useRef<EventSource | null>(null);
+  const refreshInFlightRef = useRef<{
+    route: RunRouteGeneration;
+    promise: Promise<void>;
+  } | null>(null);
+  const refreshTimerRef = useRef<number | null>(null);
+  const derivedRequestedRunRef = useRef<string | null>(null);
+  const routeGenerationRef = useRef(0);
+  const activeRunIdRef = useRef(runId);
+  activeRunIdRef.current = runId;
   const [run, setRun] = useState<RunView | null>(null);
   const [events, setEvents] = useState<EventView[]>([]);
   const [quality, setQuality] = useState<QualityReportRecord | null>(null);
@@ -44,51 +70,110 @@ export function RunTracePage() {
   const [activeView, setActiveView] = useState<"trace" | "tasks" | "artifacts">("trace");
   const [markdown, setMarkdown] = useState<{ kind: MarkdownKind; text: string } | null>(null);
   const [markdownError, setMarkdownError] = useState<unknown>(null);
+  const [initialReplayComplete, setInitialReplayComplete] = useState(false);
 
-  const loadDerived = useCallback(async (nextRun: RunView) => {
-    if (nextRun.status !== "succeeded") return;
-    const [qualityResult, improvementResult, supplementalResult] = await Promise.all([
-      runsApi.quality(nextRun.id),
-      runsApi.improvement(nextRun.id),
-      runsApi.supplemental(nextRun.id),
-    ]);
-    setQuality(qualityResult);
-    setImprovement(improvementResult);
-    setSupplemental(supplementalResult);
-  }, []);
+  const currentRouteGeneration = useCallback((): RunRouteGeneration => ({
+    runId: activeRunIdRef.current,
+    generation: routeGenerationRef.current,
+  }), []);
 
-  const refresh = useCallback(async () => {
-    setError(null);
+  const loadDerived = useCallback(async (
+    nextRun: RunView,
+    requestedRoute: RunRouteGeneration,
+  ) => {
+    if (!shouldLoadDerivedForRun(nextRun, derivedRequestedRunRef.current)) return;
+    derivedRequestedRunRef.current = nextRun.id;
     try {
-      const [nextRun, replay] = await Promise.all([
-        runsApi.get(runId),
-        runsApi.events(runId, sequenceRef.current),
+      const supplementalRequest = supportsSupplementalInterview(nextRun.workflow_version)
+        ? runsApi.supplemental(nextRun.id)
+        : Promise.resolve(null);
+      const [qualityResult, improvementResult, supplementalResult] = await Promise.all([
+        runsApi.quality(nextRun.id),
+        runsApi.improvement(nextRun.id),
+        supplementalRequest,
       ]);
-      if (replay.length) {
-        setEvents((current) => {
-          const merged = mergeEvents(current, replay);
-          sequenceRef.current = lastEventSequence(merged);
-          return merged;
-        });
-      }
-      setRun(nextRun);
-      await loadDerived(nextRun);
+      if (!isCurrentRunGeneration(requestedRoute, currentRouteGeneration())) return;
+      setQuality(qualityResult);
+      setImprovement(improvementResult);
+      setSupplemental(supplementalResult);
     } catch (loadError) {
-      setError(loadError);
+      // A transient failure must remain retryable through the page retry action.
+      if (derivedRequestedRunRef.current === nextRun.id) {
+        derivedRequestedRunRef.current = null;
+      }
+      throw loadError;
     }
-  }, [loadDerived, runId]);
+  }, [currentRouteGeneration]);
+
+  const refresh = useCallback((generation = routeGenerationRef.current): Promise<void> => {
+    const requestedRoute = { runId, generation };
+    if (
+      refreshInFlightRef.current &&
+      isCurrentRunGeneration(refreshInFlightRef.current.route, requestedRoute)
+    ) return refreshInFlightRef.current.promise;
+    const request = (async () => {
+      setError(null);
+      try {
+        const [nextRun, replay] = await Promise.all([
+          runsApi.get(runId),
+          runsApi.events(runId, sequenceRef.current),
+        ]);
+        if (!isCurrentRunGeneration(requestedRoute, currentRouteGeneration())) return;
+        if (replay.length) {
+          setEvents((current) => {
+            const merged = mergeEvents(current, replay);
+            sequenceRef.current = lastEventSequence(merged);
+            return merged;
+          });
+        }
+        setRun(nextRun);
+        await loadDerived(nextRun, requestedRoute);
+      } catch (loadError) {
+        if (!isCurrentRunGeneration(requestedRoute, currentRouteGeneration())) return;
+        setError(loadError);
+      }
+    })().finally(() => {
+      if (refreshInFlightRef.current?.promise === request) refreshInFlightRef.current = null;
+    });
+    refreshInFlightRef.current = { route: requestedRoute, promise: request };
+    return request;
+  }, [currentRouteGeneration, loadDerived, runId]);
+
+  const scheduleRefresh = useCallback((delay = 180) => {
+    if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refresh();
+    }, delay);
+  }, [refresh]);
+  const runIsTerminal = run !== null && terminalStatuses.has(run.status);
 
   useEffect(() => {
+    routeGenerationRef.current += 1;
+    const generation = routeGenerationRef.current;
     sequenceRef.current = 0;
+    derivedRequestedRunRef.current = null;
     setEvents([]);
     setRun(null);
     setQuality(null);
     setImprovement(null);
     setSupplemental(null);
-    void refresh();
+    setCancelling(false);
+    setMarkdown(null);
+    setMarkdownError(null);
+    setInitialReplayComplete(false);
+    let current = true;
+    void refresh(generation).finally(() => {
+      if (current) setInitialReplayComplete(true);
+    });
+    return () => { current = false; };
   }, [refresh, runId]);
 
   useEffect(() => {
+    if (!initialReplayComplete || runIsTerminal) {
+      if (runIsTerminal) setConnection("closed");
+      return;
+    }
     let stopped = false;
     let stream: EventSource | null = null;
     setConnection("connecting");
@@ -102,15 +187,7 @@ export function RunTracePage() {
           return merged;
         });
         setConnection("live");
-        void runsApi.get(runId).then((nextRun) => {
-          if (stopped) return;
-          setRun(nextRun);
-          void loadDerived(nextRun);
-          if (terminalStatuses.has(nextRun.status)) {
-            stream?.close();
-            setConnection("closed");
-          }
-        });
+        scheduleRefresh(event.type.startsWith("run.") ? 0 : 180);
       } catch {
         setConnection("reconnecting");
       }
@@ -134,10 +211,14 @@ export function RunTracePage() {
     return () => {
       stopped = true;
       window.clearInterval(poll);
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
       stream?.close();
       if (eventStreamRef.current === stream) eventStreamRef.current = null;
     };
-  }, [loadDerived, refresh, runId]);
+  }, [initialReplayComplete, refresh, runId, runIsTerminal, scheduleRefresh]);
 
   useEffect(() => {
     if (run && terminalStatuses.has(run.status)) {
@@ -148,19 +229,34 @@ export function RunTracePage() {
   }, [run]);
 
   async function cancel() {
+    const requestedRoute = currentRouteGeneration();
     setCancelling(true);
     setError(null);
     try {
-      setRun(await runsApi.cancel(runId));
-      await refresh();
+      const cancelledRun = await runsApi.cancel(runId);
+      if (!commitForCurrentRunRoute(
+        requestedRoute,
+        currentRouteGeneration(),
+        () => setRun(cancelledRun),
+      )) return;
+      await refresh(requestedRoute.generation);
     } catch (cancelError) {
-      setError(cancelError);
+      commitForCurrentRunRoute(
+        requestedRoute,
+        currentRouteGeneration(),
+        () => setError(cancelError),
+      );
     } finally {
-      setCancelling(false);
+      commitForCurrentRunRoute(
+        requestedRoute,
+        currentRouteGeneration(),
+        () => setCancelling(false),
+      );
     }
   }
 
   async function openMarkdown(kind: MarkdownKind) {
+    const requestedRoute = currentRouteGeneration();
     setMarkdownError(null);
     try {
       const loaders = {
@@ -169,18 +265,28 @@ export function RunTracePage() {
         "show-notes": runsApi.showNotesMarkdown,
         quality: runsApi.qualityMarkdown,
       };
-      setMarkdown({ kind, text: await loaders[kind](runId) });
+      const text = await loaders[kind](runId);
+      commitForCurrentRunRoute(
+        requestedRoute,
+        currentRouteGeneration(),
+        () => setMarkdown({ kind, text }),
+      );
     } catch (loadError) {
-      setMarkdownError(loadError);
+      commitForCurrentRunRoute(
+        requestedRoute,
+        currentRouteGeneration(),
+        () => setMarkdownError(loadError),
+      );
     }
   }
 
   if (!run) {
-    return <div className="page"><ErrorNotice error={error} onRetry={refresh} /><div className="loading-line">正在回放 Run Trace…</div></div>;
+    return <div className="page"><ErrorNotice error={error} onRetry={() => { void refresh(); }} /><div className="loading-line">正在回放 Run Trace…</div></div>;
   }
 
   const active = !terminalStatuses.has(run.status);
   const failedTasks = run.tasks.filter((task) => task.error_code);
+  const readiness = latestMaterialReadiness(run.artifacts);
 
   return (
     <div className="page run-trace-page">
@@ -200,7 +306,7 @@ export function RunTracePage() {
         </div>
       </header>
 
-      <ErrorNotice error={error} onRetry={refresh} />
+      <ErrorNotice error={error} onRetry={() => { void refresh(); }} />
       {failedTasks.length > 0 && (
         <section className="run-failure" role="alert">
           <strong>执行错误</strong>
@@ -246,7 +352,7 @@ export function RunTracePage() {
       )}
 
       {run.status === "waiting_for_user" && (
-        <HumanCheckpointPanel run={run} events={events} onChanged={refresh} />
+        <HumanCheckpointPanel run={run} events={events} readiness={readiness} onChanged={refresh} />
       )}
 
       {run.status === "succeeded" && (

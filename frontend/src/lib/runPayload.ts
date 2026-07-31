@@ -1,6 +1,13 @@
 import type { CreateEpisodeRunInput } from "../api/types";
 
 export function createEpisodeRunRequest(input: CreateEpisodeRunInput) {
+  if (
+    input.writingSamples.length > 0 &&
+    (!input.writingStyleConsent.ownershipAttested ||
+      !input.writingStyleConsent.modelProcessingConsent)
+  ) {
+    throw new Error("writing samples require ownership and model-processing consent");
+  }
   const writingStyleReference = input.writingSamples.length
     ? {
         version: "writing_style_reference_v1" as const,
@@ -8,8 +15,8 @@ export function createEpisodeRunRequest(input: CreateEpisodeRunInput) {
           source_id: sample.sourceId,
           sample_kind: sample.sampleKind,
         })),
-        ownership_attested: true as const,
-        model_processing_consent: true as const,
+        ownership_attested: input.writingStyleConsent.ownershipAttested,
+        model_processing_consent: input.writingStyleConsent.modelProcessingConsent,
         usage: "style_only" as const,
       }
     : undefined;

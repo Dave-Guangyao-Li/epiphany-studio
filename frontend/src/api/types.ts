@@ -156,12 +156,35 @@ export interface CreateEpisodeRunInput {
     sourceId: string;
     sampleKind: "written_prose" | "spoken_transcript";
   }>;
+  writingStyleConsent: {
+    ownershipAttested: boolean;
+    modelProcessingConsent: boolean;
+  };
   brief: CreativeBriefForm;
 }
 
 export interface QualityReportRecord {
   report: Record<string, unknown>;
   artifact: ArtifactView;
+}
+
+export interface MaterialReadinessView {
+  status: "ready" | "needs_more_material";
+  targetDurationMinutes: number;
+  currentSourceCharCount: number;
+  requiredSourceCharCount: number;
+  additionalSourceCharsNeeded: number;
+  estimatedSupportedMinutesLow: number;
+  estimatedSupportedMinutesHigh: number;
+  gaps: Array<{
+    code: string;
+    title: string;
+    detail: string;
+  }>;
+  followUpQuestions: Array<{
+    prompt: string;
+    purpose: string;
+  }>;
 }
 
 export interface ImprovementPlanRecord {

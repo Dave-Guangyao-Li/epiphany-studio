@@ -20,6 +20,8 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
   const [topic, setTopic] = useState("");
   const [factualIds, setFactualIds] = useState<string[]>([]);
   const [styleIds, setStyleIds] = useState<string[]>([]);
+  const [ownershipAttested, setOwnershipAttested] = useState(false);
+  const [modelProcessingConsent, setModelProcessingConsent] = useState(false);
   const [duration, setDuration] = useState<10 | 15 | 30>(10);
   const [scenario, setScenario] = useState<EpisodeScenario>("reflective_solo");
   const [audience, setAudience] = useState("未来的自己，以及正在经历相似转折的听众");
@@ -42,6 +44,10 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
           ? "spoken_transcript"
           : "written_prose",
     })),
+    writingStyleConsent: {
+      ownershipAttested,
+      modelProcessingConsent,
+    },
     brief: {
       targetDurationMinutes: duration,
       scenario,
@@ -51,9 +57,18 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
       mustInclude: splitList(mustInclude).slice(0, 10),
       avoidPatterns: splitList(avoidPatterns).slice(0, 10),
     },
-  }), [audience, avoidPatterns, duration, factualIds, goal, mustInclude, scenario, sources, styleIds, tone, topic]);
+  }), [audience, avoidPatterns, duration, factualIds, goal, modelProcessingConsent, mustInclude, ownershipAttested, scenario, sources, styleIds, tone, topic]);
+
+  function resetStyleConsent() {
+    setOwnershipAttested(false);
+    setModelProcessingConsent(false);
+  }
+
+  const styleConsentReady =
+    !styleIds.length || (ownershipAttested && modelProcessingConsent);
 
   function toggleFactual(sourceId: string) {
+    if (styleIds.includes(sourceId)) resetStyleConsent();
     setStyleIds((current) => current.filter((id) => id !== sourceId));
     setFactualIds((current) =>
       current.includes(sourceId) ? current.filter((id) => id !== sourceId) : [...current, sourceId],
@@ -61,6 +76,9 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
   }
 
   function toggleStyle(sourceId: string) {
+    // Consent applies to the exact selected set. Adding, removing, or replacing
+    // a sample requires a fresh confirmation instead of carrying old consent.
+    resetStyleConsent();
     setFactualIds((current) => current.filter((id) => id !== sourceId));
     setStyleIds((current) =>
       current.includes(sourceId) ? current.filter((id) => id !== sourceId) : [...current, sourceId],
@@ -69,7 +87,7 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
 
   async function createRun(event: FormEvent) {
     event.preventDefault();
-    if (!topic.trim() || !factualIds.length) return;
+    if (!topic.trim() || !factualIds.length || !styleConsentReady) return;
     const fingerprint = JSON.stringify(createEpisodeRunRequest(input));
     if (retryRef.current?.fingerprint !== fingerprint) {
       retryRef.current = { fingerprint, submissionId: submissionId() };
@@ -108,6 +126,7 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
             <label className={`source-choice ${factualIds.includes(source.id) ? "selected" : ""}`} key={source.id}>
               <input
                 type="checkbox"
+                aria-label={`作为事实素材选择：${source.title}`}
                 checked={factualIds.includes(source.id)}
                 disabled={!factualIds.includes(source.id) && factualIds.length >= 20}
                 onChange={() => toggleFactual(source.id)}
@@ -156,6 +175,7 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
                 <label className={`source-choice ${styleIds.includes(source.id) ? "selected style" : ""}`} key={source.id}>
                   <input
                     type="checkbox"
+                    aria-label={`作为风格样本选择：${source.title}`}
                     checked={styleIds.includes(source.id)}
                     disabled={!styleIds.includes(source.id) && styleIds.length >= 5}
                     onChange={() => toggleStyle(source.id)}
@@ -165,12 +185,33 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
               ))}
             </div>
           </fieldset>
+          {styleIds.length > 0 && (
+            <fieldset className="style-consent-panel">
+              <legend>写作样本授权确认 <span>两项都确认后才能启动</span></legend>
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={ownershipAttested}
+                  onChange={(event) => setOwnershipAttested(event.target.checked)}
+                />
+                我确认自己拥有所选样本，或已获得使用这些内容的权限
+              </label>
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={modelProcessingConsent}
+                  onChange={(event) => setModelProcessingConsent(event.target.checked)}
+                />
+                我同意将所选样本发送给模型，仅用于分析表达风格，不作为本期事实来源
+              </label>
+            </fieldset>
+          )}
         </div>
       )}
 
       <div className="run-submit-row">
         <span>{selectedCount ? `已选择 ${factualIds.length} 份事实素材${styleIds.length ? `、${styleIds.length} 份风格样本` : ""}` : "先选择事实素材"}</span>
-        <button className="button primary" disabled={submitting || !topic.trim() || !factualIds.length}>
+        <button className="button primary" disabled={submitting || !topic.trim() || !factualIds.length || !styleConsentReady}>
           {submitting ? "正在创建…" : "启动 Agent Run"}
         </button>
       </div>

@@ -7,6 +7,10 @@ describe("episode Run payload", () => {
       topic: " 五年后重新打开播客 ",
       factualSourceIds: ["src_fact_1", "src_fact_2"],
       writingSamples: [{ sourceId: "src_style", sampleKind: "spoken_transcript" }],
+      writingStyleConsent: {
+        ownershipAttested: true,
+        modelProcessingConsent: true,
+      },
       brief: {
         targetDurationMinutes: 15,
         scenario: "reflective_solo",
@@ -28,6 +32,49 @@ describe("episode Run payload", () => {
       usage: "style_only",
       samples: [{ source_id: "src_style", sample_kind: "spoken_transcript" }],
     });
+  });
+
+  it("refuses style samples without both explicit confirmations", () => {
+    expect(() => createEpisodeRunRequest({
+      topic: "测试",
+      factualSourceIds: ["src_fact"],
+      writingSamples: [{ sourceId: "src_style", sampleKind: "written_prose" }],
+      writingStyleConsent: {
+        ownershipAttested: true,
+        modelProcessingConsent: false,
+      },
+      brief: {
+        targetDurationMinutes: 10,
+        scenario: "reflective_solo",
+        targetAudience: "听众",
+        communicationGoal: "说明变化",
+        tone: ["自然"],
+        mustInclude: [],
+        avoidPatterns: [],
+      },
+    })).toThrow(/ownership and model-processing consent/);
+  });
+
+  it("does not require or send a consent contract without style samples", () => {
+    const request = createEpisodeRunRequest({
+      topic: "只使用事实素材",
+      factualSourceIds: ["src_fact"],
+      writingSamples: [],
+      writingStyleConsent: {
+        ownershipAttested: false,
+        modelProcessingConsent: false,
+      },
+      brief: {
+        targetDurationMinutes: 10,
+        scenario: "reflective_solo",
+        targetAudience: "听众",
+        communicationGoal: "说明变化",
+        tone: ["自然"],
+        mustInclude: [],
+        avoidPatterns: [],
+      },
+    });
+    expect(request.payload).not.toHaveProperty("writing_style_reference");
   });
 
   it("normalizes comma/newline lists and removes duplicates", () => {
