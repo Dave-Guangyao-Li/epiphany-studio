@@ -8,6 +8,7 @@ import epiphany.length_recovery_e2e as length_recovery_e2e
 from epiphany.length_recovery_e2e import (
     DEFAULT_FIXTURE_PATH,
     _log_summary,
+    _post_revision_plan_summary,
     _sensitive_log_fragments,
     main,
 )
@@ -207,18 +208,28 @@ def test_fake_execute_closes_one_explicit_grounded_length_recovery_loop(
     revision_log = (output_dir / "revision-runtime.jsonl").read_text(encoding="utf-8")
     combined_logs = f"{parent_log}\n{revision_log}"
 
-    assert exit_code == 0, captured.err
+    assert exit_code == 1, captured.err
     assert '"event": "length_recovery_e2e.preflight"' in captured.out
     assert '"event": "length_recovery_e2e.completed"' in captured.out
-    assert report["passed"] is True
+    assert report["passed"] is False
     assert report["workflow_passed"] is True
-    assert report["content_acceptance_passed"] is True
-    assert report["failures"] == []
+    assert report["content_acceptance_passed"] is False
+    assert report["failures"]
     assert all(report["workflow_checks"].values())
-    assert all(report["content_checks"].values())
+    assert report["content_checks"]["child_reaches_duration_range"] is False
 
     assert report["workflow"]["automatic_revision_count"] == 0
     assert report["workflow"]["explicit_revision_count"] == 1
+    assert report["post_revision_next_action"] == "reuse_then_supplement"
+    assert report["child_plan"]["plan"]["duration_resolution"] == "reuse_then_supplement"
+    assert {
+        "reuse_unused_material",
+        "add_supplemental_material",
+        "lower_target_duration",
+    } <= set(report["child_plan"]["next_action"]["option_kinds"])
+    assert 3 <= len(report["child_plan"]["next_action"]["targeted_questions"]) <= 6
+    assert report["child_plan"]["next_action"]["requires_human_action"] is True
+    assert report["child_plan"]["next_action"]["automatic_follow_up_revision_created"] is False
     assert request["submission_id"] == "m3-8-realistic-length-recovery-v1"
     assert request["selected_actions"] == ["reuse_unused_material"]
     assert request["source_ids"] == []
@@ -236,14 +247,10 @@ def test_fake_execute_closes_one_explicit_grounded_length_recovery_loop(
 
     quality = report["quality"]
     assert quality["parent"]["script_character_count"] < quality["minimum_script_character_count"]
-    assert (
-        quality["minimum_script_character_count"]
-        <= quality["child"]["script_character_count"]
-        <= quality["maximum_script_character_count"]
-    )
+    assert quality["child"]["script_character_count"] < quality["minimum_script_character_count"]
     assert quality["script_character_delta"] > 0
     assert quality["parent"]["duration_status"] == "blocker"
-    assert quality["child"]["duration_status"] != "blocker"
+    assert quality["child"]["duration_status"] == "blocker"
     assert report["material_utilization"]["newly_used_priority_ref_count"] > 0
     assert report["material_utilization"]["all_material_used_required"] is False
 
@@ -255,6 +262,7 @@ def test_fake_execute_closes_one_explicit_grounded_length_recovery_loop(
         assert "## 来源索引" in markdown
     for required_output in (
         "improvement-plan.json",
+        "post-revision-improvement-plan.json",
         "parent-quality-report.json",
         "child-quality-report.json",
         "revision-comparison.json",
@@ -287,6 +295,34 @@ def test_fake_execute_closes_one_explicit_grounded_length_recovery_loop(
         assert source["text"] not in combined_logs
     for sample in fixture["writing_samples"]:
         assert sample["source"]["text"] not in combined_logs
+
+
+def test_post_revision_plan_summary_marks_an_in_range_child_as_done() -> None:
+    summary = _post_revision_plan_summary(
+        {
+            "plan": {
+                "duration_resolution": "not_needed",
+                "options": [],
+                "targeted_questions": [
+                    {"prompt": "问题一"},
+                    {"prompt": "问题二"},
+                    {"prompt": "问题三"},
+                ],
+            }
+        }
+    )
+
+    assert summary == {
+        "duration_resolution": "not_needed",
+        "option_kinds": [],
+        "targeted_questions": [
+            {"prompt": "问题一"},
+            {"prompt": "问题二"},
+            {"prompt": "问题三"},
+        ],
+        "requires_human_action": False,
+        "automatic_follow_up_revision_created": False,
+    }
 
 
 def test_failed_child_preserves_real_error_usage_and_safety_without_child_outputs(
@@ -346,6 +382,9 @@ def test_failed_child_preserves_real_error_usage_and_safety_without_child_output
     assert report["workflow"]["reviewer_requested"] is False
     assert report["workflow"]["comparison_requested"] is False
     assert report["workflow"]["comparison_artifact_id"] is None
+    assert report["workflow"]["child_improvement_plan_requested"] is False
+    assert report["post_revision_next_action"] is None
+    assert report["child_plan"] is None
     assert report["quality"]["parent"]["script_character_count"] > 0
     assert report["quality"]["child"] == {
         "status": "not_evaluated",
@@ -376,6 +415,7 @@ def test_failed_child_preserves_real_error_usage_and_safety_without_child_output
         row.get("path")
         in {
             f"/runs/{child_id}/quality-report",
+            f"/runs/{child_id}/improvement-plan",
             f"/runs/{child_id}/revision-comparison",
             f"/runs/{child_id}/exports/podcast-draft.md",
             f"/runs/{child_id}/exports/show-notes.md",
@@ -386,6 +426,7 @@ def test_failed_child_preserves_real_error_usage_and_safety_without_child_output
     assert "artifact_not_unique" not in json.dumps(report)
     assert report["outputs"]["comparison"] is None
     assert report["outputs"]["child_quality_json"] is None
+    assert report["outputs"]["child_improvement_plan"] is None
     assert set(report["outputs"]["markdown"]) == {
         "parent-podcast-draft",
         "parent-show-notes",
@@ -397,6 +438,7 @@ def test_failed_child_preserves_real_error_usage_and_safety_without_child_output
         "child-quality-report.md",
         "child-quality-report.json",
         "revision-comparison.json",
+        "post-revision-improvement-plan.json",
     ):
         assert not (output_dir / absent_output).exists()
     assert _database_counts(database_path) == {

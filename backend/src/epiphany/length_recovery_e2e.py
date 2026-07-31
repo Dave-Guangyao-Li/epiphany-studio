@@ -127,6 +127,42 @@ def _script_reference_keys(artifact: dict[str, Any]) -> set[tuple[str, str]]:
     return set(editor_spoken_script_reference_keys(content))
 
 
+def _plan_body(payload: object, *, stage: str) -> dict[str, Any]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("plan"), dict):
+        raise E2EFlowError(stage=stage, code="plan_invalid")
+    return payload["plan"]
+
+
+def _priority_reference_keys(plan_body: dict[str, Any]) -> set[tuple[str, str]]:
+    material = plan_body["material"]
+    references = (
+        material.get("priority_candidate_source_refs", [])
+        if material.get("priority_candidates_assessed") is True
+        else material.get("unused_source_refs", [])
+    )
+    return {(str(item["source_id"]), str(item["source_segment_id"])) for item in references}
+
+
+def _post_revision_plan_summary(payload: object) -> dict[str, Any]:
+    plan = _plan_body(payload, stage="child_improvement_plan")
+    resolution = str(plan["duration_resolution"])
+    options = [
+        str(option["kind"])
+        for option in plan.get("options", [])
+        if isinstance(option, dict) and isinstance(option.get("kind"), str)
+    ]
+    questions = [
+        question for question in plan.get("targeted_questions", []) if isinstance(question, dict)
+    ]
+    return {
+        "duration_resolution": resolution,
+        "option_kinds": options,
+        "targeted_questions": questions,
+        "requires_human_action": resolution != "not_needed",
+        "automatic_follow_up_revision_created": False,
+    }
+
+
 def _quality_report(payload: object) -> DraftQualityReport:
     if not isinstance(payload, dict) or not isinstance(payload.get("report"), dict):
         raise E2EFlowError(stage="quality", code="quality_report_response_invalid")
@@ -409,10 +445,7 @@ def _failed_child_revision_result(
     parent_quality = _quality_report(parent_quality_payload)
     parent_metrics = parent_quality.deterministic.metrics
     parent_refs = _script_reference_keys(parent_draft)
-    priority_refs = {
-        (item["source_id"], item["source_segment_id"])
-        for item in plan["plan"]["material"]["unused_source_refs"]
-    }
+    priority_refs = _priority_reference_keys(_plan_body(plan, stage="improvement_plan"))
     minimum, maximum = duration_character_bounds(
         int(plan["plan"]["duration"]["target_script_character_count"])
     )
@@ -481,7 +514,9 @@ def _failed_child_revision_result(
     workflow_checks = {
         "parent_workflow_succeeded": parent_before["status"] == "succeeded",
         "plan_reuses_existing_material": (
-            plan["plan"]["duration_resolution"] == "reuse_unused_material" and bool(priority_refs)
+            plan["plan"]["duration_resolution"]
+            in {"reuse_unused_material", "reuse_then_supplement"}
+            and bool(priority_refs)
         ),
         "revision_request_is_explicit_and_idempotent": (
             created["idempotent_replay"] is False
@@ -547,11 +582,14 @@ def _failed_child_revision_result(
             "plan_artifact_id": plan["artifact"]["id"],
             "revision_request_artifact_id": created["request_artifact_id"],
             "comparison_artifact_id": None,
+            "child_improvement_plan_requested": False,
             "reviewer_requested": False,
             "comparison_requested": False,
             "automatic_revision_count": 0,
             "explicit_revision_count": 1,
         },
+        "post_revision_next_action": None,
+        "child_plan": None,
         "material_utilization": {
             "priority_unused_ref_count": len(priority_refs),
             "parent_spoken_ref_count": len(parent_refs),
@@ -597,6 +635,7 @@ def _failed_child_revision_result(
         "content_failures": content_failures,
         "outputs": {
             "improvement_plan": str(paths.json_artifact("improvement-plan")),
+            "child_improvement_plan": None,
             "revision_request": str(paths.json_artifact("revision-request")),
             "comparison": None,
             "parent_quality_json": str(paths.json_artifact("parent-quality-report")),
@@ -609,6 +648,7 @@ def _failed_child_revision_result(
                 "child_show_notes": "child_run_failed_before_draft_commit",
                 "child_quality_report": "reviewer_not_requested",
                 "revision_comparison": "reviewer_not_requested",
+                "child_improvement_plan": "child_run_failed_before_draft_commit",
             },
         },
     }
@@ -692,12 +732,7 @@ async def _continue_with_revision(
                 )
                 if not isinstance(plan, dict):
                     raise E2EFlowError(stage="improvement_plan", code="response_invalid")
-                plan_body = plan.get("plan")
-                if not isinstance(plan_body, dict):
-                    raise E2EFlowError(
-                        stage="improvement_plan",
-                        code="plan_invalid",
-                    )
+                plan_body = _plan_body(plan, stage="improvement_plan")
                 reuse_option_available = any(
                     isinstance(option, dict) and option.get("kind") == "reuse_unused_material"
                     for option in plan_body.get("options", [])
@@ -778,6 +813,28 @@ async def _continue_with_revision(
                     )
                     if child_succeeded
                     else None
+                )
+                child_plan = (
+                    await _request_json(
+                        client,
+                        "GET",
+                        f"/runs/{child_run_id}/improvement-plan",
+                        stage="child_improvement_plan",
+                        request_id="req_m38_child_plan",
+                        expected_statuses={200},
+                    )
+                    if child_succeeded
+                    else None
+                )
+                child_after_plan = (
+                    await _get_run(
+                        client,
+                        child_run_id,
+                        stage="child_after_improvement_plan",
+                        request_id="req_m38_child_after_plan",
+                    )
+                    if child_succeeded
+                    else child
                 )
                 parent_after = await _get_run(
                     client,
@@ -873,10 +930,9 @@ async def _continue_with_revision(
     }
     parent_refs = _script_reference_keys(parent_draft)
     child_refs = _script_reference_keys(child_draft)
-    priority_refs = {
-        (item["source_id"], item["source_segment_id"])
-        for item in plan["plan"]["material"]["unused_source_refs"]
-    }
+    priority_refs = _priority_reference_keys(_plan_body(plan, stage="improvement_plan"))
+    child_plan_body = _plan_body(child_plan, stage="child_improvement_plan")
+    post_revision = _post_revision_plan_summary(child_plan)
     writing_sample_ids = {
         str(sample["source_id"])
         for sample in parent_before["input_json"]
@@ -905,7 +961,9 @@ async def _continue_with_revision(
     workflow_checks = {
         "parent_workflow_succeeded": parent_before["status"] == "succeeded",
         "plan_reuses_existing_material": (
-            plan["plan"]["duration_resolution"] == "reuse_unused_material" and bool(priority_refs)
+            plan["plan"]["duration_resolution"]
+            in {"reuse_unused_material", "reuse_then_supplement"}
+            and bool(priority_refs)
         ),
         "revision_request_is_explicit_and_idempotent": (
             created["idempotent_replay"] is False
@@ -942,6 +1000,20 @@ async def _continue_with_revision(
             isinstance(comparison, dict)
             and comparison["comparison"]["automatic_winner_selected"] is False
             and comparison["comparison"]["requires_human_review"] is True
+        ),
+        "post_revision_plan_matches_child_duration": (
+            (
+                child_metrics.script_character_count >= minimum
+                and child_plan_body["duration_resolution"] == "not_needed"
+            )
+            or (
+                child_metrics.script_character_count < minimum
+                and child_plan_body["duration_resolution"] != "not_needed"
+            )
+        ),
+        "post_revision_plan_does_not_queue_automatic_work": (
+            len(child_after_plan["tasks"]) == len(child["tasks"])
+            and len(child_after_plan["model_calls"]) == len(child["model_calls"])
         ),
     }
     parent_template_density = _density_per_1000(
@@ -1044,6 +1116,10 @@ async def _continue_with_revision(
         json.dumps(comparison, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    paths.json_artifact("post-revision-improvement-plan").write_text(
+        json.dumps(child_plan, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     forbidden = [
         *_forbidden_log_fragments(fixture, secret_values=(api_key,)),
@@ -1053,6 +1129,7 @@ async def _continue_with_revision(
         *_sensitive_log_fragments(child_draft["content_json"]),
         *_sensitive_log_fragments(parent_quality_payload),
         *_sensitive_log_fragments(child_quality_payload),
+        *_sensitive_log_fragments(child_plan),
         *(
             fragment
             for content in markdown.values()
@@ -1071,13 +1148,19 @@ async def _continue_with_revision(
     content_failures = sorted(name for name, passed in content_checks.items() if not passed)
     return {
         "parent": _safe_run_summary(parent_after),
-        "child": _safe_run_summary(child),
+        "child": _safe_run_summary(child_after_plan),
         "workflow": {
             "plan_artifact_id": plan["artifact"]["id"],
             "revision_request_artifact_id": created["request_artifact_id"],
             "comparison_artifact_id": comparison["artifact"]["id"],
+            "child_improvement_plan_artifact_id": child_plan["artifact"]["id"],
             "automatic_revision_count": 0,
             "explicit_revision_count": 1,
+        },
+        "post_revision_next_action": post_revision["duration_resolution"],
+        "child_plan": {
+            **child_plan,
+            "next_action": post_revision,
         },
         "material_utilization": {
             "priority_unused_ref_count": len(priority_refs),
@@ -1139,6 +1222,7 @@ async def _continue_with_revision(
         "content_failures": content_failures,
         "outputs": {
             "improvement_plan": str(paths.json_artifact("improvement-plan")),
+            "child_improvement_plan": str(paths.json_artifact("post-revision-improvement-plan")),
             "revision_request": str(paths.json_artifact("revision-request")),
             "comparison": str(paths.json_artifact("revision-comparison")),
             "parent_quality_json": str(paths.json_artifact("parent-quality-report")),
