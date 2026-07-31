@@ -242,11 +242,28 @@ def test_fake_execute_closes_one_explicit_grounded_length_recovery_loop(
     assert report["failures"]
     assert all(report["workflow_checks"].values())
     assert report["content_checks"]["child_reaches_duration_range"] is False
+    assert set(report["content_failures"]) == {
+        "child_has_no_deterministic_blocker",
+        "child_reaches_duration_range",
+        "deterministic_score_not_lower",
+        "duration_blocker_removed",
+        "editorial_instruction_not_warning",
+    }
+    assert all(
+        passed
+        for name, passed in report["content_checks"].items()
+        if name not in report["content_failures"]
+    )
 
     assert report["workflow"]["automatic_revision_count"] == 0
     assert report["workflow"]["explicit_revision_count"] == 1
-    assert report["post_revision_next_action"] == "reuse_then_supplement"
-    assert report["child_plan"]["plan"]["duration_resolution"] == "reuse_then_supplement"
+    assert report["post_revision_next_action"] == "add_supplemental_material"
+    assert report["child_plan"]["plan"]["duration_resolution"] == "add_supplemental_material"
+    assert report["child_plan"]["plan"]["prior_length_recovery_attempted"] is True
+    child_options = {option["kind"]: option for option in report["child_plan"]["plan"]["options"]}
+    assert child_options["reuse_unused_material"]["recommended"] is False
+    assert child_options["add_supplemental_material"]["recommended"] is True
+    assert child_options["lower_target_duration"]["recommended"] is True
     assert {
         "reuse_unused_material",
         "add_supplemental_material",

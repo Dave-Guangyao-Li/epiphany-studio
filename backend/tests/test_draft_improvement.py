@@ -217,6 +217,7 @@ def _build(
     with_material_gap: bool = False,
     selected_feedback_codes: tuple[str, ...] = (),
     writing_style_context_available: bool = False,
+    prior_length_recovery_attempted: bool = False,
     draft: PodcastDraftOutput | None = None,
 ) -> DraftImprovementPlan:
     selected_draft = draft or _draft()
@@ -234,6 +235,7 @@ def _build(
         quality_report=_report(selected_draft, editor_input),
         interview_scaffold=editor_input["interview_scaffold"],
         writing_style_context_available=writing_style_context_available,
+        prior_length_recovery_attempted=prior_length_recovery_attempted,
         selected_feedback_codes=selected_feedback_codes,
     )
 
@@ -492,6 +494,8 @@ def test_pre_m38_v1_plan_inside_tolerance_remains_readable() -> None:
         draft=draft,
     )
     legacy = current.model_dump(mode="json")
+    legacy["schema_version"] = "draft_improvement_plan_v1"
+    legacy.pop("prior_length_recovery_attempted")
     legacy["material"].pop("priority_candidates_assessed")
     legacy["material"].pop("priority_candidate_character_count")
     legacy["material"].pop("priority_candidate_source_refs")
@@ -514,6 +518,7 @@ def test_pre_m38_v1_plan_inside_tolerance_remains_readable() -> None:
     assert parsed.duration.actual_script_character_count < target_characters
     assert parsed.duration_resolution == "reuse_unused_material"
     assert parsed.material.priority_candidates_assessed is False
+    assert parsed.prior_length_recovery_attempted is False
 
     recovery = build_draft_length_recovery_plan(
         improvement_plan=parsed,
@@ -565,6 +570,26 @@ def test_insufficient_unused_material_recommends_supplement_and_lower_preset() -
     assert options["add_supplemental_material"].recommended is True
     assert options["lower_target_duration"].recommended is False
     assert options["lower_target_duration"].suggested_target_duration_minutes == 10
+
+
+def test_prior_length_recovery_attempt_stops_recommending_consecutive_expansion() -> None:
+    plan = _build(
+        target_minutes=15,
+        unused_text="仍然存在但不应被连续自动扩写的具体材料。" * 300,
+        prior_length_recovery_attempted=True,
+    )
+
+    assert plan.schema_version == DRAFT_IMPROVEMENT_PLAN_VERSION
+    assert plan.prior_length_recovery_attempted is True
+    assert plan.duration_resolution == "add_supplemental_material"
+    options = {option.kind: option for option in plan.options}
+    assert options["reuse_unused_material"].recommended is False
+    assert "不再推荐连续扩写" in options["reuse_unused_material"].explanation
+    assert options["add_supplemental_material"].recommended is True
+    assert "一次有来源的恢复后仍未达到最低时长" in (
+        options["add_supplemental_material"].explanation
+    )
+    assert options["lower_target_duration"].recommended is True
 
 
 def test_no_unused_material_only_recommends_targeted_supplement() -> None:

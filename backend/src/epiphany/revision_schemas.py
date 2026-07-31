@@ -17,7 +17,8 @@ from epiphany.editor_schemas import (
 from epiphany.quality_contract_schemas import DURATION_TOLERANCE_RATIO
 from epiphany.schemas import ArtifactView, RunView, SourceReference
 
-DRAFT_IMPROVEMENT_PLAN_VERSION = "draft_improvement_plan_v1"
+LEGACY_DRAFT_IMPROVEMENT_PLAN_VERSION = "draft_improvement_plan_v1"
+DRAFT_IMPROVEMENT_PLAN_VERSION = "draft_improvement_plan_v2_recovery_history"
 DRAFT_REVISION_REQUEST_VERSION = "draft_revision_request_v1"
 DRAFT_REVISION_COMPARISON_VERSION = "draft_revision_comparison_v1"
 REVISE_PODCAST_DRAFT = "revise_podcast_draft"
@@ -283,11 +284,15 @@ class DraftImprovementPlan(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["draft_improvement_plan_v1"] = DRAFT_IMPROVEMENT_PLAN_VERSION
+    schema_version: Literal[
+        "draft_improvement_plan_v1",
+        "draft_improvement_plan_v2_recovery_history",
+    ] = DRAFT_IMPROVEMENT_PLAN_VERSION
     parent_run_id: str = Field(min_length=1, max_length=200)
     parent_draft_artifact_id: str = Field(min_length=1, max_length=200)
     quality_report_artifact_id: str = Field(min_length=1, max_length=200)
     writing_style_context_available: bool
+    prior_length_recovery_attempted: bool = False
     selected_feedback_codes: list[str] = Field(default_factory=list, max_length=50)
     duration: DraftDurationGap
     material: UnusedFactualMaterial
@@ -310,6 +315,11 @@ class DraftImprovementPlan(BaseModel):
 
     @model_validator(mode="after")
     def option_and_resolution_state_must_be_consistent(self) -> DraftImprovementPlan:
+        if (
+            self.schema_version == LEGACY_DRAFT_IMPROVEMENT_PLAN_VERSION
+            and self.prior_length_recovery_attempted
+        ):
+            raise ValueError("legacy improvement plans cannot record recovery history")
         option_kinds = [option.kind for option in self.options]
         if len(option_kinds) != len(set(option_kinds)):
             raise ValueError("improvement option kinds must be unique")

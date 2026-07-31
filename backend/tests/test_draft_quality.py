@@ -417,6 +417,39 @@ def test_versioned_chinese_style_categories_report_counts_quotes_and_locations()
     assert all(finding.exact_quote for finding in categorized_findings.values())
 
 
+def test_enumeration_does_not_count_ordinary_uses_of_last() -> None:
+    content = _good_draft().model_dump(mode="python")
+    content["podcast_script"]["opening"]["text"] = (
+        "我拉着最后一个空行李箱下楼，最后用报纸包好那只碗，最后取消了订单。"
+    )
+
+    result = analyze_podcast_draft(draft=content, creative_brief=_brief())
+    finding = next(item for item in result.findings if item.code == "style.zh.enumeration")
+
+    assert result.metrics.chinese_style_pattern_counts.enumeration == 0
+    assert finding.status == "pass"
+
+
+def test_editorial_instructions_in_spoken_text_are_reported_for_review() -> None:
+    content = _good_draft().model_dump(mode="python")
+    content["podcast_script"]["sections"][0]["paragraphs"][0]["text"] += (
+        "还有一点需要在正文里解释。这句话有点抽象，如果要用，前面一定要先放具体场景。"
+    )
+
+    result = analyze_podcast_draft(draft=content, creative_brief=_brief())
+    finding = next(
+        item for item in result.findings if item.code == "style.editorial_instruction_leakage"
+    )
+    facts = build_deterministic_quality_facts(result)
+
+    assert result.metrics.editorial_instruction_phrase_count >= 1
+    assert finding.status == "warning"
+    assert finding.exact_quote
+    assert facts.editorial_instruction_phrase_count == (
+        result.metrics.editorial_instruction_phrase_count
+    )
+
+
 def test_sentence_and_paragraph_cv_warn_only_with_enough_samples() -> None:
     uniform = _good_draft().model_dump(mode="python")
     uniform["podcast_script"]["opening"]["text"] = "甲乙丙丁。"

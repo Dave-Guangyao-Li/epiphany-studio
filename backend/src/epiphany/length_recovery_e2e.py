@@ -630,6 +630,9 @@ def _failed_child_revision_result(
                 "deterministic_score": parent_quality.deterministic.deterministic_score,
                 "warning_count": _warning_count(parent_quality),
                 "non_duration_warning_count": _non_duration_warning_count(parent_quality),
+                "editorial_instruction_phrase_count": (
+                    parent_metrics.editorial_instruction_phrase_count
+                ),
                 "template_phrase_density_per_1000_chars": parent_template_density,
                 "not_but_density_per_1000_chars": parent_not_but_density,
                 "chinese_style_density_per_1000_chars": _chinese_style_density(parent_quality),
@@ -1082,6 +1085,13 @@ async def _continue_with_revision(
         )
         != "warning",
         "filler_not_warning": _finding_status(child_quality, "style.filler_phrases") != "warning",
+        "editorial_instruction_not_warning": (
+            _finding_status(
+                child_quality,
+                "style.editorial_instruction_leakage",
+            )
+            != "warning"
+        ),
         "avoid_pattern_hits_not_higher": (
             child_metrics.avoid_pattern_hit_count <= parent_metrics.avoid_pattern_hit_count
         ),
@@ -1203,6 +1213,9 @@ async def _continue_with_revision(
                 "deterministic_score": parent_quality.deterministic.deterministic_score,
                 "warning_count": _warning_count(parent_quality),
                 "non_duration_warning_count": _non_duration_warning_count(parent_quality),
+                "editorial_instruction_phrase_count": (
+                    parent_metrics.editorial_instruction_phrase_count
+                ),
                 "template_phrase_density_per_1000_chars": parent_template_density,
                 "not_but_density_per_1000_chars": parent_not_but_density,
                 "chinese_style_density_per_1000_chars": (parent_chinese_style_density),
@@ -1223,6 +1236,9 @@ async def _continue_with_revision(
                 ),
                 "warning_count": _warning_count(child_quality),
                 "non_duration_warning_count": _non_duration_warning_count(child_quality),
+                "editorial_instruction_phrase_count": (
+                    child_metrics.editorial_instruction_phrase_count
+                ),
                 "template_phrase_density_per_1000_chars": child_template_density,
                 "not_but_density_per_1000_chars": child_not_but_density,
                 "chinese_style_density_per_1000_chars": (child_chinese_style_density),

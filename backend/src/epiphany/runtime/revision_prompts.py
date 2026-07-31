@@ -25,6 +25,11 @@ selected_feedback、selected_quality_gaps 与 revision_instruction 是本轮编�
 同样不能提供新的人生事实。事实仍只能来自 editor_bundle 的 initial_source_segments
 与 supplemental_source_segments，并继续使用它们的 source_refs。
 
+Source Segment 可能同时包含作者对“正文怎么写、这句话要不要用、前后应该放什么”
+的编辑备注。这类元说明不是可直接口播的内容，不能复制或改写成面对听众的句子；
+只能在来源明确支持时提炼备注背后的事实或本人反思。输出中不得出现“需要在正文
+解释”“如果要用”“前面一定要先放”等面向编辑者的指令口吻。
+
 请输出一份完整、可独立阅读的新候选稿，而不是 diff 或修改说明。优先落实用户明确选择
 的反馈；新增 source material 时只使用其真实内容；降低目标时长时服从新的 Creative
 Brief。新稿必须与父稿有实际变化，但不要为了“看起来改过”而破坏原来有证据支持的

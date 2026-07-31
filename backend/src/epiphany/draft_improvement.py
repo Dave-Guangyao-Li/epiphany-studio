@@ -293,6 +293,7 @@ def build_draft_improvement_plan(
     quality_report: DraftQualityReport | dict[str, Any],
     interview_scaffold: InterviewScaffoldOutput | dict[str, Any],
     writing_style_context_available: bool,
+    prior_length_recovery_attempted: bool = False,
     selected_feedback_codes: Sequence[str] = (),
 ) -> DraftImprovementPlan:
     """Build a deterministic revision plan without calling a model.
@@ -422,6 +423,8 @@ def build_draft_improvement_plan(
 
     if not missing_to_minimum_characters:
         resolution = "not_needed"
+    elif prior_length_recovery_attempted:
+        resolution = "add_supplemental_material"
     elif priority_characters >= missing_to_minimum_characters:
         resolution = "reuse_unused_material"
     elif priority_characters:
@@ -455,13 +458,21 @@ def build_draft_improvement_plan(
 
     options: list[DraftImprovementOption] = []
     if missing_to_minimum_characters and priority_segments:
-        candidate_volume_supports_attempt = priority_characters >= missing_to_minimum_characters
+        candidate_volume_supports_attempt = (
+            priority_characters >= missing_to_minimum_characters
+            and not prior_length_recovery_attempted
+        )
         options.append(
             DraftImprovementOption(
                 kind="reuse_unused_material",
                 recommended=candidate_volume_supports_attempt,
                 explanation=(
                     (
+                        "本稿已经完成一次有来源的时长恢复；剩余片段仍可供人工挑选，"
+                        "但系统不再推荐连续扩写，以免用重复或低价值内容强行凑时长。"
+                    )
+                    if prior_length_recovery_attempted
+                    else (
                         "已筛选的候选事实片段，其原始字数足以支持一次受控扩写尝试；"
                         "这不保证修改后一定达到时长，仍需检查信息增量、重复与口播质量。"
                     )
@@ -474,13 +485,28 @@ def build_draft_improvement_plan(
                 source_refs=priority_refs,
             )
         )
-    if missing_to_minimum_characters > priority_characters or bool(parsed_scaffold.material_gaps):
+    if (
+        prior_length_recovery_attempted
+        or missing_to_minimum_characters > priority_characters
+        or bool(parsed_scaffold.material_gaps)
+    ):
         options.append(
             DraftImprovementOption(
                 kind="add_supplemental_material",
-                recommended=missing_to_minimum_characters > priority_characters,
+                recommended=(
+                    prior_length_recovery_attempted
+                    or missing_to_minimum_characters > priority_characters
+                ),
                 explanation=(
-                    "筛选后的候选材料原始字数不足以支持一次完整扩写，或采访脚手架仍有明确材料缺口。"
+                    (
+                        "一次有来源的恢复后仍未达到最低时长；下一步应回答有锚点的"
+                        "补充问题，引入新的具体事实、场景或感受，而不是连续扩写同一批素材。"
+                    )
+                    if prior_length_recovery_attempted
+                    else (
+                        "筛选后的候选材料原始字数不足以支持一次完整扩写，或采访"
+                        "脚手架仍有明确材料缺口。"
+                    )
                 ),
                 source_refs=_unique_source_references(
                     [
@@ -496,8 +522,15 @@ def build_draft_improvement_plan(
         options.append(
             DraftImprovementOption(
                 kind="lower_target_duration",
-                recommended=False,
-                explanation="如果不想补充材料，可以选择更低的预设口播时长。",
+                recommended=prior_length_recovery_attempted,
+                explanation=(
+                    (
+                        "本稿已尝试一次有来源的恢复；如果不想继续补充具体材料，"
+                        "可以把目标调整到更接近当前可支持内容的预设时长。"
+                    )
+                    if prior_length_recovery_attempted
+                    else "如果不想补充材料，可以选择更低的预设口播时长。"
+                ),
                 suggested_target_duration_minutes=lower_preset,
             )
         )
@@ -516,6 +549,7 @@ def build_draft_improvement_plan(
             parent_draft_artifact_id=parent_draft_artifact_id,
             quality_report_artifact_id=quality_report_artifact_id,
             writing_style_context_available=writing_style_context_available,
+            prior_length_recovery_attempted=prior_length_recovery_attempted,
             selected_feedback_codes=normalized_feedback_codes,
             duration=duration,
             material=material,

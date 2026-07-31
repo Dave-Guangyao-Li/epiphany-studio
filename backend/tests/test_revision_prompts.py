@@ -4,7 +4,10 @@ from epiphany.revision_schemas import (
     DraftLengthRecoveryPlan,
     PodcastRevisionTaskInput,
 )
-from epiphany.runtime.revision_prompts import _length_recovery_instructions
+from epiphany.runtime.revision_prompts import (
+    _REVISION_INSTRUCTIONS,
+    _length_recovery_instructions,
+)
 
 
 def _recovery_task(
@@ -55,6 +58,13 @@ def test_sufficient_length_recovery_prompt_forbids_no_change_and_requires_new_ev
     assert "可以扩写已有段落，也可以增加一个有叙事作用的 section" in instructions
     assert "最大化信息增量版本" in instructions
     assert "不得以素材可能不足为理由原样返回父稿" in instructions
+
+
+def test_revision_prompt_forbids_editorial_notes_from_leaking_into_spoken_text() -> None:
+    assert "编辑备注" in _REVISION_INSTRUCTIONS
+    assert "需要在正文" in _REVISION_INSTRUCTIONS
+    assert "如果要用" in _REVISION_INSTRUCTIONS
+    assert "不得出现" in _REVISION_INSTRUCTIONS
 
 
 def test_length_recovery_prompt_is_absent_without_the_explicit_action() -> None:

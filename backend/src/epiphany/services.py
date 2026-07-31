@@ -689,6 +689,11 @@ class RunService:
                             writing_style_context_available=(
                                 _writing_style_context_is_ready(editor_task.input_json)
                             ),
+                            prior_length_recovery_attempted=(
+                                draft.kind == f"{REVISE_PODCAST_DRAFT}_result"
+                                and "reuse_unused_material"
+                                in editor_task.input_json.get("selected_actions", [])
+                            ),
                         )
                     except (DraftImprovementPlanInputError, KeyError) as error:
                         raise DraftImprovementPlanNotReady(
@@ -730,6 +735,9 @@ class RunService:
                             "writing_style_context_available": (
                                 plan.writing_style_context_available
                             ),
+                            "prior_length_recovery_attempted": (
+                                plan.prior_length_recovery_attempted
+                            ),
                         },
                     )
                 try:
@@ -756,6 +764,7 @@ class RunService:
                     minimum_characters - plan.duration.actual_script_character_count,
                 ),
                 "unused_factual_segment_count": (plan.material.unused_factual_segment_count),
+                "prior_length_recovery_attempted": (plan.prior_length_recovery_attempted),
             },
         )
         return DraftImprovementPlanRecord(plan=plan, artifact=artifact_view)

@@ -271,6 +271,7 @@ class DeterministicDraftMetrics(BaseModel):
     filler_phrase_density_per_1000_chars: float = Field(ge=0)
     template_phrase_count: int
     not_but_pattern_count: int
+    editorial_instruction_phrase_count: int = Field(default=0, ge=0)
     rules_version: Literal[
         "draft_quality_rules_v1",
         "draft_quality_rules_v2_chinese_calibration",
@@ -351,6 +352,7 @@ class DeterministicQualityFacts(BaseModel):
     filler_phrase_count: int = Field(ge=0)
     template_phrase_count: int = Field(ge=0)
     not_but_pattern_count: int = Field(ge=0)
+    editorial_instruction_phrase_count: int = Field(default=0, ge=0)
 
     _normalize_duration_code = field_validator("duration_finding_code")(_normalize_required_text)
 
