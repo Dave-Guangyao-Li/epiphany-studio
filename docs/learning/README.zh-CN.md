@@ -1,6 +1,6 @@
 # Epiphany Studio 学习实践手册
 
-更新时间：2026-07-30
+更新时间：2026-07-31
 
 ## 这套手册解决什么问题
 
@@ -55,7 +55,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 19. [M3.6：授权写作样本与显式 Revision 子 Run](m3-6-guided-revision-writing-style.zh-CN.md)
 20. [M3.7a：写作样本 A/B 的冻结输入与零费用预检](m3-7a-writing-style-ab-preflight.zh-CN.md)
 21. [M3.7b/c：受控写作样本 A/B 与匿名盲评](m3-7bc-controlled-writing-style-experiment.zh-CN.md)
-22. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+22. [M3.7d：真实量级合成人设、写作样本 A/B 与匿名合成评审](../experiments/m3-7d-realistic-persona-e2e.zh-CN.md)
+23. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -82,6 +83,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M3.6 | 用授权写作样本约束风格，并由用户显式创建可追溯 Revision 子 Run | 292 tests + Fake E2E 已验证；真实 DeepSeek E2E 待执行 | `f418331`、`ab55b6b`、`53bb478` |
 | M3.7a | 冻结同一份 v8 Editor 输入，证明 Sample A/B 只改变写作风格上下文 | 308 tests + Fake v8 手动预检通过；零模型调用 | 本次 focused commit |
 | M3.7b/c | 有界生成两稿、同条件 Reviewer、匿名真人盲评与揭盲 | 310 tests + DeepSeek 4/4 调用 + 真人揭盲通过；因区分度不足结论为 inconclusive，M3 已冻结 | 本次 focused commit |
+| M3.7d | 用完整虚构人设复跑持久化主流程和 Sample A/B | 315 tests + DeepSeek 主流程 5 次调用 + A/B 4/4；候选可区分并有方向性合成证据，M3 仍冻结 | `3fdf8c1`—`3b01f9b` |
 
 ## 当前系统已经能做什么
 
@@ -241,6 +243,14 @@ Sample 的 B 为 2/5，两稿可录性均为 3/5。但 10 个口播单元中 9 �
 `inconclusive_low_distinctness / directional_only`。blind v2 会在未来的
 盲评中自动执行这项检查，避免从几乎相同的候选中制造“赢家”。
 
+M3.7d 没有继续扩张生产功能，而是用一个更接近真实用户规模的固定合成人设
+复验同一机制。新候选只有 18.75% 的口播单元逐字相同，合成盲评在揭盲前偏好
+有 Sample 的候选；但它被明确标记为 `human_rating=false`，只能作为方向性
+证据。更重要的发现是：4,679 个 grounded 字符已经足够支撑目标时长，Editor
+却只写出约 6.4—6.7 分钟，因此下一步应先用现有未充分利用的素材创建 Revision，
+而不是机械要求用户继续补充。完整复现命令、费用和失败分析见
+[M3.7d 实验报告](../experiments/m3-7d-realistic-persona-e2e.zh-CN.md)。
+
 用户反馈与自动报告分开保存。自动 E2E 使用的 `synthetic_test` 永远是
 `human_signal_eligible=false`。当前无鉴权 MVP 的 origin 是调用方自报标签，
 不是已验证真人身份。详细原理、Swagger 和测试命令见
@@ -298,8 +308,9 @@ Run 使用 16,667 input tokens、9,468 output tokens、73,018 ms Provider
 - Flash 与 Pro 属于同一 DeepSeek 家族，不等于跨家族独立裁判；
 - 已能显式生成 Revision 子 Run，但尚未做真实 DeepSeek M3.6 E2E 与本人
   写作样本内容复核；
-- M3.7b/c 的一次真实 DeepSeek 单 pair、本人盲评和揭盲均已完成，但候选区分
-  度不足，不能证明合成 Sample 有效，更不能代表真实个人写作 Sample；
+- M3.7b/c 的首个真人盲评 pair 因区分度不足不能证明 Sample 有效；M3.7d 的
+  真实量级合成人设已产生可区分候选和方向性正信号，但合成评审仍不能代表
+  真实用户私有 Sample 的“像不像我、愿不愿意录”；
 - comparison 只给出差异证据，不会替用户选择最终稿；
 - 尚未提供可视化采访脚手架和播客稿 editor；
 - M3.2 的 Editor 已通过合成素材真实调用，但尚未使用个人隐私素材验收；

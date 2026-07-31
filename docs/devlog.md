@@ -1,5 +1,46 @@
 # Development Log
 
+## 2026-07-31
+
+### M3.7d realistic synthetic-persona E2E
+
+- Froze one fictional but realistic corpus with three factual Sources, one
+  full supplemental transcript, and four independent style-only samples.
+  Facts and style remain disjoint.
+- Added a resumable local driver for Research, deterministic fan-in,
+  Interviewer, durable checkpoint, restart, supplemental Source, idempotent
+  Resume, Editor, quality metrics, Reviewer, exports, and frozen A/B preflight.
+- Isolated Dry Run, Fake, live main, A/B, and blind evaluation into unique
+  ignored databases and artifact directories, preserving evidence across
+  crashes or conversation disconnects.
+- Found and fixed experiment-driver configuration drift: preflight advertised
+  the product's 48,000-character Editor limit while execution inherited an old
+  32,000-character checkpoint default. The original 37,091-character bundle
+  was blocked locally before an Editor request; the driver now passes and
+  verifies the effective Settings limits without changing old E2E defaults.
+- Completed a live DeepSeek main Run with 5/5 accepted calls: 48,663 input
+  tokens, 12,121 output tokens, 89,327 ms provider time, and locally estimated
+  CNY 0.113035. One Pro Reviewer response violated the verbatim evidence
+  contract; the workflow retained deterministic results and degraded model
+  review to unavailable rather than accepting a paraphrase or silently
+  retrying.
+- Confirmed that 4,679 grounded characters could conservatively support
+  14.2--19.2 minutes, while the Editor used only 1,893 spoken characters
+  (6.76 minutes). The next product action should be a Revision using untouched
+  evidence, not another generic request for user material.
+- Completed the frozen DeepSeek A/B with 4/4 calls and no retry. Both arms were
+  duration-blocked and capped at 39, but exact spoken-unit overlap fell from
+  the earlier 0.90 to 0.1875, making the candidates distinguishable.
+- Persisted a non-human blind audit before reveal. It directionally preferred
+  the Sample candidate for voice and recordability; the record explicitly
+  remains `human_rating=false`, not user feedback or a product winner.
+- The complete experiment sequence used a locally estimated CNY 0.283416.
+  Passed all 315 backend tests, Ruff lint, the 99-file format check, and Fake
+  v8 E2E. Corpus design, commands, failures, costs, metrics, and privacy
+  boundaries are recorded in
+  `docs/experiments/m3-7d-realistic-persona-e2e.zh-CN.md`. M3 remains frozen;
+  the next product slice is M4.1 replayable SSE.
+
 ## 2026-07-30
 
 ### M3.7b/c bounded writing-style A/B execution and blind rating

@@ -431,7 +431,22 @@ M3.7a 不生成候选稿，也不声称写作样本已经有效。它只把实�
 `inconclusive_low_distinctness`，不是“Sample 获胜”。这次合成 Sample 的
 单 pair 不能证明真实个人写作样本有效。
 
-M3.7 已达到 M3 的硬性收口点。不在本阶段继续建设通用 benchmark、自动
+#### M3.7d：收口后的真实量级合成人设复验
+
+- [x] 冻结三份事实 Source、一份完整补充口述和四篇独立写作 Sample
+- [x] 跑通真实 checkpoint、进程重启、Resume 与 Editor；Reviewer 调用返回后
+  因证据合同失败而按设计降级
+- [x] 发现并修复实验驱动器 32k 与产品配置 48k 的限制漂移
+- [x] 用同一冻结输入完成四调用 DeepSeek A/B 与匿名合成评审
+
+复验得到的是方向性证据：Sample arm 已产生可辨识差异，匿名合成评审也偏好
+它的声音与可录性，但这仍不是真人证明。两稿都只有约 6.4—6.7 分钟，远低于
+15 分钟目标，最终分被硬性封顶为 39；一次 Reviewer 输出也因
+`exact_quote` 不是 Draft 逐字子串而被严格降级。这些状态应在 M4/M5 的 Trace
+界面中被看见，而不是继续用 Prompt 隐藏。完整记录见
+[M3.7d 实验报告](experiments/m3-7d-realistic-persona-e2e.zh-CN.md)。
+
+M3.7d 后已达到 M3 的硬性收口点。不在本阶段继续建设通用 benchmark、自动
 winner、多用户统计或盲评 UI；下一步转入 M4.1 可回放 SSE，再进入 M5.1
 最小可视化 Run Trace 页面。
 

@@ -544,9 +544,21 @@ so the experiment conclusion is `inconclusive_low_distinctness`. Blind v2 now
 commits deterministic distinctness metrics and treats exact overlap >= 0.70 or
 character similarity >= 0.90 as directional-only human evidence. The Source
 and writing Sample are synthetic fixtures, so this validates the live
-mechanism but not the effectiveness of a user's private Sample. M3 is complete
-and frozen; the next slice is M4.1 replayable SSE, followed by the M5.1 minimal
-Run Trace UI.
+mechanism but not the effectiveness of a user's private Sample.
+
+A post-closure realism check then replaced that undersized corpus with one
+fixed synthetic persona: three factual Sources, one full supplemental
+transcript, and four independent writing samples. The live checkpoint-to-Editor
+path completed five DeepSeek calls, and a frozen Sample/No-Sample A/B completed
+four more. The candidates became distinguishable (18.75% exact spoken-unit
+overlap rather than 90%); an independent synthetic blind audit directionally
+preferred the Sample arm for voice and recordability. This is useful test
+evidence, not human proof. Both arms still produced only about 6.4--6.7 minutes
+against a 15-minute target and remained hard-capped at 39, so Reviewer scores
+could not hide the length failure.
+
+M3 is complete and frozen; the next slice is M4.1 replayable SSE, followed by
+the M5.1 minimal Run Trace UI.
 
 See the
 [M3.6 learning chapter](docs/learning/m3-6-guided-revision-writing-style.zh-CN.md)
@@ -559,6 +571,9 @@ and the
 The bounded execution, local ledger, blind-rating contract, commands, and M3
 exit criteria are in the
 [M3.7b/c learning chapter](docs/learning/m3-7bc-controlled-writing-style-experiment.zh-CN.md).
+The larger synthetic corpus, failure audit, costs, commands, and evidence
+boundaries are in the
+[M3.7d realistic-persona experiment](docs/experiments/m3-7d-realistic-persona-e2e.zh-CN.md).
 
 ## License
 
