@@ -5,11 +5,14 @@ import sqlite3
 from pathlib import Path
 
 from epiphany.checkpoint_e2e import BACKEND_DIR
+from epiphany.config import Settings
 from epiphany.realistic_style_experiment_e2e import (
     DEFAULT_FIXTURE_PATH,
+    build_realistic_provider,
     load_realistic_style_fixture,
     main,
 )
+from epiphany.runtime.providers import DeepSeekProvider
 
 
 def _writing_sample(index: int) -> dict[str, object]:
@@ -171,10 +174,30 @@ def test_dry_run_is_read_only_and_never_prints_key_or_sample_text(
     assert preflight["factual_source_count"] == 3
     assert preflight["writing_sample_source_count"] == 4
     assert preflight["source_run_model_call_ceiling"] == 5
+    assert preflight["effective_provider_limits"] == {
+        "editor_bundle_chars": 48_000,
+        "editor_output_tokens": 20_000,
+    }
     assert secret not in captured.out
     assert sample_text not in captured.out
     assert not database_path.exists()
     assert not output_dir.exists()
+
+
+def test_realistic_provider_uses_configured_editor_limits() -> None:
+    settings = Settings(
+        deepseek_max_editor_bundle_chars=48_321,
+        deepseek_editor_max_tokens=12_345,
+    )
+    provider = build_realistic_provider(
+        provider_name="deepseek",
+        settings=settings,
+        api_key="synthetic-key",
+        model="deepseek-v4-flash",
+    )
+    assert isinstance(provider, DeepSeekProvider)
+    assert provider.max_editor_bundle_chars == 48_321
+    assert provider.editor_max_tokens == 12_345
 
 
 def test_fake_e2e_produces_v8_run_exports_redacted_logs_and_ab_contract(

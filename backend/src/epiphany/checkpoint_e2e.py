@@ -229,6 +229,8 @@ def build_provider(
     settings: Settings,
     api_key: str,
     model: Literal["deepseek-v4-flash", "deepseek-v4-pro"] = LIVE_MODEL,
+    editor_max_tokens: int = MAX_EDITOR_OUTPUT_TOKENS,
+    max_editor_bundle_chars: int = MAX_EDITOR_BUNDLE_CHARS,
 ) -> ModelProvider:
     if provider_name == "fake":
         return FakeProvider()
@@ -238,10 +240,10 @@ def build_provider(
         billing_currency=settings.deepseek_billing_currency,
         base_url=settings.deepseek_base_url,
         max_tokens=MAX_OUTPUT_TOKENS_PER_CALL,
-        editor_max_tokens=MAX_EDITOR_OUTPUT_TOKENS,
+        editor_max_tokens=editor_max_tokens,
         max_source_chars=MAX_SOURCE_CHARS,
         max_interview_bundle_chars=MAX_INTERVIEW_BUNDLE_CHARS,
-        max_editor_bundle_chars=MAX_EDITOR_BUNDLE_CHARS,
+        max_editor_bundle_chars=max_editor_bundle_chars,
         request_timeout_seconds=TASK_TIMEOUT_SECONDS + 5,
     )
 

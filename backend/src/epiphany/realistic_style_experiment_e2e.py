@@ -25,6 +25,7 @@ from epiphany.quality_contract_e2e import (
     execute_e2e,
     validate_quality_contract_fixture,
 )
+from epiphany.runtime.providers import ModelProvider
 from epiphany.schemas import CreateSourceRequest
 from epiphany.writing_style_ab import (
     build_preflight as build_writing_style_ab_preflight,
@@ -207,6 +208,7 @@ def build_preflight(
     api_key_present: bool,
     fixture: dict[str, Any],
     paths: QualityContractPaths,
+    settings: Settings,
 ) -> dict[str, Any]:
     style_chars = sum(
         len("".join(item["source"]["text"].split())) for item in fixture["writing_samples"]
@@ -233,6 +235,14 @@ def build_preflight(
         "supplemental_source_count": 1,
         "source_run_model_call_ceiling": 5,
         "subsequent_controlled_ab_call_count": 4,
+        "effective_provider_limits": {
+            "editor_bundle_chars": (
+                settings.deepseek_max_editor_bundle_chars if provider == "deepseek" else 0
+            ),
+            "editor_output_tokens": (
+                settings.deepseek_editor_max_tokens if provider == "deepseek" else 0
+            ),
+        },
         "expected": fixture["expected"],
         "safety": {
             "source_or_sample_text_in_preflight": False,
@@ -257,6 +267,25 @@ def build_preflight(
     }
 
 
+def build_realistic_provider(
+    *,
+    provider_name: Literal["fake", "deepseek"],
+    settings: Settings,
+    api_key: str,
+    model: Literal["deepseek-v4-flash", "deepseek-v4-pro"],
+) -> ModelProvider:
+    """Build the experiment Provider from the same limits shown in preflight."""
+
+    return build_provider(
+        provider_name=provider_name,
+        settings=settings,
+        api_key=api_key,
+        model=model,
+        editor_max_tokens=settings.deepseek_editor_max_tokens,
+        max_editor_bundle_chars=settings.deepseek_max_editor_bundle_chars,
+    )
+
+
 async def execute_realistic_style_e2e(
     *,
     fixture: dict[str, Any],
@@ -267,7 +296,7 @@ async def execute_realistic_style_e2e(
     settings: Settings,
     api_key: str,
 ) -> dict[str, Any]:
-    provider = build_provider(
+    provider = build_realistic_provider(
         provider_name=provider_name,
         settings=settings,
         api_key=api_key,
@@ -279,7 +308,7 @@ async def execute_realistic_style_e2e(
         and reviewer_model is not None
         and reviewer_model != editor_model
     ):
-        reviewer_provider = build_provider(
+        reviewer_provider = build_realistic_provider(
             provider_name=provider_name,
             settings=settings,
             api_key=api_key,
@@ -433,6 +462,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             api_key_present=bool(api_key),
             fixture=fixture,
             paths=paths,
+            settings=settings,
         )
     )
     if not args.execute:
