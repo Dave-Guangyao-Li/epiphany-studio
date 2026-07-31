@@ -211,6 +211,19 @@ def _long_string_fragments(value: object, *, minimum_length: int = 32) -> list[s
     return fragments
 
 
+def _sensitive_log_fragments(value: object) -> list[str]:
+    """Return full generated strings plus partial windows that must stay out of logs."""
+
+    fragments: set[str] = set()
+    for text in _long_string_fragments(value):
+        fragments.add(text)
+        for start in range(0, len(text), 32):
+            chunk = text[start : start + 48]
+            if len(chunk) >= 16:
+                fragments.add(chunk)
+    return sorted(fragments, key=lambda item: (-len(item), item))
+
+
 def _log_summary(
     paths: Sequence[Path],
     *,
@@ -736,15 +749,14 @@ async def _continue_with_revision(
         *_forbidden_log_fragments(fixture, secret_values=(api_key,)),
         *(item["source"]["text"] for item in fixture["writing_samples"]),
         REVISION_INSTRUCTION,
-        *_long_string_fragments(parent_draft["content_json"]),
-        *_long_string_fragments(child_draft["content_json"]),
-        *_long_string_fragments(parent_quality_payload),
-        *_long_string_fragments(child_quality_payload),
+        *_sensitive_log_fragments(parent_draft["content_json"]),
+        *_sensitive_log_fragments(child_draft["content_json"]),
+        *_sensitive_log_fragments(parent_quality_payload),
+        *_sensitive_log_fragments(child_quality_payload),
         *(
-            line
+            fragment
             for content in markdown.values()
-            for line in content.splitlines()
-            if len(line.strip()) >= 32
+            for fragment in _sensitive_log_fragments(content.splitlines())
         ),
     ]
     logs, logs_valid = _log_summary(

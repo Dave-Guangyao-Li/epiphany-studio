@@ -6,6 +6,8 @@ from pathlib import Path
 
 from epiphany.length_recovery_e2e import (
     DEFAULT_FIXTURE_PATH,
+    _log_summary,
+    _sensitive_log_fragments,
     main,
 )
 from epiphany.realistic_style_experiment_e2e import load_realistic_style_fixture
@@ -17,6 +19,41 @@ def _database_counts(database_path: Path) -> dict[str, int]:
             table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
             for table in ("runs", "tasks", "model_calls")
         }
+
+
+def test_log_validation_rejects_a_partial_generated_paragraph_leak(
+    tmp_path: Path,
+) -> None:
+    generated = (
+        "这是一段只应该存在于候选稿中的合成内容，它不应该以完整段落或局部窗口进入结构化运行日志。"
+        "即使日志只泄漏了其中一小段，测试也必须稳定地发现，而不能要求整段文字完全一致。"
+    )
+    forbidden = _sensitive_log_fragments({"paragraph": generated})
+    leaked_window = next(fragment for fragment in forbidden if 16 <= len(fragment) < len(generated))
+    log_path = tmp_path / "runtime.jsonl"
+    required_events = (
+        "run.waiting_for_user",
+        "run.resume.accepted",
+        "workflow.draft_improvement.planned",
+        "workflow.draft_revision.requested",
+        "workflow.draft_revision.queued",
+        "workflow.draft_revision.compared",
+    )
+    rows = [{"event": event} for event in required_events]
+    rows.append({"event": "worker.task.completed", "message": leaked_window})
+    log_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    summary, valid = _log_summary(
+        [log_path],
+        forbidden_fragments=forbidden,
+    )
+
+    assert valid is False
+    assert summary["required_events_present"] is True
+    assert summary["source_sample_prompt_and_key_absent"] is False
 
 
 def test_preflight_uses_the_realistic_fixture_and_caps_the_full_flow_at_seven_calls(

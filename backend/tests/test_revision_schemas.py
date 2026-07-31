@@ -66,6 +66,21 @@ def test_revision_request_is_normalized_unique_and_explicit() -> None:
         )
 
 
+def test_revision_request_keeps_length_recovery_and_lowering_as_alternatives() -> None:
+    with pytest.raises(
+        ValidationError,
+        match=("reuse_unused_material and lower_target_duration are alternative actions"),
+    ):
+        CreateDraftRevisionRequest(
+            submission_id="revision-conflicting-duration-strategies",
+            selected_actions=[
+                "reuse_unused_material",
+                "lower_target_duration",
+            ],
+            target_duration_minutes=10,
+        )
+
+
 def test_revision_feedback_uses_the_persisted_user_feedback_vocabulary() -> None:
     selected = SelectedRevisionFeedback(
         artifact_id="art_feedback",

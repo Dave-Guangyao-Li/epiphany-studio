@@ -358,6 +358,10 @@ class CreateDraftRevisionRequest(BaseModel):
             raise ValueError("add_supplemental_material must match source_ids")
         if ("lower_target_duration" in actions) != (self.target_duration_minutes is not None):
             raise ValueError("lower_target_duration must match target_duration_minutes")
+        if {"reuse_unused_material", "lower_target_duration"} <= actions:
+            raise ValueError(
+                "reuse_unused_material and lower_target_duration are alternative actions"
+            )
         return self
 
 
