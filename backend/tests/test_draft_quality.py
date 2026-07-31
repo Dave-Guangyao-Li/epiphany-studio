@@ -15,9 +15,12 @@ from epiphany.draft_quality_schemas import (
     DRAFT_QUALITY_RULES_VERSION,
     LEGACY_DRAFT_QUALITY_FORMULA_VERSION,
     LEGACY_DRAFT_QUALITY_RULES_VERSION,
+    PREVIOUS_CHINESE_STYLE_HEURISTIC_VERSION,
+    PREVIOUS_DRAFT_QUALITY_RULES_VERSION,
     REVIEW_DIMENSIONS,
     STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
     DeterministicDraftMetrics,
+    DeterministicQualityFacts,
     DraftQualityReport,
     InvalidModelReviewEvidence,
     InvalidModelReviewSourceReference,
@@ -430,6 +433,36 @@ def test_enumeration_does_not_count_ordinary_uses_of_last() -> None:
     assert finding.status == "pass"
 
 
+def test_previous_chinese_rules_remain_replayable_after_precision_upgrade() -> None:
+    content = _good_draft().model_dump(mode="python")
+    content["podcast_script"]["opening"]["text"] = (
+        "我拉着最后一个空行李箱下楼，最后用报纸包好那只碗，最后取消了订单。"
+    )
+
+    previous = analyze_podcast_draft(
+        draft=content,
+        creative_brief=_brief(),
+        rules_version=PREVIOUS_DRAFT_QUALITY_RULES_VERSION,
+    )
+    previous_codes = {finding.code for finding in previous.findings}
+    previous_facts = build_deterministic_quality_facts(previous)
+
+    assert previous.metrics.rules_version == PREVIOUS_DRAFT_QUALITY_RULES_VERSION
+    assert (
+        previous.metrics.chinese_style_heuristic_version == PREVIOUS_CHINESE_STYLE_HEURISTIC_VERSION
+    )
+    assert previous.metrics.chinese_style_pattern_counts.enumeration == 3
+    assert "style.editorial_instruction_leakage" not in previous_codes
+    assert previous_facts.facts_version == "deterministic_quality_facts_v1"
+    assert previous_facts.rules_version == PREVIOUS_DRAFT_QUALITY_RULES_VERSION
+    pre_versioned_facts = previous_facts.model_dump(mode="python")
+    pre_versioned_facts.pop("facts_version")
+    assert (
+        DeterministicQualityFacts.model_validate(pre_versioned_facts).facts_version
+        == "deterministic_quality_facts_v1"
+    )
+
+
 def test_editorial_instructions_in_spoken_text_are_reported_for_review() -> None:
     content = _good_draft().model_dump(mode="python")
     content["podcast_script"]["sections"][0]["paragraphs"][0]["text"] += (
@@ -526,6 +559,20 @@ def test_pre_release_chinese_metrics_without_rules_field_infer_current_rules() -
 
     assert restored.rules_version == DRAFT_QUALITY_RULES_VERSION
     assert restored.chinese_style_heuristic_version == CHINESE_STYLE_HEURISTIC_VERSION
+
+
+def test_pre_release_v2_metrics_without_rules_field_infer_previous_rules() -> None:
+    previous = analyze_podcast_draft(
+        draft=_good_draft(),
+        creative_brief=_brief(),
+        rules_version=PREVIOUS_DRAFT_QUALITY_RULES_VERSION,
+    ).metrics.model_dump(mode="python")
+    previous.pop("rules_version")
+
+    restored = DeterministicDraftMetrics.model_validate(previous)
+
+    assert restored.rules_version == PREVIOUS_DRAFT_QUALITY_RULES_VERSION
+    assert restored.chinese_style_heuristic_version == PREVIOUS_CHINESE_STYLE_HEURISTIC_VERSION
 
 
 def test_legacy_rules_preserve_m3_4_literal_and_template_penalties() -> None:

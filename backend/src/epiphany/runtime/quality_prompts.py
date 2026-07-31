@@ -15,8 +15,10 @@ from epiphany.draft_quality_schemas import (
 from epiphany.runtime.providers.base import ProviderInputTooLargeError
 
 LEGACY_QUALITY_REVIEW_PROMPT_VERSION = "quality_review_prompt_v1"
-QUALITY_REVIEW_PROMPT_VERSION = "quality_review_prompt_v2_deterministic_facts"
-STYLE_AWARE_QUALITY_REVIEW_PROMPT_VERSION = "quality_review_prompt_v3_writing_style"
+QUALITY_REVIEW_PROMPT_VERSION = "quality_review_prompt_v3_editorial_instruction"
+STYLE_AWARE_QUALITY_REVIEW_PROMPT_VERSION = (
+    "quality_review_prompt_v4_writing_style_editorial_instruction"
+)
 
 
 class QualityReviewPromptError(ValueError):

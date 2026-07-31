@@ -34,10 +34,13 @@ STYLE_AWARE_MODEL_REVIEW_TASK_VERSION = "model_self_review_task_v3_writing_style
 LEGACY_DRAFT_QUALITY_FORMULA_VERSION = "draft_quality_v1_60_40"
 DRAFT_QUALITY_FORMULA_VERSION = "draft_quality_v2_non_compensatory_caps"
 STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION = "draft_quality_v3_personal_style_non_compensatory_caps"
-DETERMINISTIC_QUALITY_FACTS_VERSION = "deterministic_quality_facts_v1"
+LEGACY_DETERMINISTIC_QUALITY_FACTS_VERSION = "deterministic_quality_facts_v1"
+DETERMINISTIC_QUALITY_FACTS_VERSION = "deterministic_quality_facts_v2_editorial_instruction"
 LEGACY_DRAFT_QUALITY_RULES_VERSION = "draft_quality_rules_v1"
-DRAFT_QUALITY_RULES_VERSION = "draft_quality_rules_v2_chinese_calibration"
-CHINESE_STYLE_HEURISTIC_VERSION = "zh_podcast_style_v1"
+PREVIOUS_DRAFT_QUALITY_RULES_VERSION = "draft_quality_rules_v2_chinese_calibration"
+DRAFT_QUALITY_RULES_VERSION = "draft_quality_rules_v3_editorial_instruction"
+PREVIOUS_CHINESE_STYLE_HEURISTIC_VERSION = "zh_podcast_style_v1"
+CHINESE_STYLE_HEURISTIC_VERSION = "zh_podcast_style_v2_enumeration_precision"
 _INTERNAL_SOURCE_IDENTIFIER = re.compile(r"(?:src|seg)_[A-Za-z0-9][A-Za-z0-9_-]*")
 _UNSUPPORTED_PERSONAL_STYLE_CLAIM = re.compile(
     r"(?:很|较|更|非常|确实|明显|高度)?像(?:作者|用户)?本人|"
@@ -275,8 +278,15 @@ class DeterministicDraftMetrics(BaseModel):
     rules_version: Literal[
         "draft_quality_rules_v1",
         "draft_quality_rules_v2_chinese_calibration",
+        "draft_quality_rules_v3_editorial_instruction",
     ] = LEGACY_DRAFT_QUALITY_RULES_VERSION
-    chinese_style_heuristic_version: Literal["zh_podcast_style_v1"] | None = None
+    chinese_style_heuristic_version: (
+        Literal[
+            "zh_podcast_style_v1",
+            "zh_podcast_style_v2_enumeration_precision",
+        ]
+        | None
+    ) = None
     chinese_style_pattern_counts: ChineseStylePatternCounts = Field(
         default_factory=ChineseStylePatternCounts
     )
@@ -293,11 +303,13 @@ class DeterministicDraftMetrics(BaseModel):
         if not isinstance(value, dict) or "rules_version" in value:
             return value
         normalized = dict(value)
-        normalized["rules_version"] = (
-            DRAFT_QUALITY_RULES_VERSION
-            if normalized.get("chinese_style_heuristic_version") == CHINESE_STYLE_HEURISTIC_VERSION
-            else LEGACY_DRAFT_QUALITY_RULES_VERSION
-        )
+        heuristic_version = normalized.get("chinese_style_heuristic_version")
+        if heuristic_version == CHINESE_STYLE_HEURISTIC_VERSION:
+            normalized["rules_version"] = DRAFT_QUALITY_RULES_VERSION
+        elif heuristic_version == PREVIOUS_CHINESE_STYLE_HEURISTIC_VERSION:
+            normalized["rules_version"] = PREVIOUS_DRAFT_QUALITY_RULES_VERSION
+        else:
+            normalized["rules_version"] = LEGACY_DRAFT_QUALITY_RULES_VERSION
         return normalized
 
 
@@ -328,10 +340,14 @@ class DeterministicQualityFacts(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    facts_version: Literal["deterministic_quality_facts_v1"] = DETERMINISTIC_QUALITY_FACTS_VERSION
-    rules_version: Literal["draft_quality_rules_v2_chinese_calibration"] = (
-        DRAFT_QUALITY_RULES_VERSION
-    )
+    facts_version: Literal[
+        "deterministic_quality_facts_v1",
+        "deterministic_quality_facts_v2_editorial_instruction",
+    ] = DETERMINISTIC_QUALITY_FACTS_VERSION
+    rules_version: Literal[
+        "draft_quality_rules_v2_chinese_calibration",
+        "draft_quality_rules_v3_editorial_instruction",
+    ] = DRAFT_QUALITY_RULES_VERSION
     quality_profile: DraftQualityProfile
     deterministic_score: int = Field(ge=0, le=100)
     target_duration_minutes: int = Field(gt=0)
@@ -343,9 +359,10 @@ class DeterministicQualityFacts(BaseModel):
     paragraph_citation_coverage: float = Field(ge=0, le=1)
     blocker_count: int = Field(ge=0)
     warning_count: int = Field(ge=0)
-    chinese_style_heuristic_version: Literal["zh_podcast_style_v1"] = (
-        CHINESE_STYLE_HEURISTIC_VERSION
-    )
+    chinese_style_heuristic_version: Literal[
+        "zh_podcast_style_v1",
+        "zh_podcast_style_v2_enumeration_precision",
+    ] = CHINESE_STYLE_HEURISTIC_VERSION
     chinese_style_pattern_counts: ChineseStylePatternCounts = Field(
         default_factory=ChineseStylePatternCounts
     )
@@ -355,6 +372,44 @@ class DeterministicQualityFacts(BaseModel):
     editorial_instruction_phrase_count: int = Field(default=0, ge=0)
 
     _normalize_duration_code = field_validator("duration_finding_code")(_normalize_required_text)
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_pre_versioned_facts(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "facts_version" in value:
+            return value
+        normalized = dict(value)
+        normalized["facts_version"] = (
+            LEGACY_DETERMINISTIC_QUALITY_FACTS_VERSION
+            if normalized.get("rules_version") == PREVIOUS_DRAFT_QUALITY_RULES_VERSION
+            or normalized.get("chinese_style_heuristic_version")
+            == PREVIOUS_CHINESE_STYLE_HEURISTIC_VERSION
+            else DETERMINISTIC_QUALITY_FACTS_VERSION
+        )
+        return normalized
+
+    @model_validator(mode="after")
+    def versions_must_describe_one_ruleset(self) -> DeterministicQualityFacts:
+        version_tuple = (
+            self.facts_version,
+            self.rules_version,
+            self.chinese_style_heuristic_version,
+        )
+        supported = {
+            (
+                LEGACY_DETERMINISTIC_QUALITY_FACTS_VERSION,
+                PREVIOUS_DRAFT_QUALITY_RULES_VERSION,
+                PREVIOUS_CHINESE_STYLE_HEURISTIC_VERSION,
+            ),
+            (
+                DETERMINISTIC_QUALITY_FACTS_VERSION,
+                DRAFT_QUALITY_RULES_VERSION,
+                CHINESE_STYLE_HEURISTIC_VERSION,
+            ),
+        }
+        if version_tuple not in supported:
+            raise ValueError("deterministic quality fact versions must use one ruleset")
+        return self
 
 
 class ReviewSourceSegment(BaseModel):
