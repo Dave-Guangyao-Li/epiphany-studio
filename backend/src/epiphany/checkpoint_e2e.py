@@ -171,6 +171,16 @@ def load_fixture(path: Path) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise E2EFlowError(stage="fixture", code="fixture_unreadable") from error
+    return validate_fixture_payload(payload)
+
+
+def validate_fixture_payload(payload: object) -> dict[str, Any]:
+    """Validate an already-loaded synthetic fixture.
+
+    Keeping parsing separate lets experiment-only manifests hydrate large Source
+    bodies from adjacent Markdown files without creating a generated JSON copy.
+    """
+
     if not isinstance(payload, dict):
         raise E2EFlowError(stage="fixture", code="fixture_root_invalid")
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from epiphany.checkpoint_e2e import BACKEND_DIR
 from epiphany.realistic_style_experiment_e2e import (
+    DEFAULT_FIXTURE_PATH,
     load_realistic_style_fixture,
     main,
 )
@@ -75,6 +76,42 @@ def _write_fixture(path: Path) -> dict[str, object]:
         encoding="utf-8",
     )
     return payload
+
+
+def test_committed_realistic_fixture_is_modular_coherent_and_crosses_readiness() -> None:
+    manifest = json.loads(DEFAULT_FIXTURE_PATH.read_text(encoding="utf-8"))
+    fixture = load_realistic_style_fixture(DEFAULT_FIXTURE_PATH)
+
+    def non_whitespace(value: str) -> int:
+        return len("".join(value.split()))
+
+    style_texts = [item["source"]["text"] for item in fixture["writing_samples"]]
+    factual_text = "\n".join(
+        [
+            *(source["text"] for source in fixture["initial_sources"]),
+            fixture["supplemental_source"]["text"],
+        ]
+    )
+
+    assert fixture["fixture_id"] == "m3-7-realistic-persona-moving-out"
+    assert fixture["persona"]["name"] == "林澄"
+    assert len(style_texts) == 4
+    assert all(non_whitespace(text) >= 900 for text in style_texts)
+    assert all("text_file" in item["source"] for item in manifest["writing_samples"])
+    assert all("text" not in item["source"] for item in manifest["writing_samples"])
+    assert fixture["raw_fixture_readiness"]["initial"]["status"] == "needs_more_material"
+    assert fixture["raw_fixture_readiness"]["final"]["status"] == "ready"
+    assert (
+        fixture["raw_fixture_readiness"]["initial"]["counts"]["available_source_char_count"]
+        < fixture["raw_fixture_readiness"]["final"]["target_script_chars_min"]
+    )
+    assert (
+        fixture["raw_fixture_readiness"]["final"]["counts"]["available_source_char_count"]
+        >= fixture["raw_fixture_readiness"]["final"]["target_script_chars_min"]
+    )
+    for episode_marker in ("透明自封袋", "浅色方块", "四十分钟"):
+        assert episode_marker in factual_text
+        assert all(episode_marker not in text for text in style_texts)
 
 
 def test_loader_validates_four_independent_style_only_sources(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -15,13 +16,14 @@ from epiphany.checkpoint_e2e import (
     _print_json,
     _write_report,
     build_provider,
+    validate_fixture_payload,
 )
 from epiphany.config import Settings
 from epiphany.quality_contract_e2e import (
     LIVE_MODEL,
     QualityContractPaths,
     execute_e2e,
-    load_quality_contract_fixture,
+    validate_quality_contract_fixture,
 )
 from epiphany.schemas import CreateSourceRequest
 from epiphany.writing_style_ab import (
@@ -32,7 +34,7 @@ from epiphany.writing_style_ab import (
 )
 from epiphany.writing_style_ab import load_frozen_input_from_run
 
-DEFAULT_FIXTURE_PATH = BACKEND_DIR / "fixtures/e2e/m3-7-realistic-persona.zh-CN.json"
+DEFAULT_FIXTURE_PATH = BACKEND_DIR / "fixtures/e2e/m3-7-realistic-persona/manifest.zh-CN.json"
 DEFAULT_DATABASE_PATH = BACKEND_DIR / "data/m3-7-realistic-style-e2e.db"
 DEFAULT_OUTPUT_DIR = BACKEND_DIR / "artifacts/m3-7-realistic-style-e2e"
 
@@ -104,8 +106,63 @@ def _validated_writing_samples(payload: object) -> list[dict[str, Any]]:
     return validated
 
 
+def _hydrate_source_text(source: object, *, manifest_path: Path) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        raise E2EFlowError(stage="fixture", code="fixture_source_invalid")
+    hydrated = dict(source)
+    text_file = hydrated.pop("text_file", None)
+    if text_file is None:
+        return hydrated
+    if "text" in hydrated or not isinstance(text_file, str) or not text_file.strip():
+        raise E2EFlowError(stage="fixture", code="fixture_text_file_invalid")
+    fixture_root = manifest_path.parent.resolve()
+    candidate = (fixture_root / text_file).resolve()
+    try:
+        candidate.relative_to(fixture_root)
+    except ValueError as error:
+        raise E2EFlowError(stage="fixture", code="fixture_text_file_outside_root") from error
+    try:
+        hydrated["text"] = candidate.read_text(encoding="utf-8")
+    except OSError as error:
+        raise E2EFlowError(stage="fixture", code="fixture_text_file_unreadable") from error
+    return hydrated
+
+
+def _load_hydrated_manifest(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise E2EFlowError(stage="fixture", code="fixture_unreadable") from error
+    if not isinstance(payload, dict):
+        raise E2EFlowError(stage="fixture", code="fixture_root_invalid")
+    hydrated = dict(payload)
+    initial = hydrated.get("initial_sources")
+    samples = hydrated.get("writing_samples")
+    if not isinstance(initial, list) or not isinstance(samples, list):
+        raise E2EFlowError(stage="fixture", code="fixture_source_manifest_invalid")
+    hydrated["initial_sources"] = [
+        _hydrate_source_text(source, manifest_path=path) for source in initial
+    ]
+    hydrated["supplemental_source"] = _hydrate_source_text(
+        hydrated.get("supplemental_source"),
+        manifest_path=path,
+    )
+    hydrated["writing_samples"] = [
+        {
+            **item,
+            "source": _hydrate_source_text(item.get("source"), manifest_path=path),
+        }
+        if isinstance(item, dict)
+        else item
+        for item in samples
+    ]
+    return hydrated
+
+
 def load_realistic_style_fixture(path: Path) -> dict[str, Any]:
-    fixture = load_quality_contract_fixture(path)
+    fixture = validate_quality_contract_fixture(
+        validate_fixture_payload(_load_hydrated_manifest(path))
+    )
     persona = fixture.get("persona")
     if not isinstance(persona, dict) or not persona:
         raise E2EFlowError(stage="fixture", code="fixture_persona_invalid")

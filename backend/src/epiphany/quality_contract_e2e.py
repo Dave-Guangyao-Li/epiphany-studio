@@ -166,7 +166,12 @@ def _fixture_segments(
 
 
 def load_quality_contract_fixture(path: Path) -> dict[str, Any]:
-    fixture = load_fixture(path)
+    return validate_quality_contract_fixture(load_fixture(path))
+
+
+def validate_quality_contract_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
+    """Validate and enrich a synthetic quality-contract fixture payload."""
+
     try:
         creative_brief = CreativeBrief.model_validate(fixture.get("creative_brief")).model_dump(
             mode="json"
