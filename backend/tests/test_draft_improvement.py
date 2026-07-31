@@ -195,6 +195,19 @@ def _report(
     )
 
 
+def _script_character_count(draft: PodcastDraftOutput) -> int:
+    texts = [
+        draft.podcast_script.opening.text,
+        *[
+            paragraph.text
+            for section in draft.podcast_script.sections
+            for paragraph in section.paragraphs
+        ],
+        draft.podcast_script.closing.text,
+    ]
+    return sum(len("".join(text.split())) for text in texts)
+
+
 def _build(
     *,
     target_minutes: int = 10,
@@ -247,6 +260,80 @@ def test_plan_exactly_accounts_for_duration_and_recommends_unused_material() -> 
     assert "add_supplemental_material" not in options
     assert "lower_target_duration" not in options
     assert secret_source_text not in plan.model_dump_json()
+
+
+def test_show_notes_only_reference_remains_unused_for_spoken_recovery() -> None:
+    """Show Notes metadata must not consume material needed by the spoken script."""
+
+    draft_content = _draft().model_dump(mode="json")
+    draft_content["show_notes"]["key_points"].append(
+        _grounded(
+            "这个事实目前只出现在节目简介里，还没有进入口播正文。",
+            UNUSED_REF,
+        )
+    )
+    draft = PodcastDraftOutput.model_validate(draft_content)
+
+    plan = _build(
+        unused_text=("重听录音时，她先听见雨点落在空调外机上，随后停顿了三秒。" * 120),
+        draft=draft,
+    )
+
+    assert plan.material.unused_factual_segment_count == 1
+    assert [reference.model_dump() for reference in plan.material.unused_source_refs] == [
+        UNUSED_REF
+    ]
+    assert plan.duration_resolution == "reuse_unused_material"
+
+
+def test_duration_inside_tolerance_does_not_require_center_target_recovery() -> None:
+    target_characters = 2_800
+    minimum_characters = 2_380
+    desired_characters = 2_500
+    base = _draft()
+    draft = _draft(
+        extra_text="甲" * (desired_characters - _script_character_count(base)),
+    )
+
+    plan = _build(
+        target_minutes=10,
+        unused_text="这段素材虽然还没使用，但合格稿不应为了追中心值而被迫扩写。" * 30,
+        draft=draft,
+    )
+
+    assert plan.duration.actual_script_character_count == desired_characters
+    assert minimum_characters <= desired_characters < target_characters
+    assert plan.duration.missing_script_character_count == (target_characters - desired_characters)
+    assert plan.duration_resolution == "not_needed"
+    assert "reuse_unused_material" not in {
+        option.kind for option in plan.options if option.recommended
+    }
+
+
+def test_unused_material_that_reaches_minimum_is_sufficient_for_recovery() -> None:
+    target_characters = 2_800
+    minimum_characters = 2_380
+    desired_characters = 2_200
+    base = _draft()
+    draft = _draft(
+        extra_text="甲" * (desired_characters - _script_character_count(base)),
+    )
+    missing_to_minimum = minimum_characters - desired_characters
+    missing_to_target = target_characters - desired_characters
+    available_unused_characters = (missing_to_minimum + missing_to_target) // 2
+
+    plan = _build(
+        target_minutes=10,
+        unused_text="乙" * available_unused_characters,
+        draft=draft,
+    )
+
+    assert 0 < missing_to_minimum <= plan.material.unused_factual_character_count
+    assert plan.material.unused_factual_character_count < missing_to_target
+    assert plan.duration_resolution == "reuse_unused_material"
+    reuse = next(option for option in plan.options if option.kind == "reuse_unused_material")
+    assert reuse.recommended is True
+    assert all(option.kind != "add_supplemental_material" for option in plan.options)
 
 
 def test_insufficient_unused_material_recommends_supplement_and_lower_preset() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from typing import Any
 
 from epiphany.draft_quality_schemas import (
@@ -242,6 +243,20 @@ def _merge_refs(*groups: list[dict[str, str]]) -> list[dict[str, str]]:
             seen.add(key)
             merged.append(reference)
     return merged
+
+
+def _spoken_script_character_count(content: dict[str, Any]) -> int:
+    script = content["podcast_script"]
+    texts = [
+        str(script["opening"]["text"]),
+        *[
+            str(paragraph["text"])
+            for section in script["sections"]
+            for paragraph in section["paragraphs"]
+        ],
+        str(script["closing"]["text"]),
+    ]
+    return sum(len("".join(text.split())) for text in texts)
 
 
 class FakeProvider:
@@ -661,6 +676,89 @@ class FakeProvider:
 
         parsed = PodcastRevisionTaskInput.model_validate(input_json)
         base_input = revision_base_editor_input(parsed.model_dump(mode="json"))
+        if (
+            "reuse_unused_material" in parsed.selected_actions
+            and parsed.length_recovery_plan is not None
+        ):
+            revised = deepcopy(parsed.parent_podcast_draft.model_dump(mode="json"))
+            factual_segments = [
+                *base_input["initial_source_segments"],
+                *base_input["supplemental_source_segments"],
+            ]
+            segment_by_key = {
+                (
+                    str(segment["source_id"]),
+                    str(segment["source_segment_id"]),
+                ): segment
+                for segment in factual_segments
+            }
+            existing_texts = {
+                _clean_text(str(paragraph["text"]))
+                for section in revised["podcast_script"]["sections"]
+                for paragraph in section["paragraphs"]
+            }
+            current_characters = _spoken_script_character_count(revised)
+            minimum_characters = parsed.length_recovery_plan.minimum_script_character_count
+            maximum_characters = parsed.length_recovery_plan.maximum_script_character_count
+            added_paragraphs: list[dict[str, Any]] = []
+            section_cursor = 0
+
+            for reference in parsed.length_recovery_plan.priority_unused_source_refs:
+                if current_characters >= minimum_characters:
+                    break
+                segment = segment_by_key.get((reference.source_id, reference.source_segment_id))
+                if segment is None:
+                    continue
+                available_room = maximum_characters - current_characters
+                if available_room <= 0:
+                    break
+                text = _clip(
+                    str(segment["text"]),
+                    min(600, available_room),
+                )
+                normalized_text = _clean_text(text)
+                if not normalized_text or normalized_text in existing_texts:
+                    continue
+
+                sections = revised["podcast_script"]["sections"]
+                selected_section: dict[str, Any] | None = None
+                for offset in range(len(sections)):
+                    candidate_index = (section_cursor + offset) % len(sections)
+                    if len(sections[candidate_index]["paragraphs"]) < 10:
+                        selected_section = sections[candidate_index]
+                        section_cursor = (candidate_index + 1) % len(sections)
+                        break
+                if selected_section is None:
+                    if len(sections) >= 8:
+                        break
+                    selected_section = {
+                        "title": "继续展开的具体场景",
+                        "source_refs": [_source_ref(segment)],
+                        "paragraphs": [],
+                    }
+                    sections.append(selected_section)
+                    section_cursor = 0
+
+                paragraph = {
+                    "text": text,
+                    "source_refs": [_source_ref(segment)],
+                }
+                selected_section["paragraphs"].append(paragraph)
+                selected_section["source_refs"] = _merge_refs(
+                    list(selected_section["source_refs"]),
+                    list(paragraph["source_refs"]),
+                )[:10]
+                added_paragraphs.append(paragraph)
+                existing_texts.add(normalized_text)
+                current_characters += len("".join(text.split()))
+
+            if added_paragraphs:
+                revised["show_notes"]["key_points"][-1] = {
+                    "text": _clip(added_paragraphs[-1]["text"], 360),
+                    "source_refs": list(added_paragraphs[-1]["source_refs"]),
+                }
+            return revised
+
         revised = FakeProvider._build_podcast_draft(base_input)
         factual_segments = [
             *base_input["initial_source_segments"],

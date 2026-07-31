@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
+from decimal import Decimal
 from typing import Any
 
 from pydantic import ValidationError
@@ -9,10 +11,11 @@ from epiphany.draft_quality_schemas import DraftQualityReport
 from epiphany.editor_schemas import (
     PodcastDraftOutput,
     PodcastDraftTaskInput,
-    editor_output_reference_keys,
+    editor_spoken_script_reference_keys,
     validate_podcast_draft_output,
 )
 from epiphany.interview_schemas import InterviewScaffoldOutput
+from epiphany.quality_contract_schemas import DURATION_TOLERANCE_RATIO
 from epiphany.revision_schemas import (
     DraftDurationGap,
     DraftImprovementGap,
@@ -242,6 +245,13 @@ def build_draft_improvement_plan(
 
     target_characters = brief.target_duration_minutes * brief.speaking_rate_chars_per_minute
     missing_characters = max(0, target_characters - actual_characters)
+    minimum_characters = math.ceil(
+        Decimal(target_characters) * (Decimal(1) - Decimal(str(DURATION_TOLERANCE_RATIO)))
+    )
+    missing_to_minimum_characters = max(
+        0,
+        minimum_characters - actual_characters,
+    )
     estimated_minutes = round(
         actual_characters / brief.speaking_rate_chars_per_minute,
         2,
@@ -267,7 +277,7 @@ def build_draft_improvement_plan(
         *parsed_input.initial_source_segments,
         *parsed_input.supplemental_source_segments,
     ]
-    cited_keys = set(editor_output_reference_keys(parsed_draft.model_dump(mode="json")))
+    cited_keys = set(editor_spoken_script_reference_keys(parsed_draft.model_dump(mode="json")))
     unused_segments = [
         segment
         for segment in factual_segments
@@ -293,9 +303,9 @@ def build_draft_improvement_plan(
         unused_source_refs=unused_refs,
     )
 
-    if not missing_characters:
+    if not missing_to_minimum_characters:
         resolution = "not_needed"
-    elif unused_characters >= missing_characters:
+    elif unused_characters >= missing_to_minimum_characters:
         resolution = "reuse_unused_material"
     elif unused_characters:
         resolution = "reuse_then_supplement"
@@ -327,22 +337,22 @@ def build_draft_improvement_plan(
         )
 
     options: list[DraftImprovementOption] = []
-    if missing_characters and unused_segments:
+    if missing_to_minimum_characters and unused_segments:
         options.append(
             DraftImprovementOption(
                 kind="reuse_unused_material",
-                recommended=unused_characters >= missing_characters,
+                recommended=unused_characters >= missing_to_minimum_characters,
                 explanation=(
                     "优先使用当前草稿尚未引用的事实片段补足正文，不要求用户重复提供已经存在的材料。"
                 ),
                 source_refs=unused_refs,
             )
         )
-    if missing_characters > unused_characters or bool(parsed_scaffold.material_gaps):
+    if missing_to_minimum_characters > unused_characters or bool(parsed_scaffold.material_gaps):
         options.append(
             DraftImprovementOption(
                 kind="add_supplemental_material",
-                recommended=missing_characters > unused_characters,
+                recommended=missing_to_minimum_characters > unused_characters,
                 explanation=("现有未使用材料不足以补齐目标时长，或采访脚手架仍有明确材料缺口。"),
                 source_refs=_unique_source_references(
                     [
@@ -354,7 +364,7 @@ def build_draft_improvement_plan(
             )
         )
     lower_preset = _lower_duration_preset(brief.target_duration_minutes)
-    if missing_characters and lower_preset is not None:
+    if missing_to_minimum_characters and lower_preset is not None:
         options.append(
             DraftImprovementOption(
                 kind="lower_target_duration",

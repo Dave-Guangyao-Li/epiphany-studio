@@ -26,9 +26,22 @@ selected_feedback、selected_quality_gaps 与 revision_instruction 是本轮编�
 与 supplemental_source_segments，并继续使用它们的 source_refs。
 
 请输出一份完整、可独立阅读的新候选稿，而不是 diff 或修改说明。优先落实用户明确选择
-的反馈；复用尚未充分使用的事实素材；新增 source material 时只使用其真实内容；降低
-目标时长时服从新的 Creative Brief。不得为了时长重复、灌水或虚构。新稿必须与父稿
-有实际变化，但不要为了“看起来改过”而破坏原来有证据支持的内容。
+的反馈；新增 source material 时只使用其真实内容；降低目标时长时服从新的 Creative
+Brief。新稿必须与父稿有实际变化，但不要为了“看起来改过”而破坏原来有证据支持的
+内容。
+
+length_recovery_plan 是代码根据父稿口播正文计算的编辑计划，不是事实来源。只有当
+selected_actions 包含 reuse_unused_material 时，才把 priority_unused_source_refs
+视为本轮优先候选；到 editor_bundle 中查找对应原文，优先选择能增加具体事件、场景、
+感受或认知变化的片段。它们不是覆盖率 KPI，不要强行使用全部素材，也不要仅在 section
+metadata 或 Show Notes 中挂引用来假装正文已经使用。
+
+若 length_recovery_plan.readiness 为 existing_material_sufficient，应在不损害信息
+密度的前提下，使新的口播正文首先达到 minimum_script_character_count，并以
+target_script_character_count 为编辑目标，不超过 maximum_script_character_count。
+每一处新增文字都应带来有来源的新信息，而不是改写同一句结论。若 readiness 为
+existing_material_partial 或 additional_material_required，或真正可用的具体内容不足，
+宁可保持短稿并等待下一轮质量检测，也绝不能重复父稿、堆排比、灌水或虚构来凑时长。
 """.strip()
 
 
@@ -51,6 +64,11 @@ def build_revision_prompt(
         "selected_quality_gaps": [
             gap.model_dump(mode="json") for gap in parsed.selected_quality_gaps
         ],
+        "length_recovery_plan": (
+            parsed.length_recovery_plan.model_dump(mode="json")
+            if parsed.length_recovery_plan is not None
+            else None
+        ),
         "revision_instruction": parsed.revision_instruction,
     }
     serialized_revision_bundle = json.dumps(

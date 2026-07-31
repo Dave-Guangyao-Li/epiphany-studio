@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -9,8 +11,10 @@ from epiphany.draft_quality_schemas import DraftQualityReport
 from epiphany.editor_schemas import (
     PodcastDraftOutput,
     PodcastDraftTaskInput,
+    editor_spoken_script_reference_keys,
     validate_podcast_draft_output,
 )
+from epiphany.quality_contract_schemas import DURATION_TOLERANCE_RATIO
 from epiphany.schemas import ArtifactView, RunView, SourceReference
 
 DRAFT_IMPROVEMENT_PLAN_VERSION = "draft_improvement_plan_v1"
@@ -45,6 +49,12 @@ RevisionAction = Literal[
     "lower_target_duration",
     "apply_selected_feedback",
 ]
+LengthRecoveryReadiness = Literal[
+    "not_needed",
+    "existing_material_sufficient",
+    "existing_material_partial",
+    "additional_material_required",
+]
 
 
 def _normalize_required_text(value: str) -> str:
@@ -70,6 +80,32 @@ def _unique_references(value: list[SourceReference]) -> list[SourceReference]:
     if len(keys) != len(set(keys)):
         raise ValueError("source_refs must be unique")
     return value
+
+
+def _non_whitespace_character_count(value: str) -> int:
+    return len("".join(value.split()))
+
+
+def _spoken_script_character_count(draft: PodcastDraftOutput) -> int:
+    texts = [
+        draft.podcast_script.opening.text,
+        *[
+            paragraph.text
+            for section in draft.podcast_script.sections
+            for paragraph in section.paragraphs
+        ],
+        draft.podcast_script.closing.text,
+    ]
+    return sum(_non_whitespace_character_count(text) for text in texts)
+
+
+def _duration_character_bounds(target_character_count: int) -> tuple[int, int]:
+    tolerance = Decimal(str(DURATION_TOLERANCE_RATIO))
+    target = Decimal(target_character_count)
+    return (
+        math.ceil(target * (Decimal(1) - tolerance)),
+        math.floor(target * (Decimal(1) + tolerance)),
+    )
 
 
 class DraftDurationGap(BaseModel):
@@ -243,11 +279,19 @@ class DraftImprovementPlan(BaseModel):
             raise ValueError("targeted questions must be unique")
         if ("apply_selected_feedback" in option_kinds) != bool(self.selected_feedback_codes):
             raise ValueError("apply_selected_feedback must match selected_feedback_codes")
+        minimum_characters, _maximum_characters = _duration_character_bounds(
+            self.duration.target_script_character_count
+        )
+        below_minimum = self.duration.actual_script_character_count < minimum_characters
         if self.duration_resolution == "not_needed":
-            if self.duration.missing_script_character_count:
-                raise ValueError("not_needed cannot have a duration shortfall")
-        elif not self.duration.missing_script_character_count:
-            raise ValueError("a duration resolution requires a duration shortfall")
+            if below_minimum:
+                raise ValueError(
+                    "not_needed requires the spoken script to reach the duration lower bound"
+                )
+        elif not below_minimum:
+            raise ValueError(
+                "a duration resolution requires the spoken script to be below the lower bound"
+            )
         return self
 
 
@@ -372,6 +416,102 @@ class SelectedRevisionFeedback(BaseModel):
         return None if value is None else _normalize_required_text(value)
 
 
+class DraftLengthRecoveryPlan(BaseModel):
+    """Deterministic evidence plan for one bounded length-recovery attempt.
+
+    Counts describe only the words in ``podcast_script`` that will be spoken.
+    Source references identify existing factual segments to consider; they are
+    candidates, not a requirement to force every Source into the new draft.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    actual_script_character_count: int = Field(ge=0)
+    minimum_script_character_count: int = Field(ge=1)
+    target_script_character_count: int = Field(ge=1)
+    maximum_script_character_count: int = Field(ge=1)
+    missing_to_minimum_character_count: int = Field(ge=0)
+    missing_to_target_character_count: int = Field(ge=0)
+    available_unused_character_count: int = Field(ge=0)
+    readiness: LengthRecoveryReadiness
+    priority_unused_source_refs: list[SourceReference] = Field(
+        default_factory=list,
+        max_length=1_000,
+    )
+
+    _priority_source_refs_are_unique = field_validator("priority_unused_source_refs")(
+        _unique_references
+    )
+
+    @model_validator(mode="after")
+    def counts_and_readiness_must_be_consistent(self) -> DraftLengthRecoveryPlan:
+        expected_minimum, expected_maximum = _duration_character_bounds(
+            self.target_script_character_count
+        )
+        if self.minimum_script_character_count != expected_minimum:
+            raise ValueError("minimum character count must use the configured duration tolerance")
+        if self.maximum_script_character_count != expected_maximum:
+            raise ValueError("maximum character count must use the configured duration tolerance")
+        if self.missing_to_minimum_character_count != max(
+            0,
+            self.minimum_script_character_count - self.actual_script_character_count,
+        ):
+            raise ValueError("missing-to-minimum count is inconsistent with the script")
+        if self.missing_to_target_character_count != max(
+            0,
+            self.target_script_character_count - self.actual_script_character_count,
+        ):
+            raise ValueError("missing-to-target count is inconsistent with the script")
+
+        if not self.missing_to_minimum_character_count:
+            expected_readiness: LengthRecoveryReadiness = "not_needed"
+        elif self.available_unused_character_count >= self.missing_to_minimum_character_count:
+            expected_readiness = "existing_material_sufficient"
+        elif self.available_unused_character_count:
+            expected_readiness = "existing_material_partial"
+        else:
+            expected_readiness = "additional_material_required"
+        if self.readiness != expected_readiness:
+            raise ValueError("length-recovery readiness is inconsistent with available material")
+        if bool(self.priority_unused_source_refs) != bool(self.available_unused_character_count):
+            raise ValueError("priority unused references must match available unused characters")
+        return self
+
+
+def build_draft_length_recovery_plan(
+    *,
+    improvement_plan: DraftImprovementPlan,
+    target_duration_minutes: int,
+) -> DraftLengthRecoveryPlan:
+    """Project an Improvement Plan into exact instructions for a child Revision."""
+
+    rate = improvement_plan.duration.speaking_rate_chars_per_minute
+    actual = improvement_plan.duration.actual_script_character_count
+    target = target_duration_minutes * rate
+    minimum, maximum = _duration_character_bounds(target)
+    missing_to_minimum = max(0, minimum - actual)
+    available = improvement_plan.material.unused_factual_character_count
+    if not missing_to_minimum:
+        readiness: LengthRecoveryReadiness = "not_needed"
+    elif available >= missing_to_minimum:
+        readiness = "existing_material_sufficient"
+    elif available:
+        readiness = "existing_material_partial"
+    else:
+        readiness = "additional_material_required"
+    return DraftLengthRecoveryPlan(
+        actual_script_character_count=actual,
+        minimum_script_character_count=minimum,
+        target_script_character_count=target,
+        maximum_script_character_count=maximum,
+        missing_to_minimum_character_count=missing_to_minimum,
+        missing_to_target_character_count=max(0, target - actual),
+        available_unused_character_count=available,
+        readiness=readiness,
+        priority_unused_source_refs=improvement_plan.material.unused_source_refs,
+    )
+
+
 class PodcastRevisionTaskInput(PodcastDraftTaskInput):
     """Strict Editor input for one explicit child Revision Run."""
 
@@ -391,6 +531,7 @@ class PodcastRevisionTaskInput(PodcastDraftTaskInput):
         default_factory=list,
         max_length=50,
     )
+    length_recovery_plan: DraftLengthRecoveryPlan | None = None
     revision_instruction: str | None = Field(default=None, min_length=1, max_length=2_000)
 
     _normalize_revision_ids = field_validator(
@@ -429,6 +570,55 @@ class PodcastRevisionTaskInput(PodcastDraftTaskInput):
             raise ValueError("selected feedback artifacts must be unique")
         if len({gap.code for gap in self.selected_quality_gaps}) != len(self.selected_quality_gaps):
             raise ValueError("selected quality gaps must be unique")
+        if ("reuse_unused_material" in actions) != (self.length_recovery_plan is not None):
+            raise ValueError("reuse_unused_material must match a length_recovery_plan")
+
+        if self.length_recovery_plan is not None:
+            recovery = self.length_recovery_plan
+            if self.creative_brief is None:
+                raise ValueError("length recovery requires a Creative Brief")
+            expected_target = (
+                self.creative_brief.target_duration_minutes
+                * self.creative_brief.speaking_rate_chars_per_minute
+            )
+            if recovery.target_script_character_count != expected_target:
+                raise ValueError("length-recovery target must match the Creative Brief")
+            if recovery.actual_script_character_count != _spoken_script_character_count(
+                self.parent_podcast_draft
+            ):
+                raise ValueError("length-recovery actual count must match the parent Draft")
+
+            factual_segments = [
+                *self.initial_source_segments,
+                *self.supplemental_source_segments,
+            ]
+            factual_by_key = {
+                (segment.source_id, segment.source_segment_id): segment
+                for segment in factual_segments
+            }
+            priority_keys = {
+                _reference_key(reference) for reference in recovery.priority_unused_source_refs
+            }
+            if not priority_keys <= set(factual_by_key):
+                raise ValueError(
+                    "length-recovery references must resolve to factual source segments"
+                )
+            spoken_keys = set(
+                editor_spoken_script_reference_keys(
+                    self.parent_podcast_draft.model_dump(mode="json")
+                )
+            )
+            if priority_keys & spoken_keys:
+                raise ValueError(
+                    "length-recovery priority references must be unused by the spoken parent Draft"
+                )
+            available_characters = sum(
+                _non_whitespace_character_count(factual_by_key[key].text) for key in priority_keys
+            )
+            if available_characters != recovery.available_unused_character_count:
+                raise ValueError(
+                    "available unused characters must match the priority source segments"
+                )
 
         validate_podcast_draft_output(
             task_input=revision_base_editor_input(self.model_dump(mode="json")),

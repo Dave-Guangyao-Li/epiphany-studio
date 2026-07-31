@@ -66,6 +66,7 @@ from epiphany.revision_schemas import (
     DraftRevisionComparisonRecord,
     DraftRevisionRequestRecord,
     PodcastRevisionTaskInput,
+    build_draft_length_recovery_plan,
     build_draft_revision_candidate_summary,
     build_draft_revision_comparison,
 )
@@ -1033,6 +1034,14 @@ class RunService:
                     await session.flush()
                     request_artifact_id = request_artifact.id
 
+                    length_recovery_plan = (
+                        build_draft_length_recovery_plan(
+                            improvement_plan=plan_record.plan,
+                            target_duration_minutes=int(parent_brief["target_duration_minutes"]),
+                        )
+                        if "reuse_unused_material" in request.selected_actions
+                        else None
+                    )
                     revision_input = {
                         "task_kind": REVISE_PODCAST_DRAFT,
                         "topic": parent.input_json["topic"],
@@ -1064,6 +1073,11 @@ class RunService:
                         ],
                         "revision_instruction": request.revision_instruction,
                         **(
+                            {"length_recovery_plan": (length_recovery_plan.model_dump(mode="json"))}
+                            if length_recovery_plan is not None
+                            else {}
+                        ),
+                        **(
                             {
                                 "writing_style_profile": base_editor_input["writing_style_profile"],
                                 "writing_style_segments": base_editor_input[
@@ -1075,9 +1089,12 @@ class RunService:
                         ),
                     }
                     try:
-                        revision_input = PodcastRevisionTaskInput.model_validate(
+                        parsed_revision_input = PodcastRevisionTaskInput.model_validate(
                             revision_input
-                        ).model_dump(mode="json")
+                        )
+                        revision_input = parsed_revision_input.model_dump(mode="json")
+                        if parsed_revision_input.length_recovery_plan is None:
+                            revision_input.pop("length_recovery_plan", None)
                     except (ValidationError, ValueError, TypeError) as error:
                         raise DraftRevisionNotAllowed(
                             "revision choices cannot build a valid Editor task"
@@ -1093,6 +1110,19 @@ class RunService:
                             "selected_feedback_count": len(selected_feedback),
                             "selected_gap_count": len(request.selected_gap_codes),
                             "supplemental_source_count": len(request.source_ids),
+                            **(
+                                {
+                                    "length_recovery_readiness": (length_recovery_plan.readiness),
+                                    "length_recovery_missing_to_minimum": (
+                                        length_recovery_plan.missing_to_minimum_character_count
+                                    ),
+                                    "length_recovery_priority_source_count": len(
+                                        length_recovery_plan.priority_unused_source_refs
+                                    ),
+                                }
+                                if length_recovery_plan is not None
+                                else {}
+                            ),
                         },
                     )
                     await append_event(
