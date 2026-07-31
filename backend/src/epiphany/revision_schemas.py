@@ -21,6 +21,7 @@ DRAFT_IMPROVEMENT_PLAN_VERSION = "draft_improvement_plan_v1"
 DRAFT_REVISION_REQUEST_VERSION = "draft_revision_request_v1"
 DRAFT_REVISION_COMPARISON_VERSION = "draft_revision_comparison_v1"
 REVISE_PODCAST_DRAFT = "revise_podcast_draft"
+MAX_LENGTH_RECOVERY_PRIORITY_REFS = 12
 
 DurationResolution = Literal[
     "not_needed",
@@ -51,6 +52,10 @@ RevisionAction = Literal[
 ]
 LengthRecoveryReadiness = Literal[
     "not_needed",
+    # Wire value retained for persisted v1 compatibility. It means only that
+    # the selected candidate segments contain enough raw characters to justify
+    # one bounded Revision attempt; it does not promise that a grounded,
+    # non-repetitive draft can reach the duration bound.
     "existing_material_sufficient",
     "existing_material_partial",
     "additional_material_required",
@@ -157,7 +162,17 @@ class DraftDurationGap(BaseModel):
 
 
 class UnusedFactualMaterial(BaseModel):
-    """Source inventory without copying any SourceSegment text into the plan."""
+    """Source inventory without copying any SourceSegment text into the plan.
+
+    ``unused_*`` is the complete uncited inventory. The separately assessed
+    ``priority_candidate_*`` fields are the small, deterministic shortlist that
+    may justify one length-recovery attempt. Raw unused volume is therefore not
+    presented as a promise that all of it belongs in the spoken draft.
+
+    ``priority_candidates_assessed=False`` keeps already-persisted v1 plans
+    readable. Plans built by current code always assess and persist the
+    shortlist, including an explicitly empty shortlist.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -166,8 +181,17 @@ class UnusedFactualMaterial(BaseModel):
     unused_factual_segment_count: int = Field(ge=0)
     unused_factual_character_count: int = Field(ge=0)
     unused_source_refs: list[SourceReference] = Field(default_factory=list, max_length=1_000)
+    priority_candidates_assessed: bool = False
+    priority_candidate_character_count: int = Field(default=0, ge=0)
+    priority_candidate_source_refs: list[SourceReference] = Field(
+        default_factory=list,
+        max_length=MAX_LENGTH_RECOVERY_PRIORITY_REFS,
+    )
 
-    _source_refs_are_unique = field_validator("unused_source_refs")(_unique_references)
+    _source_refs_are_unique = field_validator(
+        "unused_source_refs",
+        "priority_candidate_source_refs",
+    )(_unique_references)
 
     @model_validator(mode="after")
     def counts_must_match_references(self) -> UnusedFactualMaterial:
@@ -178,6 +202,21 @@ class UnusedFactualMaterial(BaseModel):
             raise ValueError("factual segment counts must add up")
         if self.unused_factual_segment_count != len(self.unused_source_refs):
             raise ValueError("unused count must match unused_source_refs")
+        if not self.priority_candidates_assessed:
+            if self.priority_candidate_character_count or self.priority_candidate_source_refs:
+                raise ValueError("unassessed material cannot contain priority candidate evidence")
+            return self
+
+        unused_keys = {_reference_key(reference) for reference in self.unused_source_refs}
+        priority_keys = {
+            _reference_key(reference) for reference in self.priority_candidate_source_refs
+        }
+        if not priority_keys <= unused_keys:
+            raise ValueError("priority candidates must be a subset of unused references")
+        if bool(priority_keys) != bool(self.priority_candidate_character_count):
+            raise ValueError("priority candidate references must match candidate characters")
+        if self.priority_candidate_character_count > self.unused_factual_character_count:
+            raise ValueError("priority candidate characters cannot exceed unused characters")
         return self
 
 
@@ -434,6 +473,10 @@ class DraftLengthRecoveryPlan(BaseModel):
     Counts describe only the words in ``podcast_script`` that will be spoken.
     Source references identify existing factual segments to consider; they are
     candidates, not a requirement to force every Source into the new draft.
+    ``existing_material_sufficient`` is a compatibility wire value meaning
+    *candidate raw volume is sufficient to try once*. It is not a prediction
+    that the Revision will reach the bound after relevance, compression,
+    repetition, and quality checks.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -484,7 +527,9 @@ class DraftLengthRecoveryPlan(BaseModel):
         else:
             expected_readiness = "additional_material_required"
         if self.readiness != expected_readiness:
-            raise ValueError("length-recovery readiness is inconsistent with available material")
+            raise ValueError(
+                "length-recovery readiness is inconsistent with candidate material volume"
+            )
         if bool(self.priority_unused_source_refs) != bool(self.available_unused_character_count):
             raise ValueError("priority unused references must match available unused characters")
         return self
@@ -502,7 +547,15 @@ def build_draft_length_recovery_plan(
     target = target_duration_minutes * rate
     minimum, maximum = duration_character_bounds(target)
     missing_to_minimum = max(0, minimum - actual)
-    available = improvement_plan.material.unused_factual_character_count
+    material = improvement_plan.material
+    if material.priority_candidates_assessed:
+        priority_refs = material.priority_candidate_source_refs
+        available = material.priority_candidate_character_count
+    else:
+        # Compatibility for Improvement Plans persisted before candidate
+        # shortlisting existed. New plans never use this branch.
+        priority_refs = material.unused_source_refs
+        available = material.unused_factual_character_count
     if not missing_to_minimum:
         readiness: LengthRecoveryReadiness = "not_needed"
     elif available >= missing_to_minimum:
@@ -520,7 +573,7 @@ def build_draft_length_recovery_plan(
         missing_to_target_character_count=max(0, target - actual),
         available_unused_character_count=available,
         readiness=readiness,
-        priority_unused_source_refs=improvement_plan.material.unused_source_refs,
+        priority_unused_source_refs=priority_refs,
     )
 
 

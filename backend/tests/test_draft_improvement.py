@@ -18,7 +18,9 @@ from epiphany.editor_schemas import PodcastDraftOutput
 from epiphany.interview_schemas import InterviewScaffoldOutput
 from epiphany.revision_schemas import (
     DRAFT_IMPROVEMENT_PLAN_VERSION,
+    MAX_LENGTH_RECOVERY_PRIORITY_REFS,
     DraftImprovementPlan,
+    build_draft_length_recovery_plan,
 )
 
 INITIAL_REF = {
@@ -236,6 +238,23 @@ def _build(
     )
 
 
+def _build_from_input(
+    *,
+    editor_input: dict[str, object],
+    draft: PodcastDraftOutput,
+) -> DraftImprovementPlan:
+    return build_draft_improvement_plan(
+        parent_run_id="run_parent",
+        parent_draft_artifact_id="art_draft",
+        quality_report_artifact_id="art_quality",
+        editor_task_input=editor_input,
+        podcast_draft=draft,
+        quality_report=_report(draft, editor_input),
+        interview_scaffold=editor_input["interview_scaffold"],
+        writing_style_context_available=False,
+    )
+
+
 def test_plan_exactly_accounts_for_duration_and_recommends_unused_material() -> None:
     secret_source_text = "只应参与计数绝不能复制进计划" * 400
     plan = _build(unused_text=secret_source_text)
@@ -257,6 +276,8 @@ def test_plan_exactly_accounts_for_duration_and_recommends_unused_material() -> 
 
     options = {option.kind: option for option in plan.options}
     assert options["reuse_unused_material"].recommended is True
+    assert "一次受控扩写尝试" in options["reuse_unused_material"].explanation
+    assert "不保证" in options["reuse_unused_material"].explanation
     assert "add_supplemental_material" not in options
     assert "lower_target_duration" not in options
     assert secret_source_text not in plan.model_dump_json()
@@ -284,6 +305,154 @@ def test_show_notes_only_reference_remains_unused_for_spoken_recovery() -> None:
         UNUSED_REF
     ]
     assert plan.duration_resolution == "reuse_unused_material"
+
+
+def test_priority_candidates_are_bounded_and_missing_must_include_ranks_first() -> None:
+    draft = _draft()
+    editor_input = _editor_input(
+        target_minutes=10,
+        unused_text=None,
+    )
+    editor_input["creative_brief"]["must_include"] = ["钥匙装在透明文件袋里"]
+    extra_segments = [
+        {
+            "source_id": f"src_extra_{index:02d}",
+            "source_segment_id": f"seg_extra_{index:02d}",
+            "text": f"搬家后的第{index + 1}个普通片段，有一个可继续展开的生活细节。",
+        }
+        for index in range(MAX_LENGTH_RECOVERY_PRIORITY_REFS + 4)
+    ]
+    must_include_ref = {
+        "source_id": "src_must_include",
+        "source_segment_id": "seg_must_include",
+    }
+    extra_segments.append(
+        {
+            **must_include_ref,
+            "text": "交房那天，她把钥匙装在透明文件袋里，又在袋口贴了一张黄色便签。",
+        }
+    )
+    editor_input["initial_source_segments"].extend(extra_segments)
+
+    plan = _build_from_input(editor_input=editor_input, draft=draft)
+
+    candidates = plan.material.priority_candidate_source_refs
+    assert plan.material.priority_candidates_assessed is True
+    assert len(candidates) == MAX_LENGTH_RECOVERY_PRIORITY_REFS
+    assert candidates[0].model_dump() == must_include_ref
+    candidate_keys = {
+        (reference.source_id, reference.source_segment_id) for reference in candidates
+    }
+    source_by_key = {
+        (segment["source_id"], segment["source_segment_id"]): segment["text"]
+        for segment in editor_input["initial_source_segments"]
+    }
+    assert plan.material.priority_candidate_character_count == sum(
+        len("".join(source_by_key[key].split())) for key in candidate_keys
+    )
+
+    recovery = build_draft_length_recovery_plan(
+        improvement_plan=plan,
+        target_duration_minutes=10,
+    )
+    assert len(recovery.priority_unused_source_refs) == MAX_LENGTH_RECOVERY_PRIORITY_REFS
+    assert recovery.available_unused_character_count == (
+        plan.material.priority_candidate_character_count
+    )
+
+
+def test_priority_candidates_skip_exact_spoken_copy_and_duplicate_source_text() -> None:
+    draft = _draft()
+    editor_input = _editor_input(
+        target_minutes=10,
+        unused_text=None,
+    )
+    copied_ref = {
+        "source_id": "src_copied",
+        "source_segment_id": "seg_copied",
+    }
+    first_duplicate_ref = {
+        "source_id": "src_duplicate_a",
+        "source_segment_id": "seg_duplicate_a",
+    }
+    second_duplicate_ref = {
+        "source_id": "src_duplicate_b",
+        "source_segment_id": "seg_duplicate_b",
+    }
+    distinct_ref = {
+        "source_id": "src_distinct",
+        "source_segment_id": "seg_distinct",
+    }
+    duplicate_text = "搬空房间以后，她第一次听见行李箱轮子在地板上来回滚动的声音。"
+    editor_input["initial_source_segments"].extend(
+        [
+            {
+                **copied_ref,
+                "text": draft.podcast_script.opening.text,
+            },
+            {
+                **first_duplicate_ref,
+                "text": duplicate_text,
+            },
+            {
+                **second_duplicate_ref,
+                "text": duplicate_text,
+            },
+            {
+                **distinct_ref,
+                "text": "第二天早上，她仍然下意识走向旧住址楼下的早餐店。",
+            },
+        ]
+    )
+
+    plan = _build_from_input(editor_input=editor_input, draft=draft)
+
+    # The full inventory stays auditable; only the safe shortlist is filtered.
+    assert plan.material.unused_factual_segment_count == 4
+    candidate_keys = [
+        (reference.source_id, reference.source_segment_id)
+        for reference in plan.material.priority_candidate_source_refs
+    ]
+    assert (copied_ref["source_id"], copied_ref["source_segment_id"]) not in candidate_keys
+    assert (
+        first_duplicate_ref["source_id"],
+        first_duplicate_ref["source_segment_id"],
+    ) in candidate_keys
+    assert (
+        second_duplicate_ref["source_id"],
+        second_duplicate_ref["source_segment_id"],
+    ) not in candidate_keys
+    assert (distinct_ref["source_id"], distinct_ref["source_segment_id"]) in candidate_keys
+
+
+def test_raw_unused_volume_does_not_override_an_empty_candidate_shortlist() -> None:
+    draft = _draft(extra_text="甲" * 1_000)
+    editor_input = _editor_input(
+        target_minutes=15,
+        unused_text=None,
+    )
+    copied_text = draft.podcast_script.opening.text
+    editor_input["initial_source_segments"].extend(
+        [
+            {
+                "source_id": f"src_copied_{index}",
+                "source_segment_id": f"seg_copied_{index}",
+                "text": copied_text,
+            }
+            for index in range(4)
+        ]
+    )
+
+    plan = _build_from_input(editor_input=editor_input, draft=draft)
+
+    assert (
+        plan.material.unused_factual_character_count >= plan.duration.missing_script_character_count
+    )
+    assert plan.material.priority_candidates_assessed is True
+    assert plan.material.priority_candidate_character_count == 0
+    assert plan.material.priority_candidate_source_refs == []
+    assert plan.duration_resolution == "add_supplemental_material"
+    assert "reuse_unused_material" not in {option.kind for option in plan.options}
 
 
 def test_duration_inside_tolerance_does_not_require_center_target_recovery() -> None:
@@ -323,6 +492,9 @@ def test_pre_m38_v1_plan_inside_tolerance_remains_readable() -> None:
         draft=draft,
     )
     legacy = current.model_dump(mode="json")
+    legacy["material"].pop("priority_candidates_assessed")
+    legacy["material"].pop("priority_candidate_character_count")
+    legacy["material"].pop("priority_candidate_source_refs")
     legacy["duration_resolution"] = "reuse_unused_material"
     legacy["options"].insert(
         0,
@@ -341,6 +513,16 @@ def test_pre_m38_v1_plan_inside_tolerance_remains_readable() -> None:
     assert parsed.duration.actual_script_character_count == desired_characters
     assert parsed.duration.actual_script_character_count < target_characters
     assert parsed.duration_resolution == "reuse_unused_material"
+    assert parsed.material.priority_candidates_assessed is False
+
+    recovery = build_draft_length_recovery_plan(
+        improvement_plan=parsed,
+        target_duration_minutes=10,
+    )
+    assert recovery.available_unused_character_count == (
+        parsed.material.unused_factual_character_count
+    )
+    assert recovery.priority_unused_source_refs == parsed.material.unused_source_refs
 
 
 def test_unused_material_that_reaches_minimum_is_sufficient_for_recovery() -> None:
