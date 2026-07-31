@@ -150,6 +150,41 @@ Official references:
 - [MVP roadmap](docs/roadmap.zh-CN.md)
 - [Architecture decision: lightweight orchestration](docs/adr/0001-lightweight-orchestration.zh-CN.md)
 - [Development log](docs/devlog.md)
+- [M4/M5 local Console learning chapter](docs/learning/m4-m5-local-console.zh-CN.md)
+
+## Run the local Console
+
+The current product loop can be operated from a browser instead of Swagger.
+Start the backend and frontend in two terminals:
+
+```bash
+cd /Users/mac/Documents/wise_project/epiphany-studio/backend
+source .venv/bin/activate
+alembic upgrade head
+uvicorn epiphany.main:app --reload
+```
+
+```bash
+cd /Users/mac/Documents/wise_project/epiphany-studio/frontend
+npm install
+npm run dev
+```
+
+Then open <http://127.0.0.1:5173>. Vite proxies `/api` to FastAPI at
+<http://127.0.0.1:8000>; Swagger remains available at
+<http://127.0.0.1:8000/docs> for low-level debugging.
+
+The local Console can create and reopen Projects, import and inspect Sources,
+create idempotent Project-scoped Runs, and replay each Run's Events, Tasks,
+Artifacts, ModelCalls, errors, token usage, and estimated cost. Its SSE stream
+replays durable SQLite Events after reconnect, emits heartbeats while idle,
+and closes at a terminal Run state. Human checkpoints, Markdown outputs,
+quality feedback, and explicit Revision actions reuse the existing backend
+contracts.
+
+This is still a local development Console. It does not yet include a visual
+Scaffold editor, authentication, Docker packaging, production deployment,
+audio upload, speech-to-text, or voice cloning.
 
 ## Status
 
@@ -627,8 +662,11 @@ bypass are rejected, and no third Planner is queued. This validates the
 bounded workflow and provenance, not the real-world quality of model questions
 or a person's willingness to record the result.
 
-After M3.9, the next product stage remains M4.1 replayable
-SSE, followed by the M5.1 minimal Run Trace UI.
+M4 reliability and replayable SSE are now exposed through the first local Web
+Console. The Project/Source workspace and Run Trace pages are implemented and
+covered by backend and frontend tests. Scaffold editing, Docker packaging,
+single-machine production deployment, and backup operations remain open M5
+work rather than being implied by the local demo.
 
 See the
 [M3.6 learning chapter](docs/learning/m3-6-guided-revision-writing-style.zh-CN.md)
@@ -652,6 +690,9 @@ The full frozen-corpus experiment is recorded in the
 The draft-anchor contract, bounded answer loop, fallback behavior, API
 examples, and Fake E2E evidence are in the
 [M3.9 learning chapter](docs/learning/m3-9-draft-aware-supplemental-interview.zh-CN.md).
+The Project workspace, replayable SSE contract, two-terminal startup, complete
+browser walkthrough, and debugging boundaries are documented in the
+[M4/M5 local Console chapter](docs/learning/m4-m5-local-console.zh-CN.md).
 
 ## License
 

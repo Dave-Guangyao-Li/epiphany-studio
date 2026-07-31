@@ -2,8 +2,8 @@
 
 这份文档回答四个问题：
 
-1. 怎样把后端启动起来；
-2. 当前没有正式前端时，去哪里操作；
+1. 怎样把后端和本地 Console 启动起来；
+2. 怎样从浏览器操作，什么时候仍应该使用 Swagger；
 3. 怎样证明功能真的工作；
 4. 出错以后从哪里开始查。
 
@@ -27,6 +27,13 @@ alembic upgrade head
 - `pip install`：安装运行和测试依赖；
 - `alembic upgrade head`：把本地数据库结构升级到最新版。
 
+再安装本地 Console 依赖：
+
+```bash
+cd /Users/mac/Documents/wise_project/epiphany-studio/frontend
+npm install
+```
+
 以后重新打开终端，通常只需要：
 
 ```bash
@@ -34,7 +41,9 @@ cd /Users/mac/Documents/wise_project/epiphany-studio/backend
 source .venv/bin/activate
 ```
 
-## 2. 启动后端
+## 2. 启动后端与本地 Console
+
+终端 A 启动后端：
 
 ```bash
 uvicorn epiphany.main:app --reload
@@ -47,20 +56,52 @@ uvicorn epiphany.main:app --reload
 
 `--reload` 表示修改代码后自动重启，适合本地开发。
 
+终端 B 启动前端：
+
+```bash
+cd /Users/mac/Documents/wise_project/epiphany-studio/frontend
+npm run dev
+```
+
+然后打开：
+
+- 本地 Console：<http://127.0.0.1:5173>
+- 后端 Swagger：<http://127.0.0.1:8000/docs>
+
+Vite 会把浏览器请求的 `/api` 代理到 `127.0.0.1:8000`。如果页面能打开但
+所有数据请求都失败，先检查终端 A 的 Uvicorn 是否仍在运行。
+
 ## 3. 当前的“界面”是什么
 
-正式 Web UI 计划在 M5 实现。当前使用 FastAPI 自动生成的 Swagger：
+现在有两个入口：
+
+- 本地 Console 面向完整体验：Project、Source、Run 创建和 Trace；
+- Swagger 面向单个 API 调试：精确填写 JSON、查看状态码与 Header。
+
+Console 可以：
+
+- 创建并在刷新后重新打开 Project；
+- 导入、查看按段落保存的 Source；
+- 配置受众、语气、目标时长、事实 Source 与授权写作样本；
+- 创建 Run，并查看 Event、Task、Artifact、ModelCall、错误、Token 和费用；
+- 在人工检查点粘贴补充口述、保存成 Source 并 Resume；
+- 查看 Scaffold、Draft、Show Notes、质量报告，以及显式反馈/Revision。
+
+Swagger 仍然有价值：
 
 - 它能展示所有 API；
 - 可以填写 JSON；
 - 可以点击 Execute 发请求；
 - 可以看到 HTTP 状态码、响应 JSON 和 Header。
 
-它是开发调试界面，不是产品最终体验。
+本地 Console 仍是开发阶段界面，不代表部署已经完成。它没有账号系统、多人
+协作、可视化 Scaffold 编辑器、音频上传、STT 或语音克隆。完整页面流程见
+[M4/M5 本地工作台学习章节](m4-m5-local-console.zh-CN.md)。
 
-## 4. 手动走通 Source、人工暂停、Editor 与最终导出
+## 4. 用 Swagger 手动走通 Source、人工暂停、Editor 与最终导出
 
-这一节使用的是 Swagger 里的文字输入框，不需要麦克风。补充“口述”是指
+如果需要逐个观察请求，可以继续使用这一节的 Swagger 流程；日常产品体验优先
+使用本地 Console。这一节使用文字输入框，不需要麦克风。补充“口述”是指
 已经转成文字的内容；`voice_note_transcript` 只是 Source 分类，不会执行
 录音或语音识别。
 
@@ -273,7 +314,20 @@ pytest
 当前全量基线：
 
 ```text
-151 passed
+backend: 363 passed
+frontend: 15 passed
+```
+
+后端和前端分别运行：
+
+```bash
+cd /Users/mac/Documents/wise_project/epiphany-studio/backend
+source .venv/bin/activate
+pytest
+
+cd /Users/mac/Documents/wise_project/epiphany-studio/frontend
+npm test
+npm run build
 ```
 
 定向测试研究、采访脚手架、人工检查点、Editor 和导出：
@@ -315,8 +369,8 @@ pytest tests/test_research_schemas.py \
 - 一个 Child 失败后的父子失败传播；
 - 完整 HTTP API 集成测试。
 
-这里的 151 是当前基线；M2.2 的 28 项、M2.3a 的 32 项、M2.3b 的 83 项、
-M2.4 的 99 项和 M3.1 的 130 项仍是各阶段当时的历史结果，不应回写修改。
+这里的 363/15 是本次 M4/M5 本地 Console 验证基线；早期章节里的 28、32、
+83、99、130、151 等数字仍是各阶段当时的历史结果，不应回写修改。
 
 检查代码质量：
 
@@ -338,9 +392,9 @@ alembic check
 No new upgrade operations detected.
 ```
 
-M2.4、M3.1 和 M3.2 都复用已有 Run、Task、Artifact、Event、ModelCall、Source 与
-SourceSegment 表，没有新增数据库字段，因此 Alembic 仍为
-`0003_model_call_trace (head)`，没有新的 migration。
+M4/M5 新增 Project 工作区后，当前 head 是 `0005_project_workspace`。它新增
+`projects`、`project_sources`，并给 `runs` 增加 Project 归属和创建幂等字段。
+旧的非 Project Run 仍可读取，因为 `project_id` 允许为空。
 
 ### 5.1 一条命令跑完整 M3.2 API 链路
 

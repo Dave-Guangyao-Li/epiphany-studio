@@ -17,11 +17,12 @@
 ## 2. 系统边界
 
 ```text
-Web UI
+Local Web Console (React + Vite)
   |
-  | HTTP + SSE
+  | /api proxy: HTTP + SSE
   v
 FastAPI
+  |- Project Service
   |- Run Service
   |- Source Service
   |- Event Service
@@ -34,6 +35,11 @@ FastAPI
           +--> Hosted Model Provider
           +--> Fake Provider
 ```
+
+本地 Console 是现有后端契约的可视化入口，不保存第二份业务状态。Project、
+Source、Run、Task、Artifact、Event 与 ModelCall 的真相仍在 SQLite；浏览器
+刷新后会重新读取它们。Vite 开发服务器只把 `/api` 代理到本机 FastAPI，避免
+为了本地开发额外引入网关或跨域配置。
 
 ## 3. 编排与调度的边界
 
@@ -361,7 +367,10 @@ Run 成功状态不受影响。整个阶段复用现有 `runs`、`tasks`、`arti
 ### `runs`
 
 - `id`
+- `project_id`（可为空，Project 页面创建的 Run 必须绑定）
 - `parent_run_id`（普通 Run 为空；Revision 子 Run 指向父 Run）
+- `submission_id`（Project 内创建 Run 的调用方幂等键）
+- `request_fingerprint`（同一幂等键是否仍是同一请求的摘要）
 - `workflow_type`
 - `workflow_version`
 - `status`
@@ -372,6 +381,11 @@ Run 成功状态不受影响。整个阶段复用现有 `runs`、`tasks`、`arti
 - `cancel_requested_at`
 - `created_at`
 - `updated_at`
+
+`(project_id, submission_id)` 有唯一约束。浏览器双击或网络重试提交相同 key 与
+相同 payload 时，服务端回读原 Run，并返回
+`X-Idempotent-Replay: true`；同 key 换 payload 返回 409。Revision 子 Run
+继承父 Run 的 `project_id`，因此整条 lineage 仍出现在同一个 Project 历史里。
 
 ### `tasks`
 
@@ -424,7 +438,10 @@ Run 成功状态不受影响。整个阶段复用现有 `runs`、`tasks`、`arti
 
 ### 领域对象
 
-- `projects`（M3 前补充）
+- `projects`
+  - 本地创作工作区的标题、描述和时间戳
+- `project_sources`
+  - Project 与全局去重 Source 的多对多关联；复合主键防止重复关联
 - `sources`
   - 规范化全文、SHA-256、类型、metadata、字符数
 - `source_segments`
@@ -620,8 +637,11 @@ timeout、lease、fencing、startup recovery 和 cancel 复用同一 Worker 机�
 
 ```text
 POST /projects
+GET  /projects
+GET  /projects/{id}
 POST /projects/{id}/sources
-POST /projects/{id}/episode-runs
+POST /projects/{id}/runs
+GET  /runs?project_id={id}
 GET  /runs/{id}
 GET  /runs/{id}/exports/interview-scaffold.md
 GET  /runs/{id}/exports/podcast-draft.md
@@ -640,8 +660,30 @@ GET  /runs/{id}/events
 GET  /runs/{id}/events/stream
 ```
 
-SSE 用于低成本实时显示。客户端断线后先从数据库按 `sequence` 补事件，
-再连接实时流。SSE 不是状态真相。
+SSE 用于低成本实时显示，但不是状态真相。每个 durable Event 在同一 Run 内有
+单调递增的 `sequence`。连接建立后，服务端先返回 `sequence > cursor` 的历史
+Event，再以短轮询读取 SQLite 中的新 Event；客户端可以用 `after` query 或
+`Last-Event-ID` 恢复，服务端取两者较大值，避免重复倒退。浏览器按 sequence
+排序和去重，因此 HTTP replay 与 SSE 同时看到同一 Event 也只展示一次。
+
+空闲且非终态的 Run 每 15 秒发送 SSE 注释 heartbeat，维持代理连接但不伪造
+领域 Event。Run 进入 `succeeded`、`failed` 或 `cancelled` 后，服务端在发送完
+剩余 durable Event 后正常结束流。UI 还会定时执行 HTTP refresh；断流只改变
+连接提示，不会改变 Run 状态，也不会触发模型调用。
+
+### 本地 Console 的职责边界
+
+- `/projects`：创建、列出并重新打开本地 Project；
+- `/projects/{id}`：导入/查看 Source、配置 Run、查看不可变 Run 历史；
+- `/runs/{id}`：展示 Event Timeline、Task、Artifact、ModelCall、错误与费用；
+- 在人工检查点把文字保存为新 Source，再显式 Resume；
+- 查看 Scaffold、Draft、Show Notes、质量报告，并显式提交反馈或 Revision。
+
+Console 当前不是部署后的多用户产品：没有登录、权限、协作、可视化 Scaffold
+编辑器、音频上传、STT，也不承担数据库备份。Docker 与单机部署仍属于未完成的
+M5 切片。
+
+### 输出与审稿 API
 
 Scaffold 导出接受 `waiting_for_user` 或 `succeeded`，并从该 Run 已完成的
 `build_interview_scaffold_result` Artifact 读取内容；它不依赖最终

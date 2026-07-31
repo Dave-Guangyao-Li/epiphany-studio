@@ -1,6 +1,6 @@
 # MVP 路线图
 
-更新时间：2026-07-30
+更新时间：2026-07-31
 
 路线图按可演示的纵向切片推进，不按“先把所有基础设施搭完”推进。
 
@@ -503,26 +503,40 @@ ModelCall、Draft、质量报告、问题计划和 Revision lineage 放进可回
 
 ## M4：可靠性与 Trace
 
-- [ ] timeout / bounded retry
-- [ ] idempotency key
-- [ ] lease / fencing
-- [ ] startup recovery
-- [ ] cancel propagation
-- [ ] SSE replay + live stream
-- [ ] 故障注入测试
+- [x] timeout / bounded retry
+- [x] idempotency key
+- [x] lease / fencing
+- [x] startup recovery
+- [x] cancel propagation
+- [x] SSE replay + live stream
+- [x] 故障注入测试
 
 演示：运行中杀掉 Worker，重启后恢复；取消父 Run 后迟到结果无法提交。
 
+可靠性能力不是为了 UI 临时补出来的：M1—M3 已持续覆盖 timeout、retry、
+lease、fencing、恢复、取消传播与幂等提交。本阶段补齐可重放 SSE：服务端先按
+Event `sequence` 从 SQLite 回放，再轮询新事件；空闲连接发送 heartbeat，Run
+进入 `succeeded / failed / cancelled` 后结束。前端同时保留 HTTP replay 和
+定时状态刷新，因此 SSE 断开不会改变数据库真相。相关实现与本地验证见
+[M4/M5 本地工作台学习章节](learning/m4-m5-local-console.zh-CN.md)。
+
 ## M5：最小 Web UI 与部署
 
-- [ ] Project/Source 页面
-- [ ] Run trace 页面
+- [x] Project/Source 页面
+- [x] Run trace 页面
 - [ ] Scaffold 编辑与恢复
 - [ ] Dockerfile
 - [ ] 单机部署
 - [ ] 健康检查、结构化日志、备份说明
 
-演示：从浏览器完整走通一次创作流程。
+当前本地 Console 已能创建 Project、导入/查看 Source、配置并创建 Run，随后
+查看 Event、Task、Artifact、ModelCall、错误、费用和 Markdown 输出；在人工
+检查点还能粘贴补充口述并 Resume。Project 创建 Run 使用调用方稳定的
+`submission_id` 防止双击或网络重试产生两个 Run。Scaffold 仍然只能查看/导出，
+还没有可视化编辑器；Docker、单机部署和生产备份也没有完成，因此不提前勾选。
+
+演示：在本地浏览器从 Project/Source 走到 Run Trace，并完成一次人工暂停与
+恢复。线上部署留在后续独立切片。
 
 ## Later
 
