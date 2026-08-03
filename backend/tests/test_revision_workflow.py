@@ -22,18 +22,39 @@ from epiphany.editor_schemas import (
 )
 from epiphany.models import ModelCall, Run, Task
 from epiphany.revision_schemas import (
+    LEGACY_DRAFT_REVISION_REQUEST_VERSION,
     REVISE_PODCAST_DRAFT,
     CreateDraftRevisionRequest,
     PodcastRevisionTaskInput,
 )
-from epiphany.runtime.orchestrator import GUIDED_REVISION_WORKFLOW_VERSION
+from epiphany.runtime.orchestrator import (
+    DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION,
+    GUIDED_REVISION_WORKFLOW_VERSION,
+)
+from epiphany.runtime.providers import (
+    FakeProvider,
+    ProviderResult,
+    TaskInvocation,
+)
 from epiphany.runtime.worker import Worker
 from epiphany.services import (
     DraftRevisionConflict,
     DraftRevisionNotAllowed,
     RunService,
+    SupplementalInterviewPlanNotReady,
 )
 from epiphany.source_service import SourceService
+
+
+class _InvalidSupplementalPlannerFake(FakeProvider):
+    async def generate(self, invocation: TaskInvocation) -> ProviderResult:
+        if invocation.kind == "plan_draft_supplemental_interview":
+            return ProviderResult(
+                content={"questions": []},
+                provider=self.name,
+                model=self.model,
+            )
+        return await super().generate(invocation)
 
 
 def _factual_material(prefix: str, *, paragraph_count: int, detail_count: int) -> str:
@@ -64,6 +85,20 @@ def _writing_sample() -> str:
             "如果非要总结，我宁愿把结论放轻一点，也不想把生活说得太整齐。"
         )
         for index in range(1, 7)
+    )
+
+
+def _supplemental_answer_material(*, round_number: int) -> str:
+    return "\n\n".join(
+        (
+            f"这是对第{round_number}轮问题{index}的具体回答。"
+            "那天我坐在窗边，钥匙放在桌角，雨刚停，楼道里有人拖着行李箱。"
+            "我先关掉云盘，又重新点开录音；听到停顿时没有哭，"
+            "只是把手从触控板上移开。后来我给朋友打了电话，说我终于承认"
+            "停更不是因为忙，而是怕说得不够好。现在回头看，"
+            "这个动作比任何总结都更接近我当时的状态。"
+        )
+        for index in range(1, 5)
     )
 
 
@@ -397,6 +432,248 @@ async def test_reuse_unused_material_revision_expands_spoken_script_with_new_evi
     assert child_exact_repeat_count <= parent_exact_repeat_count
 
 
+async def test_v9_draft_aware_questions_drive_two_bounded_answer_revisions(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    """Exercise the complete Fake loop from grounded recovery to answered questions."""
+
+    database, service, worker = runtime
+    (
+        parent_run_id,
+        _style_source_id,
+        _supplemental_source_id,
+    ) = await _create_completed_parent_with_style(
+        database,
+        service,
+        worker,
+        supplemental_paragraph_count=8,
+    )
+    parent_plan = (await service.get_draft_improvement_plan(parent_run_id)).plan
+    assert parent_plan.duration_resolution == "reuse_then_supplement"
+
+    recovered = await service.create_draft_revision(
+        parent_run_id,
+        request=CreateDraftRevisionRequest(
+            submission_id="m3.9-grounded-recovery",
+            selected_actions=["reuse_unused_material"],
+            revision_instruction="先使用有价值的未展开素材；仍然不足时不要灌水。",
+        ),
+    )
+    assert recovered.run.workflow_version == DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION
+    assert await worker.run_until_idle() == 3
+    first_revision = await service.get_run(recovered.run.id)
+    assert first_revision.status == "succeeded"
+    assert {task.kind for task in first_revision.tasks} == {
+        REVISE_PODCAST_DRAFT,
+        "review_podcast_draft",
+        "plan_draft_supplemental_interview",
+    }
+    first_draft = next(
+        artifact
+        for artifact in first_revision.artifacts
+        if artifact.id == first_revision.output_artifact_id
+    )
+    first_plan = await service.get_supplemental_interview_plan(first_revision.id)
+    calls_before_read_replay = first_revision.model_call_count
+    replayed_plan = await service.get_supplemental_interview_plan(first_revision.id)
+    assert replayed_plan.artifact.id == first_plan.artifact.id
+    assert (await service.get_run(first_revision.id)).model_call_count == calls_before_read_replay
+    assert first_plan.plan.round_number == 1
+    assert [question.question_id for question in first_plan.plan.questions] == [
+        "q1",
+        "q2",
+        "q3",
+    ]
+    assert all(
+        question.anchor_quote
+        in next(
+            anchor.excerpt
+            for anchor in first_plan.plan.draft_anchors
+            if anchor.anchor_id == question.anchor_id
+        )
+        for question in first_plan.plan.questions
+    )
+    with pytest.raises(
+        DraftRevisionNotAllowed,
+        match="cannot bypass the answered-question path",
+    ):
+        await service.create_draft_revision(
+            first_revision.id,
+            request=CreateDraftRevisionRequest(
+                submission_id="m3.9-bypass-plan-with-reuse",
+                selected_actions=["reuse_unused_material"],
+            ),
+        )
+
+    first_answer_id = await _import_source(
+        database,
+        title="M3.9 第一轮定向补充口述",
+        source_type="voice_note_transcript",
+        text=_supplemental_answer_material(round_number=1),
+    )
+    with pytest.raises(
+        DraftRevisionNotAllowed,
+        match="requires one persisted interview plan",
+    ):
+        await service.create_draft_revision(
+            first_revision.id,
+            request=CreateDraftRevisionRequest(
+                submission_id="m3.9-bypass-plan",
+                selected_actions=["add_supplemental_material"],
+                source_ids=[first_answer_id],
+            ),
+        )
+    with pytest.raises(
+        DraftRevisionNotAllowed,
+        match="question is unavailable",
+    ):
+        await service.create_draft_revision(
+            first_revision.id,
+            request=CreateDraftRevisionRequest(
+                submission_id="m3.9-unknown-question",
+                selected_actions=["add_supplemental_material"],
+                source_ids=[first_answer_id],
+                supplemental_interview_plan_artifact_id=first_plan.artifact.id,
+                answered_question_ids=["q6"],
+            ),
+        )
+
+    first_answer_revision = await service.create_draft_revision(
+        first_revision.id,
+        request=CreateDraftRevisionRequest(
+            submission_id="m3.9-answer-round-1",
+            selected_actions=["add_supplemental_material"],
+            source_ids=[first_answer_id],
+            supplemental_interview_plan_artifact_id=first_plan.artifact.id,
+            answered_question_ids=[question.question_id for question in first_plan.plan.questions],
+        ),
+    )
+    assert await worker.run_until_idle() == 3
+    second_revision = await service.get_run(first_answer_revision.run.id)
+    second_draft = next(
+        artifact
+        for artifact in second_revision.artifacts
+        if artifact.id == second_revision.output_artifact_id
+    )
+    assert second_revision.input_json["supplemental_interview_round"] == 1
+    assert _spoken_character_count(second_draft.content_json) > _spoken_character_count(
+        first_draft.content_json
+    )
+    second_plan = await service.get_supplemental_interview_plan(second_revision.id)
+    assert second_plan.plan.round_number == 2
+    assert {question.prompt for question in first_plan.plan.questions}.isdisjoint(
+        {question.prompt for question in second_plan.plan.questions}
+    )
+
+    second_answer_id = await _import_source(
+        database,
+        title="M3.9 第二轮定向补充口述",
+        source_type="voice_note_transcript",
+        text=_supplemental_answer_material(round_number=2),
+    )
+    second_answer_revision = await service.create_draft_revision(
+        second_revision.id,
+        request=CreateDraftRevisionRequest(
+            submission_id="m3.9-answer-round-2",
+            selected_actions=["add_supplemental_material"],
+            source_ids=[second_answer_id],
+            supplemental_interview_plan_artifact_id=second_plan.artifact.id,
+            answered_question_ids=[question.question_id for question in second_plan.plan.questions],
+        ),
+    )
+    assert await worker.run_until_idle() == 2
+    final_revision = await service.get_run(second_answer_revision.run.id)
+    final_draft = next(
+        artifact
+        for artifact in final_revision.artifacts
+        if artifact.id == final_revision.output_artifact_id
+    )
+    minimum_characters = math.ceil(15 * 280 * 0.85)
+    assert final_revision.input_json["supplemental_interview_round"] == 2
+    assert _spoken_character_count(final_draft.content_json) >= minimum_characters
+    assert all(task.kind != "plan_draft_supplemental_interview" for task in final_revision.tasks)
+    with pytest.raises(SupplementalInterviewPlanNotReady):
+        await service.get_supplemental_interview_plan(final_revision.id)
+
+
+async def test_v9_planner_validation_failure_preserves_draft_with_fallback_plan(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    (
+        parent_run_id,
+        _style_source_id,
+        _supplemental_source_id,
+    ) = await _create_completed_parent_with_style(
+        database,
+        service,
+        worker,
+        supplemental_paragraph_count=8,
+    )
+    revision = await service.create_draft_revision(
+        parent_run_id,
+        request=CreateDraftRevisionRequest(
+            submission_id="m3.9-invalid-planner-fallback",
+            selected_actions=["reuse_unused_material"],
+        ),
+    )
+    worker.provider = _InvalidSupplementalPlannerFake()
+    assert await worker.run_until_idle() == 3
+
+    completed = await service.get_run(revision.run.id)
+    assert completed.status == "succeeded"
+    assert completed.output_artifact_id is not None
+    planner_task = next(
+        task for task in completed.tasks if task.kind == "plan_draft_supplemental_interview"
+    )
+    assert planner_task.status == "failed"
+
+    plan = await service.get_supplemental_interview_plan(completed.id)
+    assert plan.plan.generation_mode == "deterministic_fallback"
+    assert plan.plan.status == "awaiting_user"
+    assert len(plan.plan.questions) == 3
+    assert all(question.anchor_quote for question in plan.plan.questions)
+
+
+async def test_omitted_version_replays_a_persisted_legacy_revision_request(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    (
+        parent_run_id,
+        _style_source_id,
+        _supplemental_source_id,
+    ) = await _create_completed_parent_with_style(
+        database,
+        service,
+        worker,
+        supplemental_paragraph_count=8,
+    )
+    created = await service.create_draft_revision(
+        parent_run_id,
+        request=CreateDraftRevisionRequest(
+            version=LEGACY_DRAFT_REVISION_REQUEST_VERSION,
+            submission_id="legacy-omitted-version-replay",
+            selected_actions=["reuse_unused_material"],
+        ),
+    )
+    replay_request = CreateDraftRevisionRequest(
+        submission_id="legacy-omitted-version-replay",
+        selected_actions=["reuse_unused_material"],
+    )
+    assert "version" not in replay_request.model_fields_set
+
+    replayed = await service.create_draft_revision(
+        parent_run_id,
+        request=replay_request,
+    )
+
+    assert replayed.idempotent_replay is True
+    assert replayed.run.id == created.run.id
+    assert replayed.request_artifact_id == created.request_artifact_id
+    assert replayed.run.workflow_version == GUIDED_REVISION_WORKFLOW_VERSION
+
+
 async def test_reuse_unused_material_is_rejected_when_plan_does_not_offer_it(
     runtime: tuple[Database, RunService, Worker],
 ) -> None:
@@ -569,7 +846,7 @@ async def test_guided_revision_is_explicit_idempotent_scored_and_style_only(
     )
     assert created.idempotent_replay is False
     assert created.run.workflow_type == "podcast-revision"
-    assert created.run.workflow_version == GUIDED_REVISION_WORKFLOW_VERSION
+    assert created.run.workflow_version == DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION
     assert created.run.parent_run_id == parent_run_id
     # The explicit request only queues work; claiming the first task changes
     # the child from queued to running.

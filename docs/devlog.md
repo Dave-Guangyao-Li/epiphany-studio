@@ -2,6 +2,44 @@
 
 ## 2026-07-31
 
+### M3.9 draft-aware supplemental interview
+
+- Added workflow v9 only for current v2 `podcast-revision` child Runs. New
+  initial episode Runs and explicit legacy Revision Request v1 keep their
+  frozen v8 behavior; an omitted version can still idempotently replay a
+  persisted historical v1 request.
+- Added the serial `plan_draft_supplemental_interview` Planner after a Revision
+  Editor and Reviewer when the exact spoken-character count remains below the
+  Creative Brief's 85% floor. Duration gating no longer relies on the rounded
+  display-minute value.
+- Build at most 24 trusted anchors from the latest Draft's spoken opening,
+  section paragraphs, and closing. Each model question must bind one allowed
+  anchor and copy an exact quote; code validates it and injects stable
+  `q1`--`q6` IDs.
+- Persist the question Plan as an Artifact while leaving the valid Draft as the
+  succeeded Run output. `GET /runs/{id}/supplemental-interview-plan` is
+  read-only and creates no Task, ModelCall, or fee.
+- Store user answers as new factual Sources, and version the Revision Request
+  so Plan Artifact ID, answered question IDs, and Source IDs remain exactly
+  traceable. The answer Revision explicitly prioritizes those Sources while
+  preserving grounded parent content.
+- Derive interview rounds on the server and stop after two or once the exact
+  duration floor is reached. Once a Plan exists, another
+  `reuse_unused_material` Revision cannot bypass the answered-question path.
+- Preserve valid Drafts when the Planner exhausts retries or returns invalid
+  output. A deterministic fallback Plan remains tied to exact latest-Draft
+  anchors, and round two uses different dialogue, sensory, and contrast angles
+  instead of repeating round one.
+- Reused the existing Run, Task, Artifact, ModelCall, Event, Source, lease,
+  retry, cancellation, and lineage tables; no Alembic migration or new
+  framework was required. No paid DeepSeek request was made in this slice.
+- The complete Fake E2E grows 2,509 → 3,073 → 3,637 spoken characters across
+  two answer-driven Revisions, crosses the 3,570-character floor, and proves
+  read replay, Plan enforcement, unknown-question rejection, provenance,
+  fallback, idempotency, and the no-third-round boundary.
+- Final validation passed all 354 backend tests, Ruff formatting/lint, and
+  `git diff --check`.
+
 ### M3.8 source-grounded spoken-length recovery
 
 - Corrected the Improvement Plan's material inventory to use only references

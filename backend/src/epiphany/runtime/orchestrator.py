@@ -41,13 +41,21 @@ from epiphany.material_readiness import (
     assess_material_readiness,
 )
 from epiphany.models import Artifact, Run, Source, Task
+from epiphany.quality_contract_schemas import DURATION_TOLERANCE_RATIO
 from epiphany.research_schemas import THEME_RESEARCH, TIMELINE_RESEARCH
-from epiphany.revision_schemas import REVISE_PODCAST_DRAFT
+from epiphany.revision_schemas import REVISE_PODCAST_DRAFT, duration_character_bounds
 from epiphany.state_machine import (
     RunStatus,
     TaskStatus,
     validate_run_transition,
     validate_task_transition,
+)
+from epiphany.supplemental_interview_schemas import (
+    PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW,
+    DraftSupplementalInterviewTaskInput,
+    SupplementalInterviewPlan,
+    build_draft_question_anchors,
+    build_fallback_supplemental_interview_plan,
 )
 
 logger = logging.getLogger("epiphany.orchestrator")
@@ -63,16 +71,27 @@ MATERIAL_READINESS_WORKFLOW_VERSION = "v5"
 LEGACY_QUALITY_REVIEW_WORKFLOW_VERSION = "v6"
 CALIBRATED_QUALITY_REVIEW_WORKFLOW_VERSION = "v7"
 GUIDED_REVISION_WORKFLOW_VERSION = "v8"
+DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION = "v9"
+# Episode creation remains on the frozen v8 contract. M3.9 is deliberately
+# narrower: newly requested v2 child Revisions opt into v9, while existing
+# episode/E2E behavior and persisted v8 work remain reproducible.
 QUALITY_REVIEW_WORKFLOW_VERSION = GUIDED_REVISION_WORKFLOW_VERSION
 QUALITY_REVIEW_WORKFLOW_VERSIONS = (
     LEGACY_QUALITY_REVIEW_WORKFLOW_VERSION,
     CALIBRATED_QUALITY_REVIEW_WORKFLOW_VERSION,
-    QUALITY_REVIEW_WORKFLOW_VERSION,
+    GUIDED_REVISION_WORKFLOW_VERSION,
+    DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION,
 )
 DETERMINISTIC_FACTS_WORKFLOW_VERSIONS = (
     CALIBRATED_QUALITY_REVIEW_WORKFLOW_VERSION,
     GUIDED_REVISION_WORKFLOW_VERSION,
+    DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION,
 )
+STYLE_AWARE_QUALITY_REVIEW_WORKFLOW_VERSIONS = (
+    GUIDED_REVISION_WORKFLOW_VERSION,
+    DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION,
+)
+MAX_SUPPLEMENTAL_INTERVIEW_ROUNDS = 2
 
 
 class Orchestrator:
@@ -133,11 +152,15 @@ class Orchestrator:
 
         if (
             run.workflow_type != "podcast-revision"
-            or run.workflow_version != GUIDED_REVISION_WORKFLOW_VERSION
+            or run.workflow_version
+            not in {
+                GUIDED_REVISION_WORKFLOW_VERSION,
+                DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION,
+            }
             or run.parent_run_id is None
             or run.status != RunStatus.QUEUED
         ):
-            raise ValueError("revision task requires a queued v8 child Run")
+            raise ValueError("revision task requires a queued v8-v9 child Run")
         task = await self._enqueue_task(
             session,
             run=run,
@@ -188,7 +211,7 @@ class Orchestrator:
             }
             or run.status != RunStatus.RUNNING
         ):
-            raise ValueError("editor can only be queued for a running v4-v8 episode workflow")
+            raise ValueError("editor can only be queued for a running v4-v9 episode workflow")
 
         task = await self._enqueue_task(
             session,
@@ -234,6 +257,17 @@ class Orchestrator:
             and failed_task.kind == REVIEW_PODCAST_DRAFT
         ):
             await self._complete_quality_review_unavailable(
+                session,
+                run=run,
+                failed_task=failed_task,
+            )
+            return
+        if (
+            run.workflow_type == "podcast-revision"
+            and run.workflow_version == DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION
+            and failed_task.kind == PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW
+        ):
+            await self._complete_supplemental_interview_unavailable(
                 session,
                 run=run,
                 failed_task=failed_task,
@@ -424,6 +458,13 @@ class Orchestrator:
         run: Run,
         completed_task: Task,
     ) -> None:
+        if completed_task.kind == PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW:
+            await self._complete_supplemental_interview_plan(
+                session,
+                run=run,
+                completed_task=completed_task,
+            )
+            return
         if completed_task.kind == REVIEW_PODCAST_DRAFT:
             await self._complete_draft_quality_review(
                 session,
@@ -741,7 +782,7 @@ class Orchestrator:
             MATERIAL_READINESS_WORKFLOW_VERSION,
             *QUALITY_REVIEW_WORKFLOW_VERSIONS,
         }:
-            raise ValueError("editor task is only supported by a v4-v8 Draft workflow")
+            raise ValueError("editor task is only supported by a v4-v9 Draft workflow")
         if completed_task.parent_task_id is not None:
             raise ValueError("editor task must be a sequential root task")
         if completed_task.output_artifact_id is None:
@@ -911,7 +952,7 @@ class Orchestrator:
                 {
                     "review_contract_version": (
                         STYLE_AWARE_MODEL_REVIEW_TASK_VERSION
-                        if run.workflow_version == GUIDED_REVISION_WORKFLOW_VERSION
+                        if run.workflow_version in STYLE_AWARE_QUALITY_REVIEW_WORKFLOW_VERSIONS
                         else MODEL_REVIEW_TASK_VERSION
                     ),
                     "deterministic_metrics_artifact_id": metrics_artifact.id,
@@ -920,7 +961,7 @@ class Orchestrator:
                     ).model_dump(mode="json"),
                 }
             )
-            if run.workflow_version == GUIDED_REVISION_WORKFLOW_VERSION:
+            if run.workflow_version in STYLE_AWARE_QUALITY_REVIEW_WORKFLOW_VERSIONS:
                 profile = editor_task.input_json.get("writing_style_profile")
                 if profile is not None:
                     review_payload.update(
@@ -997,7 +1038,7 @@ class Orchestrator:
             or completed_task.parent_task_id is not None
             or completed_task.output_artifact_id is None
         ):
-            raise ValueError("quality Reviewer is only supported by a sequential v6-v8 workflow")
+            raise ValueError("quality Reviewer is only supported by a sequential v6-v9 workflow")
 
         review_artifact = await session.get(Artifact, completed_task.output_artifact_id)
         if (
@@ -1064,11 +1105,12 @@ class Orchestrator:
                 "quality_report_id": report_artifact.id,
             },
         )
-        await self._succeed_after_quality_review(
+        await self._finish_or_request_draft_supplement(
             session,
             run=run,
             draft_artifact=draft_artifact,
             report_artifact=report_artifact,
+            deterministic=deterministic,
         )
 
     async def _complete_quality_review_unavailable(
@@ -1125,12 +1167,400 @@ class Orchestrator:
                 "error_code": failed_task.error_code,
             },
         )
+        await self._finish_or_request_draft_supplement(
+            session,
+            run=run,
+            draft_artifact=draft_artifact,
+            report_artifact=report_artifact,
+            deterministic=deterministic,
+        )
+
+    async def _finish_or_request_draft_supplement(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        draft_artifact: Artifact,
+        report_artifact: Artifact,
+        deterministic: DeterministicDraftQualityResult,
+    ) -> None:
+        """Queue one bounded, latest-Draft-aware interview before completing v9."""
+
+        planner = await self._maybe_enqueue_draft_supplemental_interview(
+            session,
+            run=run,
+            draft_artifact=draft_artifact,
+            report_artifact=report_artifact,
+            deterministic=deterministic,
+        )
+        if planner is not None:
+            return
         await self._succeed_after_quality_review(
             session,
             run=run,
             draft_artifact=draft_artifact,
             report_artifact=report_artifact,
         )
+
+    async def _maybe_enqueue_draft_supplemental_interview(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        draft_artifact: Artifact,
+        report_artifact: Artifact,
+        deterministic: DeterministicDraftQualityResult,
+    ) -> Task | None:
+        if (
+            run.workflow_type != "podcast-revision"
+            or run.workflow_version != DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION
+            or draft_artifact.task_id is None
+        ):
+            return None
+
+        editor_task = await session.get(Task, draft_artifact.task_id)
+        if editor_task is None or editor_task.kind != REVISE_PODCAST_DRAFT:
+            raise ValueError("v9 supplemental interview requires Revision task provenance")
+        selected_actions = set(editor_task.input_json.get("selected_actions", []))
+        if not selected_actions.intersection(
+            {"reuse_unused_material", "add_supplemental_material"}
+        ):
+            return None
+
+        metrics = deterministic.metrics
+        minimum_duration = float(metrics.target_duration_minutes) * (1 - DURATION_TOLERANCE_RATIO)
+        actual_duration = float(metrics.estimated_duration_minutes)
+        minimum_characters, _maximum_characters = duration_character_bounds(
+            metrics.target_duration_minutes * metrics.speaking_rate_chars_per_minute
+        )
+        if metrics.script_character_count >= minimum_characters:
+            return None
+
+        completed_rounds = self._supplemental_interview_round(run)
+        if completed_rounds >= MAX_SUPPLEMENTAL_INTERVIEW_ROUNDS:
+            await append_event(
+                session,
+                run_id=run.id,
+                task_id=editor_task.id,
+                event_type="workflow.draft_supplemental_interview.limit_reached",
+                payload={
+                    "draft_artifact_id": draft_artifact.id,
+                    "quality_report_artifact_id": report_artifact.id,
+                    "completed_rounds": completed_rounds,
+                    "max_rounds": MAX_SUPPLEMENTAL_INTERVIEW_ROUNDS,
+                    "estimated_duration_minutes": actual_duration,
+                    "minimum_duration_minutes": round(minimum_duration, 4),
+                },
+            )
+            return None
+
+        draft_content = _without_execution(draft_artifact.content_json)
+        anchors = build_draft_question_anchors(draft_content)
+        previous_questions = await self._load_previous_supplemental_questions(
+            session,
+            run=run,
+        )
+        quality_focus = [
+            {
+                "code": finding.code,
+                "explanation": (
+                    f"{finding.status}: observed={finding.observed}; threshold={finding.threshold}"
+                )[:1_000],
+                "location": finding.location,
+            }
+            for finding in deterministic.findings
+            if finding.status in {"warning", "blocker"}
+        ][:12]
+        planner_input = DraftSupplementalInterviewTaskInput(
+            task_kind=PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW,
+            draft_artifact_id=draft_artifact.id,
+            quality_report_artifact_id=report_artifact.id,
+            creative_brief=run.input_json["creative_brief"],
+            duration_gap={
+                "actual_duration_minutes": actual_duration,
+                "minimum_duration_minutes": minimum_duration,
+                "target_duration_minutes": float(metrics.target_duration_minutes),
+                "missing_duration_minutes": minimum_duration - actual_duration,
+            },
+            podcast_draft=draft_content,
+            draft_anchors=anchors,
+            quality_focus=quality_focus,
+            previous_questions=previous_questions,
+            round_number=completed_rounds + 1,
+            max_rounds=MAX_SUPPLEMENTAL_INTERVIEW_ROUNDS,
+            status="awaiting_user",
+        )
+        task = await self._enqueue_task(
+            session,
+            run=run,
+            kind=PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW,
+            agent_type="supplemental_interviewer",
+            parent_task_id=None,
+            input_json=planner_input.model_dump(mode="json"),
+        )
+        run.output_artifact_id = draft_artifact.id
+        await append_event(
+            session,
+            run_id=run.id,
+            task_id=task.id,
+            event_type="workflow.draft_supplemental_interview.queued",
+            payload={
+                "draft_artifact_id": draft_artifact.id,
+                "quality_report_artifact_id": report_artifact.id,
+                "planner_task_id": task.id,
+                "round_number": planner_input.round_number,
+                "max_rounds": planner_input.max_rounds,
+                "anchor_count": len(planner_input.draft_anchors),
+                "previous_question_count": len(previous_questions),
+                "estimated_duration_minutes": actual_duration,
+                "minimum_duration_minutes": round(minimum_duration, 4),
+                "missing_duration_minutes": round(
+                    minimum_duration - actual_duration,
+                    4,
+                ),
+            },
+        )
+        logger.info(
+            "Draft-aware supplemental interview queued",
+            extra={
+                "event": "workflow.draft_supplemental_interview.queued",
+                "run_id": run.id,
+                "task_id": task.id,
+                "artifact_id": draft_artifact.id,
+                "quality_report_id": report_artifact.id,
+                "round_number": planner_input.round_number,
+                "anchor_count": len(planner_input.draft_anchors),
+                "previous_question_count": len(previous_questions),
+                "missing_duration_minutes": round(
+                    minimum_duration - actual_duration,
+                    4,
+                ),
+            },
+        )
+        return task
+
+    async def _load_previous_supplemental_questions(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+    ) -> list[str]:
+        plans: list[SupplementalInterviewPlan] = []
+        ancestor_id = run.parent_run_id
+        visited: set[str] = set()
+        while (
+            ancestor_id is not None
+            and ancestor_id not in visited
+            and len(plans) < MAX_SUPPLEMENTAL_INTERVIEW_ROUNDS
+        ):
+            visited.add(ancestor_id)
+            ancestor = await session.get(Run, ancestor_id)
+            if ancestor is None:
+                break
+            artifact = (
+                await session.execute(
+                    select(Artifact)
+                    .where(
+                        Artifact.run_id == ancestor.id,
+                        Artifact.kind == f"{PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW}_result",
+                    )
+                    .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if artifact is not None:
+                plans.append(
+                    SupplementalInterviewPlan.model_validate(
+                        _without_execution(artifact.content_json)
+                    )
+                )
+            ancestor_id = ancestor.parent_run_id
+
+        questions: list[str] = []
+        for plan in reversed(plans):
+            for question in plan.questions:
+                if question.prompt not in questions:
+                    questions.append(question.prompt)
+        return questions[:12]
+
+    @staticmethod
+    def _supplemental_interview_round(run: Run) -> int:
+        value = run.input_json.get("supplemental_interview_round", 0)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("supplemental interview round must be a server-owned integer")
+        if not 0 <= value <= MAX_SUPPLEMENTAL_INTERVIEW_ROUNDS:
+            raise ValueError("supplemental interview round is outside the supported range")
+        return value
+
+    async def _complete_supplemental_interview_plan(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        completed_task: Task,
+    ) -> None:
+        if (
+            run.workflow_type != "podcast-revision"
+            or run.workflow_version != DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION
+            or completed_task.parent_task_id is not None
+            or completed_task.output_artifact_id is None
+        ):
+            raise ValueError("supplemental interview Planner requires a sequential v9 Revision")
+        artifact = await session.get(Artifact, completed_task.output_artifact_id)
+        if (
+            artifact is None
+            or artifact.run_id != run.id
+            or artifact.kind != f"{PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW}_result"
+        ):
+            raise ValueError("supplemental interview Planner output is missing or invalid")
+        task_input = DraftSupplementalInterviewTaskInput.model_validate(completed_task.input_json)
+        plan = SupplementalInterviewPlan.model_validate(_without_execution(artifact.content_json))
+        if (
+            plan.draft_artifact_id != task_input.draft_artifact_id
+            or plan.quality_report_artifact_id != task_input.quality_report_artifact_id
+            or plan.round_number != task_input.round_number
+        ):
+            raise ValueError("supplemental interview Plan does not match its trusted task input")
+        draft_artifact, report_artifact = await self._load_supplemental_plan_dependencies(
+            session,
+            run=run,
+            task_input=task_input,
+        )
+        await append_event(
+            session,
+            run_id=run.id,
+            task_id=completed_task.id,
+            event_type="workflow.draft_supplemental_interview.completed",
+            payload={
+                "draft_artifact_id": draft_artifact.id,
+                "quality_report_artifact_id": report_artifact.id,
+                "plan_artifact_id": artifact.id,
+                "round_number": plan.round_number,
+                "question_count": len(plan.questions),
+                "generation_mode": plan.generation_mode,
+            },
+        )
+        logger.info(
+            "Draft-aware supplemental interview completed",
+            extra={
+                "event": "workflow.draft_supplemental_interview.completed",
+                "run_id": run.id,
+                "task_id": completed_task.id,
+                "artifact_id": artifact.id,
+                "draft_artifact_id": draft_artifact.id,
+                "quality_report_id": report_artifact.id,
+                "round_number": plan.round_number,
+                "question_count": len(plan.questions),
+                "generation_mode": plan.generation_mode,
+            },
+        )
+        await self._succeed_after_quality_review(
+            session,
+            run=run,
+            draft_artifact=draft_artifact,
+            report_artifact=report_artifact,
+        )
+
+    async def _complete_supplemental_interview_unavailable(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        failed_task: Task,
+    ) -> None:
+        """Preserve the valid Draft and persist conservative questions on failure."""
+
+        task_input = DraftSupplementalInterviewTaskInput.model_validate(failed_task.input_json)
+        draft_artifact, report_artifact = await self._load_supplemental_plan_dependencies(
+            session,
+            run=run,
+            task_input=task_input,
+        )
+        artifact_key = f"task-result:{failed_task.id}"
+        artifact = (
+            await session.execute(select(Artifact).where(Artifact.idempotency_key == artifact_key))
+        ).scalar_one_or_none()
+        if artifact is None:
+            fallback = build_fallback_supplemental_interview_plan(task_input)
+            artifact = Artifact(
+                run_id=run.id,
+                task_id=failed_task.id,
+                kind=f"{PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW}_result",
+                content_json={
+                    **fallback,
+                    "_execution": {
+                        "provider": "deterministic",
+                        "model": "fallback",
+                        "attempt": failed_task.attempt,
+                    },
+                },
+                idempotency_key=artifact_key,
+            )
+            session.add(artifact)
+            await session.flush()
+        plan = SupplementalInterviewPlan.model_validate(_without_execution(artifact.content_json))
+        failed_task.output_artifact_id = artifact.id
+        await append_event(
+            session,
+            run_id=run.id,
+            task_id=failed_task.id,
+            event_type="workflow.draft_supplemental_interview.unavailable",
+            payload={
+                "draft_artifact_id": draft_artifact.id,
+                "quality_report_artifact_id": report_artifact.id,
+                "plan_artifact_id": artifact.id,
+                "round_number": plan.round_number,
+                "question_count": len(plan.questions),
+                "generation_mode": plan.generation_mode,
+                "error_code": failed_task.error_code,
+            },
+        )
+        logger.warning(
+            "Draft-aware supplemental interview used deterministic fallback",
+            extra={
+                "event": "workflow.draft_supplemental_interview.unavailable",
+                "run_id": run.id,
+                "task_id": failed_task.id,
+                "artifact_id": artifact.id,
+                "draft_artifact_id": draft_artifact.id,
+                "quality_report_id": report_artifact.id,
+                "round_number": plan.round_number,
+                "question_count": len(plan.questions),
+                "error_code": failed_task.error_code,
+            },
+        )
+        await self._succeed_after_quality_review(
+            session,
+            run=run,
+            draft_artifact=draft_artifact,
+            report_artifact=report_artifact,
+        )
+
+    async def _load_supplemental_plan_dependencies(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        task_input: DraftSupplementalInterviewTaskInput,
+    ) -> tuple[Artifact, Artifact]:
+        draft_artifact = await session.get(Artifact, task_input.draft_artifact_id)
+        report_artifact = await session.get(
+            Artifact,
+            task_input.quality_report_artifact_id,
+        )
+        if (
+            draft_artifact is None
+            or draft_artifact.run_id != run.id
+            or draft_artifact.kind != f"{REVISE_PODCAST_DRAFT}_result"
+        ):
+            raise ValueError("supplemental interview Planner Draft provenance is invalid")
+        if (
+            report_artifact is None
+            or report_artifact.run_id != run.id
+            or report_artifact.kind != "draft_quality_report"
+        ):
+            raise ValueError("supplemental interview Planner quality provenance is invalid")
+        return draft_artifact, report_artifact
 
     async def _load_deterministic_quality(
         self,

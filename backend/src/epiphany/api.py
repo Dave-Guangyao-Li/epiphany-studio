@@ -35,7 +35,9 @@ from epiphany.services import (
     RunResumeNotAllowed,
     RunService,
     RunSourceNotFound,
+    SupplementalInterviewPlanNotReady,
 )
+from epiphany.supplemental_interview_schemas import SupplementalInterviewPlanRecord
 
 router = APIRouter()
 
@@ -175,6 +177,22 @@ async def get_draft_improvement_plan(
     except RunNotFound as error:
         raise HTTPException(status_code=404, detail="run not found") from error
     except DraftImprovementPlanNotReady as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.get(
+    "/runs/{run_id}/supplemental-interview-plan",
+    response_model=SupplementalInterviewPlanRecord,
+)
+async def get_supplemental_interview_plan(
+    run_id: str,
+    service: RunServiceDependency,
+) -> SupplementalInterviewPlanRecord:
+    try:
+        return await service.get_supplemental_interview_plan(run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except SupplementalInterviewPlanNotReady as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 

@@ -475,6 +475,32 @@ winner、多用户统计或盲评 UI。它同时暴露了一个可以用小切�
 成稿侧报告明显编辑指令泄漏。一次恢复后，产品应提示补充具体素材或降低目标
 时长，而不是继续推荐同一批素材或自动循环扩写。
 
+### M3.9：根据最新稿定向追问，再用回答继续修订
+
+- [x] 只在显式 Revision 重新审稿后仍低于 85% 时长下限时规划补充采访
+- [x] 从最新 Draft 的 opening、正文 Paragraph 与 closing 建立可信 Anchor
+- [x] 每个问题必须绑定 Anchor，并逐字引用最新稿中的具体行文
+- [x] 把问题计划持久化为只读 Artifact；重复读取不调用模型
+- [x] 用户回答以新 Source 保存，并在 versioned Revision Request 中绑定
+  Plan、question ID 与 Source ID
+- [x] 回答 Revision 优先融合新事实，同时保留父稿已有的有效内容
+- [x] 服务端推导轮次并限制最多两轮；达到下限后不再创建 Planner
+- [x] Planner 失败时保留有效 Draft，并生成可追踪的确定性 fallback Plan
+- [x] workflow v9 只用于新的 v2 Revision 子 Run；既有 v8 语义继续可恢复
+- [x] Fake E2E 验证 2,509 → 3,073 → 3,637，并覆盖绕过、幂等、失败回退和
+  第三轮停止
+- [ ] 用受限 DeepSeek 与真人回答验证问题是否真的触发具体记忆
+
+M3.9 不会自动替用户回答，也不会自动创建下一版稿子。每一轮新事实都来自用户
+显式导入的新 Source，每一版稿子都来自显式 Revision 请求。问题 Planner 只负责
+把最新稿的具体缺口变成可回答问题；Editor 和 Reviewer 继续各守自己的职责。
+两轮后仍短时，系统停止规划，交由用户选择继续主动补充或降低目标时长。
+
+至此 M3 的产品闭环冻结。下一阶段不再继续优化 Prompt，而是把已有 Run、Task、
+ModelCall、Draft、质量报告、问题计划和 Revision lineage 放进可回放 Trace 与
+最小 UI。详细实现与验证见
+[M3.9 学习章节](learning/m3-9-draft-aware-supplemental-interview.zh-CN.md)。
+
 ## M4：可靠性与 Trace
 
 - [ ] timeout / bounded retry

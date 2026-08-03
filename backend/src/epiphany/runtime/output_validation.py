@@ -16,6 +16,10 @@ from epiphany.revision_schemas import (
     REVISE_PODCAST_DRAFT,
     validate_podcast_revision_output,
 )
+from epiphany.supplemental_interview_schemas import (
+    PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW,
+    validate_supplemental_interview_output,
+)
 
 UNVALIDATED_FAKE_TASKS = frozenset(
     {
@@ -55,6 +59,11 @@ def validate_task_output(
         )
     if task_kind == REVIEW_PODCAST_DRAFT:
         return validate_model_self_review_output(
+            task_input=task_input,
+            content=content,
+        )
+    if task_kind == PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW:
+        return validate_supplemental_interview_output(
             task_input=task_input,
             content=content,
         )

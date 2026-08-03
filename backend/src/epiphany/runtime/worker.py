@@ -27,6 +27,9 @@ from epiphany.state_machine import (
     validate_run_transition,
     validate_task_transition,
 )
+from epiphany.supplemental_interview_schemas import (
+    PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW,
+)
 
 logger = logging.getLogger("epiphany.worker")
 
@@ -510,6 +513,10 @@ class Worker:
     def _provider_for(self, invocation: TaskInvocation) -> ModelProvider:
         if invocation.kind == REVIEW_PODCAST_DRAFT and self.reviewer_provider is not None:
             return self.reviewer_provider
+        if invocation.kind == PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW:
+            # The supplemental Interviewer is a generation Agent, not the
+            # advisory Reviewer. It deliberately uses the main provider.
+            return self.provider
         return self.provider
 
     async def run_batch(self, *, limit: int | None = None) -> int:
