@@ -1,6 +1,6 @@
 # MVP 路线图
 
-更新时间：2026-07-31
+更新时间：2026-08-03
 
 路线图按可演示的纵向切片推进，不按“先把所有基础设施搭完”推进。
 
@@ -524,6 +524,7 @@ Event `sequence` 从 SQLite 回放，再轮询新事件；空闲连接发送 hea
 
 - [x] Project/Source 页面
 - [x] Run trace 页面
+- [x] M5.1 AI 起步助手：持久候选、四步进度、用户确认与 Source provenance
 - [ ] Scaffold 编辑与恢复
 - [ ] Dockerfile
 - [ ] 单机部署
@@ -534,6 +535,23 @@ Event `sequence` 从 SQLite 回放，再轮询新事件；空闲连接发送 hea
 检查点还能粘贴补充口述并 Resume。Project 创建 Run 使用调用方稳定的
 `submission_id` 防止双击或网络重试产生两个 Run。Scaffold 仍然只能查看/导出，
 还没有可视化编辑器；Docker、单机部署和生产备份也没有完成，因此不提前勾选。
+
+M5.1 先解决空 Project 的第一笔：只允许日记、播客旧稿和其他纯文本创建独立
+`source-starter` Run；候选在普通文本框中编辑，因此不依赖 Scaffold 富文本
+编辑器。页面把 Run/Task/ModelCall/Artifact/Event 翻译成“准备上下文、模型
+生成、校验、用户确认”四步。生成成功后 Run 会持久化停在
+`waiting_for_user / awaiting_source_confirmation`，而不是提前成功。只有用户
+核对后，服务端才在同一事务中导入正文、关联 Project、写 confirmation
+Artifact/Event 并让 Run 成功。确认按标题/类型/正文做语义幂等，重试 ID 单独
+审计；网络重试只 GET 同一 Run，不重复模型调用。写作样本和口述转写禁用这条
+路径，确认后的 AI-assisted Source 也不能作为后续 Writing Sample。
+
+backend 387 项完整 pytest 与 Ruff、frontend 7 个测试文件（31 项）及 production build
+已通过。Fake 浏览器 E2E 验证了候选恢复、确认前前三步 complete/第四步 active、
+确认后的原子 Source 落库和完整 Trace。第一次 live DeepSeek 暴露推测性第一人称
+陈述后，系统增加 Prompt 约束、确定性 guard 与回归测试；第二次受控
+exploration-outline 调用成功停在确认检查点，合成 Run 随后取消且没有导入 Source。
+因此 M5.1 已完成；可视化 Scaffold/Draft 编辑仍是后续独立项。
 
 演示：在本地浏览器从 Project/Source 走到 Run Trace，并完成一次人工暂停与
 恢复。线上部署留在后续独立切片。

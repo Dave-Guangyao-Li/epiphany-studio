@@ -2,7 +2,7 @@
 
 状态：Draft
 
-日期：2026-07-31
+日期：2026-08-03
 
 ## 1. 产品命题
 
@@ -54,6 +54,43 @@ MVP 文字来源契约：
 M3 中的“补充口述”特指用户已经转成文字后导入的 Source。浏览器不申请
 麦克风权限，后端不接收音频，也不执行实时语音转文字。
 
+#### M5.1 空白页 AI 起步助手
+
+用户只有 Project 名称和探索方向时，可以请求一份写作起点。系统读取服务端保存
+的 Project 标题/说明，加上素材标题、允许的素材类型、起步方式和可选 intent，
+创建一个独立 `source-starter` Run。
+
+产品边界：
+
+- 结果是 `source_starter_candidate` Artifact，不是 Source，也不能成为事实证据；
+- 模型不得编造第一人称经历、外部数据或专业结论；未知事实使用 `[待核实]`，
+  个人经历使用 `[待补充]` 或具体问题；
+- Prompt 之外还必须用确定性 guard 拒绝输入无法逐字支持、又不属于问句或占位符
+  的第一人称陈述；结构合法不能替代叙事真实性校验；
+- 候选只追加到普通文本编辑区，不静默覆盖用户已经写下的正文；
+- 候选校验成功后 Run 持久化进入
+  `waiting_for_user / awaiting_source_confirmation`，刷新后仍能从 Artifact 恢复；
+- 用户编辑并显式确认后，服务端才导入 Source，并保存 server-owned
+  `source_starter_confirmation` Artifact；Source、Project 关联、Artifact、Events
+  与 Run 成功状态必须在同一事务中提交；
+- 确认的语义幂等键只由标题、类型和正文决定；重试使用的所有
+  `submission_id` 单独保存在确认审计记录中；
+- 正式 Source metadata 保留 `ai_assisted`、用户确认和候选 Run/Artifact lineage；
+- 只允许 `journal`、`podcast_draft`、`other`；AI 不能生成或确认
+  `writing_sample`、`voice_note_transcript`；
+- 所有 `origin=ai_assisted` Source 都不能在后续 Run、Editor/Reviewer 或 Revision
+  中作为 Writing Sample 使用；
+- 页面显示的“准备上下文、模型生成、校验结果、等待编辑确认”来自持久化
+  Run/Task/ModelCall/Artifact/Event 与用户确认状态，不是计时器动画。
+
+轮询失败后的重试只读取同一个 Run/Event，不重复创建 Run 或模型调用。页面刷新
+可以恢复服务器候选，却不能恢复尚未确认、只存在浏览器内存中的用户改写；系统
+必须明确提示，并在候选已编辑时禁止静默清除或叠加重新生成的第二版。
+
+当前 Source 本身是纯文本，因此这条闭环不依赖未来的可视化 Scaffold/Draft
+编辑器。对陌生领域做外部事实研究属于后续带引用 Research 能力，不能把无引用
+模型文字悄悄提升为本地证据。
+
 ### 3.3 Semi-scripted
 
 系统不是只给空白问题，也不是直接替用户写完。它生成：
@@ -78,7 +115,8 @@ Subagent 对话。
 ## 4. MVP 用户旅程
 
 1. 用户创建一个 Episode Project。
-2. 导入 Markdown 或纯文本素材。
+2. 导入 Markdown 或纯文本素材；如果面对空白页，可以先生成一份 AI 候选起点，
+   编辑确认后再导入为 Source。
 3. 系统切分内容并保留来源信息。
 4. 用户选择主题、目标时长、听众和语气；还可主动选择本人旧文章或口述转录
    作为仅用于表达风格的写作样本，然后启动 `EpisodeRun`。
@@ -107,6 +145,7 @@ Subagent 对话。
 
 - 本地单用户；
 - Markdown/TXT 导入；
+- Project-scoped AI 起步候选、四步进度与显式确认后导入；
 - 来源切分与引用；
 - 固定的一层父子 Agent 编排；
 - 两个并行只读 Subagent；
@@ -672,6 +711,8 @@ Planner 最终失败或输出不合法时，失败 Task 和错误码仍保留；
     系统能区分工程上的字符达标与真人认为内容有价值、愿意录制。
 13. 恢复后仍短时，用户能看到绑定最新稿具体原句的问题；回答可追溯到新
     Source 和下一版 Revision，且系统最多规划两轮而不会用套话无限扩写。
+14. 空 Project 中可以请求写作起点；生成阶段不增加 Source，用户编辑确认后
+    才能导入，并可从 confirmation Artifact 追溯候选 Run。
 
 ## 8. 衡量指标
 
@@ -692,4 +733,6 @@ Planner 最终失败或输出不合法时，失败 Task 和错误码仍保留；
   变化，以及恢复后是否仍需补材料或降时长；
 - 补充采访轮次、问题 Anchor/quote 校验结果、回答 Source 数量、每轮新增
   spoken-only 字符和最终是否越过时长下限；
+- Source Starter 的生成成功率、候选被确认导入的比例、生成到确认所需时间、
+  每次调用 tokens/费用，以及用户生成后实际修改的字符比例；
 - `synthetic_test` 与 human feedback 必须分开统计。

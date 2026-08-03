@@ -1,5 +1,97 @@
 # Development Log
 
+## 2026-08-03
+
+### M5.1 AI-assisted Source Starter and visible progress
+
+- Added a Project-scoped `source-starter` workflow v1 for the blank-page
+  problem. It snapshots the server-owned Project title/description plus the
+  source title/type, starter mode, and optional intent, then queues exactly one
+  `build_source_starter` Task through the existing durable Worker.
+- Reused Run, Task, ModelCall, Artifact, Event, lease, retry, fencing,
+  cancellation, recovery, budget, and idempotency infrastructure. No new table,
+  queue, orchestration framework, or Alembic migration was added.
+- Added a strict `source-starter-candidate.v1` contract with editable starter
+  text, 2--8 grounded brainstorming questions, explicit uncertainties, and
+  mandatory confirmation/verification safety flags.
+- Tightened the model boundary: it cannot invent first-person experiences,
+  dates, dialogue, external facts, professional conclusions, or completed
+  outcomes. Unknown facts and missing personal detail remain visibly marked
+  for verification or user completion; all Project/form context is untrusted
+  input.
+- Kept candidate and evidence separate. A successful model call persists a
+  `source_starter_candidate` Artifact, then durably pauses the Run at
+  `waiting_for_user / awaiting_source_confirmation`; it does not create a
+  Source. Only an explicit confirmation endpoint imports the edited text.
+- Made confirmation one atomic mutation: Source/Segments, ProjectSource,
+  server-owned `source_starter_confirmation` Artifact, confirmation/success
+  Events, and the Run's `waiting -> succeeded` transition commit together.
+  Injected failure before the Event proves the entire mutation rolls back and
+  can be retried from the same waiting checkpoint.
+- Added semantic confirmation idempotency and lineage. The fingerprint covers
+  final title/type/text but excludes transport `submission_id`; replaying the
+  same content with a new ID returns the original Source and appends the ID to
+  the Artifact's audited `submission_ids`. Changed content after commit returns
+  409. The resulting Source records `origin=ai_assisted`,
+  `user_confirmed=true`, starter Run/Artifact IDs, and bounded execution
+  metadata.
+- Limited AI starters to `journal`, `podcast_draft`, and `other`. Both UI and
+  backend reject `writing_sample` and `voice_note_transcript`, because generated
+  text cannot impersonate a user-owned style sample or an actual voice capture.
+- Extended that identity boundary beyond initial Source type. Any confirmed
+  `origin=ai_assisted` Source is filtered/rejected as a Writing Sample by the
+  Run form, Project Run creation, Editor/Reviewer style hydration, and Revision
+  inheritance/addition paths.
+- Added a Source-import UI with two starter modes, optional intent, safe append
+  and regeneration behavior, follow-up prompts, explicit confirmation, and a
+  link to the complete Run Trace. Existing text is never silently overwritten;
+  a modified candidate is preserved rather than auto-removed or stacked with a
+  regenerated candidate.
+- Added GET-only network recovery. Poll/retry reads the same Run and Events and
+  cannot create a second paid call. Refresh recovers an unconfirmed Candidate
+  Artifact, but explicitly warns that unsaved browser edits are not durable;
+  a slow recovery response previews rather than overwrites newly typed text.
+- Translated persisted execution into four visible steps: prepare Project
+  context, generate, validate/persist candidate, and wait for user edit and
+  confirmation. The last step is a real durable Run checkpoint, not a fake
+  running Task or timer animation, and it completes only from persisted
+  confirmation Artifact/Event evidence.
+- Kept the ordinary textarea as the first editing surface. Source text needs no
+  visual Scaffold/Draft editor to complete this loop; the richer editor remains
+  a separate M5 item.
+- Added backend and frontend tests for generation/confirmation boundaries,
+  durable waiting, retry/cancel, semantic replay/conflict, atomic rollback,
+  forbidden types, AI-assisted style-sample rejection, invalid-output error
+  redaction, GET-only recovery, refresh/no-overwrite behavior, edited-candidate
+  regeneration blocking, persisted progress evidence, and confirmation gating.
+  All 387 collected backend tests and Ruff checks pass. Frontend validation
+  passes 7 test files / 31 tests plus the production build.
+- Completed a Fake real-browser E2E covering refresh recovery, three completed
+  automatic steps plus one active confirmation step, atomic Source confirmation,
+  all-four-steps completion, and the durable waiting/confirmed/succeeded Event
+  chain.
+- The first live DeepSeek attempt revealed a speculative first-person claim not
+  grounded in input. It was never confirmed or imported. Prompt rules, a
+  deterministic post-provider first-person guard, redacted failure behavior,
+  and positive/negative regression tests were added.
+- Re-ran a bounded live `exploration_outline` with
+  `run_2dcf880f20ff4983b7d2eda643d766c5`. One `deepseek-v4-flash` call reached
+  `waiting_for_user / awaiting_source_confirmation` with 713 input and 570
+  output tokens, 7,009 ms duration, and CNY 0.001853 estimated cost. The DOM
+  showed the first three steps complete and confirmation active; logs contained
+  no candidate body. The synthetic Run was cancelled without importing a
+  Source. M5.1 is complete; visual Scaffold/Draft editing remains separate.
+- Final review rejects hash collisions with an existing Writing Sample/plain
+  Source instead of overwriting provenance; validates starter text, questions,
+  and uncertainties for bounded obvious invention/fact patterns; reconciles
+  cancel response loss through GET under the mutation guard; and marks context
+  complete as soon as a Run exists.
+- Strict live Run `run_dcaeeadc20964a2dbc15568112d87c28` reached the waiting
+  checkpoint in one call (886/590 tokens, 7,695 ms, estimated CNY 0.002066).
+  Browser stale-cancel simulation reconciled POST conflict through GET, cleared
+  the candidate without error, and created no duplicate call. No Source was
+  imported and no candidate body or key is recorded.
+
 ## 2026-07-31
 
 ### M4/M5 local Project workspace and Run Trace Console

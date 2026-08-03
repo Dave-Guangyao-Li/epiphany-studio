@@ -41,7 +41,9 @@ build the smallest system whose behavior remains understandable and recoverable.
 
 The first vertical slice will:
 
-1. Import a small set of journal entries or podcast drafts.
+1. Import a small set of journal entries or podcast drafts. An empty Project may
+   first request an AI-assisted writing starter, but that candidate becomes a
+   Source only after the user edits and confirms it.
 2. Start one persistent `EpisodeRun`.
 3. Run two read-only child tasks in parallel:
    - timeline extraction;
@@ -151,6 +153,7 @@ Official references:
 - [Architecture decision: lightweight orchestration](docs/adr/0001-lightweight-orchestration.zh-CN.md)
 - [Development log](docs/devlog.md)
 - [M4/M5 local Console learning chapter](docs/learning/m4-m5-local-console.zh-CN.md)
+- [M5.1 AI Source Starter learning chapter](docs/learning/m5-1-source-starter.zh-CN.md)
 
 ## Run the local Console
 
@@ -176,11 +179,16 @@ Then open <http://127.0.0.1:5173>. Vite proxies `/api` to FastAPI at
 
 The local Console can create and reopen Projects, import and inspect Sources,
 create idempotent Project-scoped Runs, and replay each Run's Events, Tasks,
-Artifacts, ModelCalls, errors, token usage, and estimated cost. Its SSE stream
-replays durable SQLite Events after reconnect, emits heartbeats while idle,
-and closes at a terminal Run state. Human checkpoints, Markdown outputs,
-quality feedback, and explicit Revision actions reuse the existing backend
-contracts.
+Artifacts, ModelCalls, errors, token usage, and estimated cost. The Source form
+also includes an AI-assisted starter for journal, podcast-draft, and other text:
+it creates a separate durable Run, shows four evidence-backed progress steps,
+and appends a candidate to the ordinary text area without silently replacing
+existing writing. The candidate is not a Source until the user edits, confirms,
+and imports it. Writing samples and voice-note transcripts cannot use this
+path. Its SSE stream replays durable SQLite Events after reconnect, emits
+heartbeats while idle, and closes at a terminal Run state. Human checkpoints,
+Markdown outputs, quality feedback, and explicit Revision actions reuse the
+existing backend contracts.
 
 This is still a local development Console. It does not yet include a visual
 Scaffold editor, authentication, Docker packaging, production deployment,
@@ -668,6 +676,46 @@ covered by backend and frontend tests. Scaffold editing, Docker packaging,
 single-machine production deployment, and backup operations remain open M5
 work rather than being implied by the local demo.
 
+M5.1 adds a bounded Source Starter path for the blank-page problem. A
+Project-scoped `source-starter` Run snapshots the Project title/description and
+the user's source settings, queues one `build_source_starter` Task, records its
+ModelCall, validates a strict candidate, and saves a
+`source_starter_candidate` Artifact. The Project still has zero new Sources at
+that point, and the Run durably pauses at
+`waiting_for_user / awaiting_source_confirmation`. Only an explicit
+user-confirmation request atomically imports the edited text, links it to the
+Project, appends a server-owned `source_starter_confirmation` Artifact and
+Events, and transitions the Run to `succeeded / complete`.
+
+Confirmation idempotency is based on the semantic title/type/text payload,
+while every accepted retry submission ID remains audited. Network retry only
+GETs the same Run and therefore cannot spend a second model call. Refresh can
+recover the server candidate Artifact but not unsaved local edits, and edited
+candidates cannot be silently stacked with a regeneration. AI-assisted Sources
+remain factual/brainstorming material only and are blocked from Writing Sample
+selection in the UI and backend style-context boundaries.
+
+The Project page translates the durable trace into four steps: context, model
+generation, validation, and the real user-confirmation checkpoint. This works
+with the existing plain-text area and therefore is not blocked by the
+still-open visual Scaffold/Draft editor. All 387 collected backend tests and
+Ruff checks, plus 7 frontend test files (31 tests) and the production build,
+pass. A Fake browser E2E verified candidate recovery, the persisted four-step
+checkpoint, atomic confirmation, Source creation, and Trace Events.
+
+The first live DeepSeek attempt exposed an unsupported speculative first-person
+claim. It was not imported; Prompt rules, a deterministic first-person guard,
+and regression tests were added. A second bounded `exploration_outline` call
+then reached the expected waiting checkpoint with one call (713 input / 570
+output tokens, 7,009 ms, estimated CNY 0.001853). The synthetic Run was
+cancelled without importing a Source. M5.1 is complete; visual Scaffold/Draft
+editing remains a later M5 slice.
+
+A final strict live Run, `run_dcaeeadc20964a2dbc15568112d87c28`, passed the
+waiting checkpoint with one call (886 input / 590 output tokens, 7,695 ms,
+estimated CNY 0.002066). It was cancelled without import after browser recovery
+also reconciled a stale cancel response through GET without a duplicate call.
+
 See the
 [M3.6 learning chapter](docs/learning/m3-6-guided-revision-writing-style.zh-CN.md)
 for the complete Revision contract, and the
@@ -693,6 +741,9 @@ examples, and Fake E2E evidence are in the
 The Project workspace, replayable SSE contract, two-terminal startup, complete
 browser walkthrough, and debugging boundaries are documented in the
 [M4/M5 local Console chapter](docs/learning/m4-m5-local-console.zh-CN.md).
+The candidate-versus-Source boundary, four-step progress evidence, confirmation
+provenance, Fake tests, and manual page walkthrough are documented in the
+[M5.1 Source Starter chapter](docs/learning/m5-1-source-starter.zh-CN.md).
 
 ## License
 

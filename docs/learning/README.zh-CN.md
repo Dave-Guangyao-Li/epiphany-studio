@@ -1,6 +1,6 @@
 # Epiphany Studio 学习实践手册
 
-更新时间：2026-07-31
+更新时间：2026-08-03
 
 ## 这套手册解决什么问题
 
@@ -59,7 +59,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 23. [M3.8：基于现有证据恢复口播时长](m3-8-grounded-length-recovery.zh-CN.md)
 24. [M3.9：根据最新稿定向追问，再用回答继续修订](m3-9-draft-aware-supplemental-interview.zh-CN.md)
 25. [M4/M5：Project 工作区与可重放 Run Trace](m4-m5-local-console.zh-CN.md)
-26. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+26. [M5.1：AI 起步助手与可见的四步进度](m5-1-source-starter.zh-CN.md)
+27. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -91,6 +92,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M3.9 | 既有素材修订后仍短时，围绕最新稿原句生成具体追问；回答作为新 Source 再显式修订，最多两轮 | 354 tests + Fake v9 完整闭环 2,509→3,073→3,637；失败回退、轮次和 provenance 已验证 | 本次 focused commit |
 | M4 | timeout、retry、lease、fencing、恢复、取消与 Event Trace 可通过 replayable SSE 观察 | 363 backend tests；replay/heartbeat/disconnect/terminal 已验证 | 本次 focused commit |
 | M5（本地 UI） | 在浏览器管理 Project/Source，并查看 Run Trace 与人工检查点 | 15 frontend tests + production build；Scaffold editor/部署仍未完成 | 本次 focused commit |
+| M5.1 | 空 Project 可生成可编辑起步候选，持久等待确认；确认后原子导入 Source 并让 Run 成功 | backend 387 tests + Ruff；frontend 7 files / 31 tests + build；Fake 浏览器 E2E 与 strict DeepSeek 验收通过 | Completed；待 focused commit |
 
 ## 当前系统已经能做什么
 
@@ -99,6 +101,9 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 ```text
 创建并重新打开 Project
   -> 在 Project 中导入、查看 Source 和 SourceSegment
+  -> 空白时可创建独立 source-starter Run，查看四步进度
+  -> 候选通过后 durable waiting；编辑确认时原子导入 AI-assisted Source
+  -> 网络重试只 GET 同一 Run；刷新恢复 Artifact，但不假装恢复未保存的本地编辑
   -> 从页面配置事实素材、写作样本、受众、语气和目标时长
   -> 使用幂等 submission_id 创建 Project Run
   -> 可选从已有 Source 中明确选择并授权 style-only 写作样本
@@ -363,6 +368,9 @@ Run 使用 16,667 input tokens、9,468 output tokens、73,018 ms Provider
   和真人回答验收；当前回答仍需先转成文字再导入 Source；
 - Source Segment 还没有结构化 `material_kind`，当前只能在成稿侧检测明显的
   editorial instruction 泄漏；
+- M5.1 起步候选仍需用户逐句核对；它不提供带网页引用的领域研究，也不能把
+  模型猜测直接当事实 Source。`writing_sample` 和 `voice_note_transcript` 不
+  允许使用这条生成通道；
 - 已能在本地 Console 查看采访脚手架和播客稿，但尚未提供可视化编辑器；
 - M3.2 的 Editor 已通过合成素材真实调用，但尚未使用个人隐私素材验收；
 - 尚未提供麦克风录音、音频上传、STT 或语音克隆；

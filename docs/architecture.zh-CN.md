@@ -2,7 +2,7 @@
 
 状态：Draft
 
-日期：2026-07-31
+日期：2026-08-03
 
 ## 1. 目标
 
@@ -64,6 +64,39 @@ MVP 使用固定 Workflow。模型不能发明任意 Agent 名称，也不能递
 Subagent。
 
 ## 4. 第一个 Workflow
+
+M5.1 同时增加一条互不改变播客主 Workflow 的短流程，用于跨过 Source 空白页：
+
+```text
+POST Project source-starter
+  -> 服务端快照 Project 标题和说明
+  -> 创建 source-starter Run v1
+  -> queue one build_source_starter Task
+  -> reserve one ModelCall
+  -> Fake / DeepSeek Provider
+  -> strict SourceStarterCandidate validation
+  -> persist source_starter_candidate Artifact
+  -> Run waiting_for_user / awaiting_source_confirmation
+  -> 页面恢复候选并等待用户编辑与确认
+  -> POST confirm
+  -> one atomic transaction:
+       import Source + SourceSegments
+       + link ProjectSource
+       + persist server-owned source_starter_confirmation Artifact
+       + append confirmation/success Events
+       + Run succeeded / complete
+```
+
+候选 Artifact 与正式 Source 刻意分开。模型调用成功只说明有一份结构合法的写作
+起点，不说明它是用户经历或事实证据。确认 endpoint 才是 Source 写边界，并保存
+`ai_assisted` provenance。它使用普通文本编辑区，所以不依赖未来的 Scaffold /
+Draft 可视化编辑器。
+
+页面四步进度由同一条持久 Trace 翻译得到：Project 快照和 Task 开始表示“准备
+上下文”，ModelCall/Task 表示“模型生成”，候选 Artifact 与 workflow Event
+表示“校验结果”，checkbox 与 confirmation Artifact 表示“等待编辑确认”。最后
+一步不是计时器或伪装成运行中的模型 Task，而是真实的 durable Run checkpoint；
+checkbox 只代表本地意图，只有 confirmation Artifact/Event 能完成这一步。
 
 ```text
 create_run
@@ -640,6 +673,8 @@ POST /projects
 GET  /projects
 GET  /projects/{id}
 POST /projects/{id}/sources
+POST /projects/{id}/source-starters
+POST /projects/{id}/source-starters/{run_id}/confirm
 POST /projects/{id}/runs
 GET  /runs?project_id={id}
 GET  /runs/{id}
@@ -674,7 +709,8 @@ Event，再以短轮询读取 SQLite 中的新 Event；客户端可以用 `after
 ### 本地 Console 的职责边界
 
 - `/projects`：创建、列出并重新打开本地 Project；
-- `/projects/{id}`：导入/查看 Source、配置 Run、查看不可变 Run 历史；
+- `/projects/{id}`：导入/查看 Source；可创建 AI 起步候选、查看四步状态，并在
+  用户编辑确认后把候选导入；配置 Run、查看不可变 Run 历史；
 - `/runs/{id}`：展示 Event Timeline、Task、Artifact、ModelCall、错误与费用；
 - 在人工检查点把文字保存为新 Source，再显式 Resume；
 - 查看 Scaffold、Draft、Show Notes、质量报告，并显式提交反馈或 Revision。
@@ -682,6 +718,41 @@ Event，再以短轮询读取 SQLite 中的新 Event；客户端可以用 `after
 Console 当前不是部署后的多用户产品：没有登录、权限、协作、可视化 Scaffold
 编辑器、音频上传、STT，也不承担数据库备份。Docker 与单机部署仍属于未完成的
 M5 切片。
+
+### Source Starter 的持久化边界
+
+`POST /projects/{id}/source-starters` 使用 Project-scoped `submission_id` 和请求
+fingerprint 创建或重放一个 `source-starter` Run。Run input 保存服务端读取的
+Project 快照、素材设置和可选 intent；浏览器不能把另一份 Project 上下文偷偷
+塞进这个 Run。普通 Worker 为唯一 Task 复用 lease、retry、cancel、fencing、
+调用预算和 ModelCall 账本，严格输出通过后保存候选 Artifact 并进入确认检查点。
+这里的“严格输出”不只验证 JSON Schema：确定性 first-person guard 还会剥离
+`[待补充]` / `[待核实]` 区域，逐句拒绝服务端输入无法支持、又不是问句的第一
+人称陈述。第一次 live Provider 验收正是通过发现这一缺口，推动了 Prompt 与代码
+双层修复；被拒绝的原句不会进入持久错误信息。
+
+候选通过后，Run 进入
+`waiting_for_user / awaiting_source_confirmation`，且仍不会写 Source。
+`POST .../{run_id}/confirm` 要求候选属于同一 Project、Run 处在该确认检查点、
+类型未改变，并对最终标题/类型/正文做语义 fingerprint；`submission_id` 不参与
+内容身份，而是单独追加到 confirmation Artifact 的 `submission_ids` 审计列表。
+
+确认路径和 Cancel 等 Run 写操作共享 mutation lock。`SourceService` 提供不自行
+commit 的 in-session 导入 primitive，使 Source/Segments、ProjectSource、确认
+Artifact、确认/成功 Events 与 Run 状态能在同一数据库事务中提交。任一步异常
+都会整体回滚到等待检查点；相同语义内容换一个 submission ID 重试返回原结果，
+已经确认后改变正文返回 409。模型不能生成这个 Artifact，通用 Source 导入也
+不能伪造它与候选 Run 的 lineage。
+
+前端恢复只读取已有 Project/Run/Event/Artifact。轮询失败后的按钮只重试 GET，
+不会再次创建 Run 或 ModelCall。刷新可以恢复服务端 Candidate Artifact，但不能
+恢复尚未确认、只存在 React 状态中的编辑；恢复结果也不能覆盖页面打开后用户新
+输入的正文。候选一旦被编辑，前端禁止自动清除或叠加新生成版本。
+
+AI-assisted Source 保留 `origin=ai_assisted`。它可以作为用户确认过的事实或
+头脑风暴素材，但不能作为 Writing Sample：创建 Project Run、hydrate
+Editor/Reviewer style profile、Revision 继承/新增风格上下文以及前端选择器都会
+重复检查这个 provenance，避免 AI 文字反过来成为“用户文风”的身份依据。
 
 ### 输出与审稿 API
 
