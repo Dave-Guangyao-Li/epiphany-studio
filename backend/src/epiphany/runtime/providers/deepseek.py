@@ -31,7 +31,10 @@ from epiphany.runtime.providers.base import (
     ProviderTimeoutError,
     TaskInvocation,
 )
-from epiphany.runtime.quality_prompts import build_quality_review_prompt
+from epiphany.runtime.quality_prompts import (
+    build_quality_review_prompt,
+    materialize_quality_review_evidence,
+)
 from epiphany.runtime.research_prompts import build_research_prompt
 from epiphany.runtime.revision_prompts import build_revision_prompt
 from epiphany.runtime.source_starter_prompts import build_source_starter_prompt
@@ -92,6 +95,8 @@ class DeepSeekProvider:
         billing_currency: BillingCurrency | str = "USD",
         base_url: str = DEFAULT_BASE_URL,
         max_tokens: int = 2_000,
+        research_max_tokens: int = 4_000,
+        interview_max_tokens: int = 4_000,
         editor_max_tokens: int = 20_000,
         quality_review_max_tokens: int = 6_000,
         max_source_chars: int = 24_000,
@@ -113,6 +118,10 @@ class DeepSeekProvider:
             )
         if max_tokens < 1:
             raise ValueError("DeepSeek max_tokens must be positive")
+        if research_max_tokens < 1:
+            raise ValueError("DeepSeek research_max_tokens must be positive")
+        if interview_max_tokens < 1:
+            raise ValueError("DeepSeek interview_max_tokens must be positive")
         if editor_max_tokens < 1:
             raise ValueError("DeepSeek editor_max_tokens must be positive")
         if quality_review_max_tokens < 1:
@@ -136,6 +145,8 @@ class DeepSeekProvider:
         self.billing_currency = normalized_billing_currency
         self.base_url = _validated_base_url(base_url)
         self.max_tokens = max_tokens
+        self.research_max_tokens = research_max_tokens
+        self.interview_max_tokens = interview_max_tokens
         self.editor_max_tokens = editor_max_tokens
         self.quality_review_max_tokens = quality_review_max_tokens
         self.max_source_chars = max_source_chars
@@ -164,6 +175,7 @@ class DeepSeekProvider:
             prompt = build_quality_review_prompt(
                 task_input=invocation.input_json,
                 max_bundle_chars=self.max_quality_bundle_chars,
+                repair_attempt=invocation.attempt > 1,
             )
             max_tokens = self.quality_review_max_tokens
             temperature = 0.0
@@ -171,6 +183,8 @@ class DeepSeekProvider:
             prompt = build_revision_prompt(
                 task_input=invocation.input_json,
                 max_bundle_chars=self.max_editor_bundle_chars,
+                repair_attempt=invocation.attempt > 1,
+                previous_error_code=invocation.previous_error_code,
             )
             max_tokens = self.editor_max_tokens
             temperature = 0.2
@@ -186,16 +200,17 @@ class DeepSeekProvider:
                 task_input=invocation.input_json,
                 max_bundle_chars=self.max_interview_bundle_chars,
             )
-            max_tokens = self.max_tokens
+            max_tokens = self.interview_max_tokens
             temperature = 0.2
         else:
             prompt = build_research_prompt(
                 task_kind=invocation.kind,
                 task_input=invocation.input_json,
                 max_source_chars=self.max_source_chars,
+                repair_attempt=invocation.attempt > 1,
             )
-            max_tokens = self.max_tokens
-            temperature = 0.2
+            max_tokens = self.research_max_tokens
+            temperature = 0.0 if invocation.attempt > 1 else 0.2
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": prompt.messages,
@@ -231,6 +246,19 @@ class DeepSeekProvider:
                 requested_model=self.model,
                 billing_currency=self.billing_currency,
             )
+            if invocation.kind == REVIEW_PODCAST_DRAFT:
+                result = ProviderResult(
+                    content=materialize_quality_review_evidence(
+                        content=result.content,
+                        prompt=prompt,
+                    ),
+                    provider=result.provider,
+                    model=result.model,
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                    estimated_cost_micros=result.estimated_cost_micros,
+                    cost_currency=result.cost_currency,
+                )
         except httpx.TimeoutException as error:
             mapped_error: ProviderError = ProviderTimeoutError(
                 "DeepSeek request exceeded its HTTP timeout"

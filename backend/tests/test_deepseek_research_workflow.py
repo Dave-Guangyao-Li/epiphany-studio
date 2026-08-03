@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 
 import httpx
+from sqlalchemy import select
 
 from epiphany.db import Database
 from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
+from epiphany.models import Task
 from epiphany.runtime.providers import DeepSeekProvider
 from epiphany.runtime.worker import Worker
 from epiphany.services import RunService
@@ -508,6 +510,18 @@ async def test_paid_but_truncated_response_keeps_usage_and_cost(
     database, service, worker = runtime
     worker.max_concurrency = 1
     run_id, reference = await _create_run(database, service)
+    # Even if a deployment raises the generic task retry limit, an output-limit
+    # repair remains exactly one extra paid Research attempt.
+    async with database.sessions() as session, session.begin():
+        timeline = (
+            await session.execute(
+                select(Task).where(
+                    Task.run_id == run_id,
+                    Task.kind == "timeline_research",
+                )
+            )
+        ).scalar_one()
+        timeline.max_attempts = 5
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -521,18 +535,72 @@ async def test_paid_but_truncated_response_keeps_usage_and_cost(
 
     client = await _install_provider(worker, httpx.MockTransport(handler))
     try:
-        assert await worker.run_until_idle() == 1
+        assert await worker.run_until_idle() == 2
         failed = await service.get_run(run_id)
     finally:
         await client.aclose()
 
     assert failed.status == "failed"
-    call = failed.model_calls[0]
-    assert call.status == "failed"
-    assert call.error_code == "provider_output_truncated"
-    assert call.input_tokens == 80
-    assert call.output_tokens == 20
-    assert call.estimated_cost_micros == 17
+    assert len(failed.model_calls) == 2
+    assert all(call.status == "failed" for call in failed.model_calls)
+    assert all(call.error_code == "provider_output_truncated" for call in failed.model_calls)
+    assert all(call.input_tokens == 80 for call in failed.model_calls)
+    assert all(call.output_tokens == 20 for call in failed.model_calls)
+    assert all(call.estimated_cost_micros == 17 for call in failed.model_calls)
+    timeline = next(task for task in failed.tasks if task.kind == "timeline_research")
+    assert timeline.attempt == 2
+
+
+async def test_truncated_research_gets_one_compact_repair_attempt(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    worker.max_concurrency = 1
+    run_id, reference = await _create_run(database, service)
+    request_counts = {
+        "timeline_research": 0,
+        "theme_research": 0,
+        "build_interview_scaffold": 0,
+    }
+    timeline_prompts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        kind = _task_kind(request)
+        request_counts[kind] += 1
+        if kind == "timeline_research":
+            body = json.loads(request.content)
+            timeline_prompts.append(body["messages"][1]["content"])
+            if request_counts[kind] == 1:
+                return httpx.Response(
+                    200,
+                    json=_response_for(request, reference, finish_reason="length"),
+                )
+        return httpx.Response(200, json=_response_for(request, reference))
+
+    client = await _install_provider(worker, httpx.MockTransport(handler))
+    try:
+        assert await worker.run_until_idle() == 4
+        completed = await service.get_run(run_id)
+    finally:
+        await client.aclose()
+
+    assert completed.status == "waiting_for_user"
+    assert request_counts == {
+        "timeline_research": 2,
+        "theme_research": 1,
+        "build_interview_scaffold": 1,
+    }
+    assert "受限的自动修复重试" not in timeline_prompts[0]
+    assert "受限的自动修复重试" in timeline_prompts[1]
+    calls = [
+        call
+        for call in completed.model_calls
+        if call.task_id
+        == next(task.id for task in completed.tasks if task.kind == "timeline_research")
+    ]
+    assert [call.status for call in calls] == ["failed", "succeeded"]
+    assert calls[0].error_code == "provider_output_truncated"
+    assert calls[1].error_code is None
 
 
 async def test_deepseek_mode_rejects_fake_workflow_without_http(

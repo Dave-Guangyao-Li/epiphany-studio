@@ -286,3 +286,58 @@ async def test_ai_assisted_source_cannot_be_used_as_writing_style_identity(
         assert (await client.get(f"/projects/{project_id}")).json()["run_count"] == 0
 
     await app.state.database.close()
+
+
+async def test_writing_sample_cannot_be_used_as_factual_source(tmp_path: Path) -> None:
+    app = create_app(
+        settings=Settings(
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'style-only-source.db'}",
+            create_schema_on_start=False,
+            worker_enabled=False,
+        )
+    )
+    await app.state.database.create_schema()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        project = await _new_project(client, "写作样本不是事实素材")
+        project_id = project["id"]
+        style = (
+            await client.post(
+                f"/projects/{project_id}/sources",
+                json=_source_body(
+                    title="过往播客稿",
+                    text="我不太想急着总结。先把窗外的雨声留下来，再慢慢说。",
+                    source_type="writing_sample",
+                ),
+            )
+        ).json()["source"]
+
+        payload = {
+            "topic": "为什么要区分事实和表达风格",
+            "source_ids": [style["id"]],
+            "creative_brief": {},
+        }
+        project_run = await client.post(
+            f"/projects/{project_id}/runs",
+            json={
+                "submission_id": "reject-style-as-project-fact",
+                "workflow_type": "episode-research",
+                "payload": payload,
+            },
+        )
+        assert project_run.status_code == 422
+        assert project_run.json() == {
+            "detail": (
+                "writing_sample Sources are style-only and cannot be used as factual source_ids"
+            )
+        }
+
+        direct_run = await client.post(
+            "/runs",
+            json={"workflow_type": "episode-research", "payload": payload},
+        )
+        assert direct_run.status_code == 422
+        assert direct_run.json() == project_run.json()
+        assert (await client.get(f"/projects/{project_id}")).json()["run_count"] == 0
+
+    await app.state.database.close()

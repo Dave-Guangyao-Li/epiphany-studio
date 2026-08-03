@@ -4,13 +4,21 @@ import math
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from epiphany.draft_feedback_schemas import FeedbackDecision, FeedbackOrigin
 from epiphany.draft_quality_schemas import DraftQualityReport
 from epiphany.editor_schemas import (
+    GroundedDraftParagraph,
+    InvalidPodcastDraftSourceReference,
+    MissingInitialSourceReference,
+    MissingSupplementalSourceReference,
     PodcastDraftOutput,
+    PodcastDraftSchemaError,
+    PodcastDraftSection,
     PodcastDraftTaskInput,
+    PodcastDraftTitleTopicMismatch,
+    WritingStyleSampleLeak,
     editor_spoken_script_reference_keys,
     validate_podcast_draft_output,
 )
@@ -24,6 +32,7 @@ DRAFT_REVISION_REQUEST_VERSION = "draft_revision_request_v2_supplemental_intervi
 DRAFT_REVISION_COMPARISON_VERSION = "draft_revision_comparison_v1"
 REVISE_PODCAST_DRAFT = "revise_podcast_draft"
 MAX_LENGTH_RECOVERY_PRIORITY_REFS = 12
+PODCAST_REVISION_PATCH_VERSION = "podcast_revision_patch_v1"
 
 DurationResolution = Literal[
     "not_needed",
@@ -789,8 +798,115 @@ class PodcastRevisionOutputError(ValueError):
     code = "podcast_revision_output_invalid"
 
 
+class PodcastRevisionTaskInputError(ValueError):
+    """Trusted Revision input was invalid before model output could be checked."""
+
+    code = "podcast_revision_task_input_invalid"
+
+
+class PodcastRevisionSchemaError(PodcastRevisionOutputError):
+    code = "podcast_revision_schema_invalid"
+
+
+class PodcastRevisionPatchSchemaError(PodcastRevisionOutputError):
+    code = "podcast_revision_patch_schema_invalid"
+
+
+class InvalidPodcastRevisionSourceReference(PodcastRevisionOutputError):
+    code = "podcast_revision_invalid_source_reference"
+
+
+class PodcastRevisionTitleTopicMismatch(PodcastRevisionOutputError):
+    code = "podcast_revision_title_topic_mismatch"
+
+
+class PodcastRevisionMissingInitialSourceReference(PodcastRevisionOutputError):
+    code = "podcast_revision_missing_initial_source_reference"
+
+
+class PodcastRevisionMissingSupplementalSourceReference(PodcastRevisionOutputError):
+    code = "podcast_revision_missing_supplemental_source_reference"
+
+
+class PodcastRevisionWritingStyleSampleLeak(PodcastRevisionOutputError):
+    code = "podcast_revision_writing_style_sample_leak"
+
+
 class PodcastRevisionNoChange(PodcastRevisionOutputError):
     code = "podcast_revision_no_change"
+
+
+class PodcastRevisionAddedMaterialUnused(PodcastRevisionOutputError):
+    code = "podcast_revision_added_material_unused"
+
+
+class PodcastRevisionRecoveryMaterialUnused(PodcastRevisionOutputError):
+    code = "podcast_revision_recovery_material_unused"
+
+
+class PodcastRevisionSectionAppend(BaseModel):
+    """Bounded paragraphs to append to one immutable parent section."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    section_index: int = Field(ge=0, le=7)
+    paragraphs: list[GroundedDraftParagraph] = Field(min_length=1, max_length=4)
+
+
+class PodcastRevisionPatch(BaseModel):
+    """Small hosted-model output that is deterministically applied to a parent Draft."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    patch_version: Literal["podcast_revision_patch_v1"] = PODCAST_REVISION_PATCH_VERSION
+    append_to_sections: list[PodcastRevisionSectionAppend] = Field(
+        default_factory=list,
+        max_length=8,
+    )
+    new_sections: list[PodcastDraftSection] = Field(default_factory=list, max_length=3)
+
+    @model_validator(mode="after")
+    def patch_must_contain_one_unique_operation(self) -> PodcastRevisionPatch:
+        if not self.append_to_sections and not self.new_sections:
+            raise ValueError("revision patch must contain at least one operation")
+        section_indexes = [operation.section_index for operation in self.append_to_sections]
+        if len(section_indexes) != len(set(section_indexes)):
+            raise ValueError("revision patch section indexes must be unique")
+        return self
+
+
+def _materialize_podcast_revision_patch(
+    *,
+    parsed_input: PodcastRevisionTaskInput,
+    content: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply a bounded patch locally while preserving the immutable parent structure."""
+
+    try:
+        patch = PodcastRevisionPatch.model_validate(content)
+    except (ValidationError, ValueError, TypeError) as error:
+        raise PodcastRevisionPatchSchemaError(
+            "podcast revision patch did not match its bounded schema"
+        ) from error
+
+    candidate = parsed_input.parent_podcast_draft.model_copy(deep=True)
+    for operation in patch.append_to_sections:
+        if operation.section_index >= len(candidate.podcast_script.sections):
+            raise PodcastRevisionPatchSchemaError(
+                "podcast revision patch referenced an unavailable parent section"
+            )
+        section = candidate.podcast_script.sections[operation.section_index]
+        section.paragraphs.extend(operation.paragraphs)
+    candidate.podcast_script.sections.extend(patch.new_sections)
+
+    try:
+        return PodcastDraftOutput.model_validate(candidate.model_dump(mode="json")).model_dump(
+            mode="json"
+        )
+    except (ValidationError, ValueError, TypeError) as error:
+        raise PodcastRevisionPatchSchemaError(
+            "podcast revision patch exceeded the bounded parent Draft structure"
+        ) from error
 
 
 def revision_base_editor_input(task_input: dict[str, Any]) -> dict[str, Any]:
@@ -812,18 +928,111 @@ def validate_podcast_revision_output(
 ) -> dict[str, Any]:
     try:
         parsed_input = PodcastRevisionTaskInput.model_validate(task_input)
-        validated = validate_podcast_draft_output(
-            task_input=revision_base_editor_input(task_input),
+    except (ValidationError, ValueError, TypeError) as error:
+        raise PodcastRevisionTaskInputError(
+            "podcast revision task input did not match its trusted contract"
+        ) from error
+
+    expects_length_recovery_patch = (
+        "reuse_unused_material" in parsed_input.selected_actions
+        and parsed_input.length_recovery_plan is not None
+    )
+    candidate_content = content
+    if expects_length_recovery_patch and "podcast_script" not in content:
+        candidate_content = _materialize_podcast_revision_patch(
+            parsed_input=parsed_input,
             content=content,
         )
-    except PodcastRevisionOutputError:
-        raise
-    except (ValueError, TypeError) as error:
-        raise PodcastRevisionOutputError(
-            "podcast revision did not match the strict task contract"
+    elif "patch_version" in content:
+        raise PodcastRevisionPatchSchemaError(
+            "podcast revision patches are only valid for planned length recovery"
+        )
+
+    try:
+        validated = validate_podcast_draft_output(
+            task_input=revision_base_editor_input(task_input),
+            content=candidate_content,
+        )
+    except PodcastDraftSchemaError as error:
+        raise PodcastRevisionSchemaError(
+            "podcast revision did not match the strict PodcastDraft schema"
+        ) from error
+    except InvalidPodcastDraftSourceReference as error:
+        raise InvalidPodcastRevisionSourceReference(
+            "podcast revision cited a source outside the Revision task scope"
+        ) from error
+    except PodcastDraftTitleTopicMismatch as error:
+        raise PodcastRevisionTitleTopicMismatch(
+            "podcast revision title did not exactly match the requested topic"
+        ) from error
+    except MissingInitialSourceReference as error:
+        raise PodcastRevisionMissingInitialSourceReference(
+            "podcast revision omitted every initial factual source reference"
+        ) from error
+    except MissingSupplementalSourceReference as error:
+        raise PodcastRevisionMissingSupplementalSourceReference(
+            "podcast revision omitted required supplemental source evidence"
+        ) from error
+    except WritingStyleSampleLeak as error:
+        raise PodcastRevisionWritingStyleSampleLeak(
+            "podcast revision copied distinctive text from a style-only sample"
         ) from error
     if validated == parsed_input.parent_podcast_draft.model_dump(mode="json"):
         raise PodcastRevisionNoChange("podcast revision must produce a changed Draft candidate")
+
+    parent_spoken_texts = {
+        _normalize_required_text(parsed_input.parent_podcast_draft.podcast_script.opening.text),
+        *(
+            _normalize_required_text(paragraph.text)
+            for section in parsed_input.parent_podcast_draft.podcast_script.sections
+            for paragraph in section.paragraphs
+        ),
+        _normalize_required_text(parsed_input.parent_podcast_draft.podcast_script.closing.text),
+    }
+    revised = PodcastDraftOutput.model_validate(validated)
+    revised_spoken_units = [
+        revised.podcast_script.opening,
+        *[
+            paragraph
+            for section in revised.podcast_script.sections
+            for paragraph in section.paragraphs
+        ],
+        revised.podcast_script.closing,
+    ]
+
+    if (
+        "add_supplemental_material" in parsed_input.selected_actions
+        and parsed_input.added_source_ids
+    ):
+        added_source_ids = set(parsed_input.added_source_ids)
+        added_material_reached_new_spoken_text = any(
+            any(reference.source_id in added_source_ids for reference in unit.source_refs)
+            and _normalize_required_text(unit.text) not in parent_spoken_texts
+            for unit in revised_spoken_units
+        )
+        if not added_material_reached_new_spoken_text:
+            raise PodcastRevisionAddedMaterialUnused(
+                "supplemental material must ground at least one new spoken unit"
+            )
+
+    recovery = parsed_input.length_recovery_plan
+    if (
+        "reuse_unused_material" in parsed_input.selected_actions
+        and recovery is not None
+        and recovery.priority_unused_source_refs
+    ):
+        priority_keys = {
+            _reference_key(reference) for reference in recovery.priority_unused_source_refs
+        }
+        recovery_material_reached_new_spoken_text = any(
+            any(_reference_key(reference) in priority_keys for reference in unit.source_refs)
+            and _normalize_required_text(unit.text) not in parent_spoken_texts
+            for unit in revised_spoken_units
+        )
+        if not recovery_material_reached_new_spoken_text:
+            raise PodcastRevisionRecoveryMaterialUnused(
+                "length recovery must ground at least one new spoken unit in priority material"
+            )
     return validated
 
 

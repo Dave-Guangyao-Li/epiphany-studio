@@ -483,6 +483,22 @@ def test_editorial_instructions_in_spoken_text_are_reported_for_review() -> None
     )
 
 
+def test_length_recovery_meta_instruction_is_not_treated_as_spoken_content() -> None:
+    content = _good_draft().model_dump(mode="python")
+    content["podcast_script"]["sections"][0]["paragraphs"][0]["text"] += (
+        "如果稿子需要更长，我希望展开的是搬家那天的具体场景。"
+    )
+
+    result = analyze_podcast_draft(draft=content, creative_brief=_brief())
+    finding = next(
+        item for item in result.findings if item.code == "style.editorial_instruction_leakage"
+    )
+
+    assert result.metrics.editorial_instruction_phrase_count >= 1
+    assert finding.status == "warning"
+    assert "如果稿子需要更长" in finding.exact_quote
+
+
 def test_sentence_and_paragraph_cv_warn_only_with_enough_samples() -> None:
     uniform = _good_draft().model_dump(mode="python")
     uniform["podcast_script"]["opening"]["text"] = "甲乙丙丁。"

@@ -10,12 +10,22 @@ from epiphany.config import Settings
 from epiphany.main import create_app
 from epiphany.runtime.providers import (
     FakeProvider,
+    ProviderNetworkError,
     ProviderResult,
     RetryableProviderError,
     TaskInvocation,
 )
 from epiphany.runtime.source_starter_prompts import build_source_starter_prompt
-from epiphany.source_starter_schemas import BUILD_SOURCE_STARTER, validate_source_starter_output
+from epiphany.source_starter_schemas import (
+    BUILD_SOURCE_STARTER,
+    SOURCE_STARTER_TEXT_MAX_LENGTH,
+    SOURCE_STARTER_WRITING_EXAMPLE_MAX_LENGTH,
+    build_safe_source_starter_candidate,
+    ground_source_starter_candidate,
+    neutralize_source_starter_direct_quote_candidate,
+    neutralize_source_starter_first_person_candidate,
+    validate_source_starter_output,
+)
 
 
 async def _create_project(client: httpx.AsyncClient) -> str:
@@ -179,7 +189,7 @@ class FailSourceStarterOnceProvider(FakeProvider):
         return await super().generate(invocation)
 
 
-class InvalidSourceStarterProvider(FakeProvider):
+class GenericInvalidExplorationSourceStarterProvider(FakeProvider):
     leaked_value = "MODEL_PRIVATE_VALUE_MUST_NOT_BE_PERSISTED"
 
     async def generate(self, invocation: TaskInvocation) -> ProviderResult:
@@ -205,6 +215,35 @@ class UnsupportedFirstPersonSourceStarterProvider(FakeProvider):
             provider=result.provider,
             model=result.model,
         )
+
+
+class UnsupportedDirectQuoteSourceStarterProvider(FakeProvider):
+    concept = "“失控感”"
+    dialogue = "店员问：“还是这个？”"
+
+    async def generate(self, invocation: TaskInvocation) -> ProviderResult:
+        result = await super().generate(invocation)
+        if invocation.kind != BUILD_SOURCE_STARTER:
+            return result
+        return ProviderResult(
+            content={
+                **result.content,
+                "starter_text": (
+                    "【AI 候选，不是事实记录】\n"
+                    f"可以先比较{self.concept}与水下画面的吸引力。\n"
+                    f"{self.dialogue}"
+                ),
+            },
+            provider=result.provider,
+            model=result.model,
+        )
+
+
+class UnavailableSourceStarterProvider(FakeProvider):
+    async def generate(self, invocation: TaskInvocation) -> ProviderResult:
+        if invocation.kind == BUILD_SOURCE_STARTER:
+            raise ProviderNetworkError("source starter provider is unreachable")
+        return await super().generate(invocation)
 
 
 async def test_source_starter_retry_wait_cancel_and_validation_redaction(
@@ -265,7 +304,7 @@ async def test_source_starter_retry_wait_cancel_and_validation_redaction(
             create_schema_on_start=False,
             worker_enabled=False,
         ),
-        provider=InvalidSourceStarterProvider(),
+        provider=GenericInvalidExplorationSourceStarterProvider(),
     )
     await invalid_app.state.database.create_schema()
     invalid_transport = httpx.ASGITransport(app=invalid_app)
@@ -273,22 +312,48 @@ async def test_source_starter_retry_wait_cancel_and_validation_redaction(
         project_id = await _create_project(client)
         created = await client.post(
             f"/projects/{project_id}/source-starters",
-            json=_starter_body(submission_id="invalid-starter"),
+            json=_starter_body(
+                submission_id="invalid-exploration-starter",
+                mode="exploration_outline",
+            ),
         )
         run_id = created.json()["id"]
-        assert await invalid_app.state.worker.run_until_idle() == 1
-        failed = (await client.get(f"/runs/{run_id}")).json()
-        assert failed["status"] == "failed"
-        task = failed["tasks"][0]
-        assert task["error_code"] == "task_output_invalid"
-        assert InvalidSourceStarterProvider.leaked_value not in task["error_message"]
-        assert task["error_message"] == (
-            "model output failed strict validation (task_output_invalid)"
+        assert await invalid_app.state.worker.run_until_idle() == 2
+        waiting = (await client.get(f"/runs/{run_id}")).json()
+
+        assert waiting["status"] == "waiting_for_user"
+        assert waiting["current_step"] == "awaiting_source_confirmation"
+        task = waiting["tasks"][0]
+        assert task["status"] == "succeeded"
+        assert task["attempt"] == 2
+        assert task["error_code"] is None
+        assert GenericInvalidExplorationSourceStarterProvider.leaked_value not in str(waiting)
+        assert [call["status"] for call in waiting["model_calls"]] == [
+            "succeeded",
+            "succeeded",
+        ]
+        candidate = next(
+            artifact
+            for artifact in waiting["artifacts"]
+            if artifact["kind"] == "source_starter_candidate"
         )
+        assert candidate["content_json"]["mode"] == "exploration_outline"
+        assert "【探索提纲｜AI 候选问题地图" in candidate["content_json"]["starter_text"]
+        assert candidate["content_json"]["_execution"] == {
+            "provider": "fake",
+            "model": "fake-v1",
+            "attempt": 2,
+            "fallback": "server_safe_template",
+            "model_output_validation_error": "task_output_invalid",
+        }
+        events = (await client.get(f"/runs/{run_id}/events")).json()
+        retry = [event for event in events if event["type"] == "task.retry_scheduled"]
+        assert len(retry) == 1
+        assert retry[0]["payload"]["error_code"] == "task_output_invalid"
     await invalid_app.state.database.close()
 
 
-async def test_source_starter_rejects_live_inferred_first_person_failure_without_leak(
+async def test_source_starter_neutralizes_first_person_after_bounded_live_validation_repair(
     tmp_path: Path,
 ) -> None:
     app = create_app(
@@ -310,22 +375,123 @@ async def test_source_starter_rejects_live_inferred_first_person_failure_without
         run_id = created.json()["id"]
 
         assert await app.state.worker.run_until_idle() == 2
-        failed = (await client.get(f"/runs/{run_id}")).json()
+        waiting = (await client.get(f"/runs/{run_id}")).json()
 
-        assert failed["status"] == "failed"
-        assert failed["tasks"][0]["error_code"] == ("source_starter_unsupported_first_person")
-        assert failed["tasks"][0]["error_message"] == (
-            "model output failed strict validation (source_starter_unsupported_first_person)"
-        )
-        assert UnsupportedFirstPersonSourceStarterProvider.leaked_assertion not in str(failed)
-        assert "耳压" not in str(failed)
-        assert [call["status"] for call in failed["model_calls"]] == [
+        assert waiting["status"] == "waiting_for_user"
+        assert waiting["current_step"] == "awaiting_source_confirmation"
+        assert waiting["tasks"][0]["status"] == "succeeded"
+        assert UnsupportedFirstPersonSourceStarterProvider.leaked_assertion not in str(waiting)
+        assert "耳压" in str(waiting)
+        assert [call["status"] for call in waiting["model_calls"]] == [
             "succeeded",
             "succeeded",
         ]
+        candidate = next(
+            artifact
+            for artifact in waiting["artifacts"]
+            if artifact["kind"] == "source_starter_candidate"
+        )
+        assert (
+            "以下是 AI 提供的主题相关候选，不是用户事实"
+            in candidate["content_json"]["starter_text"]
+        )
+        assert "担心耳压会让第一次潜水失败" in candidate["content_json"]["starter_text"]
+        assert candidate["content_json"]["_execution"] == {
+            "provider": "fake",
+            "model": "fake-v1",
+            "attempt": 2,
+            "fallback": "server_line_grounding",
+            "model_output_validation_error": "source_starter_unsupported_first_person",
+        }
         assert [
             event["type"] for event in (await client.get(f"/runs/{run_id}/events")).json()
         ].count("task.retry_scheduled") == 1
+
+    await app.state.database.close()
+
+
+async def test_source_starter_neutralizes_concept_quotes_and_invented_dialogue(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        settings=Settings(
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'starter-direct-quote.db'}",
+            create_schema_on_start=False,
+            worker_enabled=False,
+        ),
+        provider=UnsupportedDirectQuoteSourceStarterProvider(),
+    )
+    await app.state.database.create_schema()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        project_id = await _create_project(client)
+        created = await client.post(
+            f"/projects/{project_id}/source-starters",
+            json=_starter_body(submission_id="unsupported-direct-quote"),
+        )
+        run_id = created.json()["id"]
+
+        assert await app.state.worker.run_until_idle() == 2
+        waiting = (await client.get(f"/runs/{run_id}")).json()
+
+        assert waiting["status"] == "waiting_for_user"
+        candidate = next(
+            artifact
+            for artifact in waiting["artifacts"]
+            if artifact["kind"] == "source_starter_candidate"
+        )
+        text = candidate["content_json"]["starter_text"]
+        assert UnsupportedDirectQuoteSourceStarterProvider.concept not in text
+        assert UnsupportedDirectQuoteSourceStarterProvider.dialogue not in text
+        assert "以下是 AI 提供的主题相关候选，不是用户事实" in text
+        assert "‹失控感›" in text
+        assert "‹还是这个？›" in text
+        assert "还是这个？" in text
+        assert candidate["content_json"]["_execution"] == {
+            "provider": "fake",
+            "model": "fake-v1",
+            "attempt": 2,
+            "fallback": "server_line_grounding",
+            "model_output_validation_error": "source_starter_unsupported_direct_quote",
+        }
+
+    await app.state.database.close()
+
+
+async def test_source_starter_does_not_replace_provider_failure_with_safe_candidate(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        settings=Settings(
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'starter-network-error.db'}",
+            create_schema_on_start=False,
+            worker_enabled=False,
+        ),
+        provider=UnavailableSourceStarterProvider(),
+    )
+    await app.state.database.create_schema()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        project_id = await _create_project(client)
+        created = await client.post(
+            f"/projects/{project_id}/source-starters",
+            json=_starter_body(submission_id="network-error-starter"),
+        )
+        run_id = created.json()["id"]
+
+        assert await app.state.worker.run_until_idle() == 2
+        failed = (await client.get(f"/runs/{run_id}")).json()
+
+        assert failed["status"] == "failed"
+        assert failed["tasks"][0]["error_code"] == "provider_network_error"
+        assert failed["tasks"][0]["attempt"] == 2
+        assert not any(
+            artifact["kind"] == "source_starter_candidate" for artifact in failed["artifacts"]
+        )
+        assert [call["status"] for call in failed["model_calls"]] == [
+            "failed",
+            "failed",
+        ]
 
     await app.state.database.close()
 
@@ -517,10 +683,85 @@ def test_source_starter_prompt_preserves_unknowns_and_forbids_fabrication() -> N
     assert "不得编造用户的第一人称经历" in system
     assert "每一个“我”" in system
     assert "只把省略/第三人称主语换成“我”" in system
+    assert "exploration_outline 是问题地图" in system
+    assert "[句式示例：……]" in system
+    assert f"不超过 {SOURCE_STARTER_WRITING_EXAMPLE_MAX_LENGTH} 个汉字" in system
+    assert "第一行必须明确写“AI 候选”" in system
+    assert "你的价值不只是重复输入" in system
+    assert "AI 提供的可选角度（不是用户事实）" in system
+    assert "区分三类来源" in system
     assert "[待补充：……]" in system
     assert "[待核实：……]" in system
     assert "潜水学习" in user
     assert "想探索一个陌生领域" in user
+    assert "个人入口、核心问题、可尝试/可观察的方向" in user
+
+
+def test_source_starter_mode_prompts_are_materially_distinct() -> None:
+    outline = build_source_starter_prompt(
+        task_input=_validation_task_input(mode="exploration_outline")
+    )
+    draft = build_source_starter_prompt(task_input=_validation_task_input())
+
+    outline_user = outline.messages[1]["content"]
+    draft_user = draft.messages[1]["content"]
+    assert "问题地图" not in outline_user  # the system owns the shared label
+    assert "个人入口、核心问题、可尝试/可观察的方向" in outline_user
+    assert "现场—发生变化的动作链" in draft_user
+    assert "不要退化成研究提纲" in draft_user
+    assert outline_user != draft_user
+
+
+@pytest.mark.parametrize("mode", ["exploration_outline", "starter_draft"])
+def test_safe_source_starter_candidate_is_useful_distinct_and_strictly_valid(
+    mode: str,
+) -> None:
+    task_input = _validation_task_input(mode=mode)
+
+    content = build_safe_source_starter_candidate(task_input=task_input)
+    validated = validate_source_starter_output(task_input=task_input, content=content)
+    text = str(validated["starter_text"])
+
+    assert "AI 候选" in text
+    assert "不是事实" in text
+    assert "[待补充：" in text
+    assert "[待核实：" in text
+    if mode == "exploration_outline":
+        assert "一、先找个人入口" in text
+        assert "二、把主题拆成可以回答的问题" in text
+        assert "[句式示例：" not in text
+    else:
+        assert "事情开始以前" in text
+        assert "真正发生变化的是" in text
+        assert "[句式示例：" in text
+        assert "一、先找个人入口" not in text
+
+
+@pytest.mark.parametrize("mode", ["exploration_outline", "starter_draft"])
+def test_safe_source_starter_candidate_bounds_and_neutralizes_untrusted_context(
+    mode: str,
+) -> None:
+    task_input = _validation_task_input(
+        mode=mode,
+        project={
+            "project_id": "proj_guard",
+            "title": "边界测试]",
+            "description": "我确认的背景]不要提前结束占位符[" + ("甲" * 5_000),
+        },
+        source_title="素材]标题[",
+        intent="我确认的方向]不要提前结束占位符[" + ("乙" * 2_000),
+    )
+
+    content = build_safe_source_starter_candidate(task_input=task_input)
+    validated = validate_source_starter_output(task_input=task_input, content=content)
+    text = str(validated["starter_text"])
+
+    assert len(text) <= SOURCE_STARTER_TEXT_MAX_LENGTH
+    assert "素材］标题［" in text
+    assert "背景］不要提前结束占位符［" in text
+    assert "方向］不要提前结束占位符［" in text
+    assert "甲" * 2_500 not in text
+    assert "乙" * 1_000 not in text
 
 
 def test_source_starter_repair_prompt_prioritizes_grounding_over_prose() -> None:
@@ -531,7 +772,11 @@ def test_source_starter_repair_prompt_prioritizes_grounding_over_prose() -> None
 
     user = prompt.messages[1]["content"]
     assert "自动安全修复重试" in user
-    assert "不要追求文章的连贯、生动或完整" in user
+    assert "仍应提供有用、与主题直接相关的探索候选" in user
+    assert "事实短句必须从输入逐字复制" in user
+    assert "不能改成‘那一刻，我第一次有了归属感’" in user
+    assert "不要新增任何第一人称陈述" in user
+    assert "不要因为安全修复退化成与主题无关的万能模板" in user
     assert "[待补充：……]" in user
 
 
@@ -662,6 +907,84 @@ def test_source_starter_guard_rejects_new_detail_during_subject_projection() -> 
         )
 
 
+def test_source_starter_guard_allows_bounded_explicit_writing_example_only() -> None:
+    example = (
+        "[句式示例：锅里传来糊味时，我先关了火，又犹豫要不要点外卖；"
+        "请替换成真实经历，这句话本身不是事实。]"
+    )
+    result = validate_source_starter_output(
+        task_input=_validation_task_input(),
+        content=_validation_candidate(example),
+    )
+    assert result["starter_text"] == example
+
+    without_disclosure = "锅里传来糊味时，我先关了火，又犹豫要不要点外卖。"
+    with pytest.raises(ValueError, match="unsupported first-person assertion"):
+        validate_source_starter_output(
+            task_input=_validation_task_input(),
+            content=_validation_candidate(without_disclosure),
+        )
+
+
+def test_source_starter_writing_example_limit_matches_prompt_contract() -> None:
+    disclosure = "请替换成真实经历，这不是事实。"
+    body_at_limit = disclosure + (
+        "甲" * (SOURCE_STARTER_WRITING_EXAMPLE_MAX_LENGTH - len(disclosure))
+    )
+    at_limit = f"[句式示例：{body_at_limit}]"
+    result = validate_source_starter_output(
+        task_input=_validation_task_input(),
+        content=_validation_candidate(at_limit),
+    )
+    assert result["starter_text"] == at_limit
+
+    over_limit = f"[句式示例：{body_at_limit}乙]"
+    with pytest.raises(ValueError, match="writing example"):
+        validate_source_starter_output(
+            task_input=_validation_task_input(),
+            content=_validation_candidate(over_limit),
+        )
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        "[句式示例：锅里传来糊味时，我先关了火。]",
+        "[句式示例：" + "我会替换成真实经历" * 30 + "]",
+        "\n".join(
+            [
+                "[句式示例：我会替换成真实经历，这不是事实。]",
+                "[句式示例：我会替换成真实经历，这不是事实。]",
+                "[句式示例：我会替换成真实经历，这不是事实。]",
+            ]
+        ),
+    ],
+)
+def test_source_starter_guard_rejects_unbounded_or_undisclosed_writing_examples(
+    example: str,
+) -> None:
+    with pytest.raises(ValueError, match="writing example"):
+        validate_source_starter_output(
+            task_input=_validation_task_input(),
+            content=_validation_candidate(example),
+        )
+
+
+def test_source_starter_placeholder_remains_non_factual_with_internal_punctuation() -> None:
+    placeholder = (
+        "[待补充：请核对这段用户输入：我为什么想去18米？"
+        "有人曾说开放水域证书允许下潜18米。确认后改写。]"
+    )
+    candidate = _validation_candidate(placeholder)
+
+    result = validate_source_starter_output(
+        task_input=_validation_task_input(),
+        content=candidate,
+    )
+
+    assert result["starter_text"] == placeholder
+
+
 def test_source_starter_guard_does_not_project_a_title_question_into_fact() -> None:
     task_input = _validation_task_input(
         project={
@@ -699,6 +1022,148 @@ def test_source_starter_guard_allows_neutral_exploration_outline() -> None:
     result = validate_source_starter_output(task_input=task_input, content=candidate)
 
     assert result["mode"] == "exploration_outline"
+
+
+def test_source_starter_guard_allows_explicit_ai_brainstorming_and_self_inquiry() -> None:
+    task_input = _validation_task_input(
+        mode="exploration_outline",
+        intent="我真正好奇的是什么、我对耳压和失控的担忧从哪里来",
+    )
+    candidate = _validation_candidate(
+        "【探索提纲｜AI 候选，不是事实记录】\n"
+        "## AI 提供的可选角度（不是用户事实）\n"
+        "- 可能值得观察：水下画面的吸引力、陌生环境中的控制感、第一次尝试前的决策。\n"
+        "- 我真正好奇的是什么\n"
+        "- 我对耳压和失控的担忧从哪里来\n"
+        "- 哪些专业术语或安全问题需要向可信来源查证？\n"
+        "[待补充：从这些候选角度中选出最接近真实想法的一项，并写下原因]"
+    )
+    candidate["mode"] = "exploration_outline"
+
+    result = validate_source_starter_output(task_input=task_input, content=candidate)
+
+    assert "AI 提供的可选角度（不是用户事实）" in result["starter_text"]
+    assert "水下画面的吸引力" in result["starter_text"]
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "我最担心的是耳压。",
+        "我对耳压和失控感到害怕。",
+        "我真正喜欢的是水下的安静。",
+    ],
+)
+def test_source_starter_guard_still_rejects_ai_suggestions_as_user_facts(
+    unsupported: str,
+) -> None:
+    candidate = _validation_candidate(
+        f"【AI 候选，不是事实记录】\n## AI 提供的可选角度（不是用户事实）\n{unsupported}"
+    )
+
+    with pytest.raises(ValueError, match="unsupported first-person assertion"):
+        validate_source_starter_output(
+            task_input=_validation_task_input(),
+            content=candidate,
+        )
+
+
+def test_source_starter_local_neutralization_preserves_topics_not_user_facts() -> None:
+    task_input = _validation_task_input()
+    candidate = _validation_candidate(
+        "【AI 候选，不是事实记录】\n"
+        "- 可以先比较画面吸引力与现实顾虑。\n"
+        "- 我担心耳压会让第一次潜水失败。"
+    )
+    candidate["questions"] = [
+        "我已经在海南体验过潜水。",
+        "哪些内容需要先查证？",
+    ]
+    candidate["uncertainties"] = ["我去年在海南完成了体验"]
+
+    repaired = neutralize_source_starter_first_person_candidate(
+        task_input=task_input,
+        content=candidate,
+    )
+    validated = validate_source_starter_output(
+        task_input=task_input,
+        content=repaired,
+    )
+
+    rendered = str(validated)
+    assert "我担心耳压会让第一次潜水失败" not in rendered
+    assert "我已经在海南体验过潜水" not in rendered
+    assert "我去年在海南完成了体验" not in rendered
+    assert "担心耳压会让第一次潜水失败" in rendered
+    assert "已经在海南体验过潜水" in rendered
+    assert "去年在海南完成了体验" in rendered
+    assert "以下内容由 AI 提出，不是用户事实" in rendered
+    assert validated["questions"][0].endswith("？")
+    assert "尚未由用户确认，需要补充或删除" in validated["uncertainties"][0]
+
+
+def test_source_starter_quote_neutralization_distinguishes_label_from_dialogue() -> None:
+    task_input = _validation_task_input(intent="标题里已经提供“潜水学习”这个词。")
+    candidate = _validation_candidate(
+        "【AI 候选，不是事实记录】\n"
+        "输入原词“潜水学习”保持不变。\n"
+        "AI 提供的可选角度是“对失控的担忧”。\n"
+        "店员问：“还是这个？”"
+    )
+
+    repaired = neutralize_source_starter_direct_quote_candidate(
+        task_input=task_input,
+        content=candidate,
+    )
+    validated = validate_source_starter_output(
+        task_input=task_input,
+        content=repaired,
+    )
+    text = validated["starter_text"]
+
+    assert "输入原词“潜水学习”保持不变" in text
+    assert "“对失控的担忧”" not in text
+    assert "〔AI 候选表述，并非用户原话：对失控的担忧〕" in text
+    assert "店员问：“还是这个？”" not in text
+    assert "未经确认的对话或引语，不是用户事实" in text
+    assert "还是这个？" in text
+
+
+def test_source_starter_line_grounding_handles_multiple_latent_safety_failures() -> None:
+    task_input = _validation_task_input(mode="exploration_outline", intent=None)
+    candidate = _validation_candidate(
+        "【AI 候选，不是事实记录】\n"
+        "AI 提供的可选角度：可以比较画面吸引力、控制感和待查证问题。\n"
+        "我担心耳压会让第一次潜水失败。\n"
+        "教练问：“准备好了吗？”\n"
+        "研究数据显示成功率为95%。\n"
+        "后来去了海边，开始认真考虑潜水。\n"
+        "[句式示例：我已经在海边完成第一次体验。]"
+    )
+    candidate["mode"] = "exploration_outline"
+    candidate["questions"] = ["最想先确认的知识", "哪些内容需要查证？"]
+    candidate["uncertainties"] = ["潜水经历和安全顾虑"]
+
+    repaired = ground_source_starter_candidate(
+        task_input=task_input,
+        content=candidate,
+    )
+    validated = validate_source_starter_output(
+        task_input=task_input,
+        content=repaired,
+    )
+    rendered = str(validated)
+
+    assert "可以比较画面吸引力、控制感和待查证问题" in rendered
+    assert "以下是 AI 提供的主题相关候选，不是用户事实" in rendered
+    assert "担心耳压会让第一次潜水失败" in rendered
+    assert "准备好了吗？" in rendered
+    assert "成功率为95%" in rendered
+    assert "后来去了海边" in rendered
+    assert "我担心耳压会让第一次潜水失败" not in rendered
+    assert "教练问：“准备好了吗？”" not in rendered
+    assert validated["questions"][0].endswith("？")
+    assert "尚未由用户确认，需要补充或删除" in validated["uncertainties"][0]
 
 
 @pytest.mark.parametrize(

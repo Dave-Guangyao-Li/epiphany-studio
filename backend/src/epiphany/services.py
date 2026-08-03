@@ -328,6 +328,16 @@ class RunService:
                 ]
                 if missing_source_ids:
                     raise RunSourceNotFound(missing_source_ids[0])
+                factual_writing_sample_ids = [
+                    source_id
+                    for source_id in research_payload.source_ids
+                    if sources_by_id[source_id].source_type == "writing_sample"
+                ]
+                if factual_writing_sample_ids:
+                    raise InvalidRunPayload(
+                        "writing_sample Sources are style-only and cannot be used as "
+                        "factual source_ids"
+                    )
                 missing_style_source_ids = [
                     source_id for source_id in style_source_ids if source_id not in sources_by_id
                 ]
@@ -2175,8 +2185,10 @@ class RunService:
                             "run does not have a valid interview scaffold checkpoint"
                         ) from error
 
+                    initial_source_ids = list(run.input_json["source_ids"])
                     source_ids_to_load = sorted(
                         {
+                            *initial_source_ids,
                             *source_ids,
                             *(source_id for source_id, _ in scaffold_reference_keys),
                         }
@@ -2198,6 +2210,16 @@ class RunService:
                     ]
                     if missing_source_ids:
                         raise RunSourceNotFound(missing_source_ids[0])
+                    writing_sample_source_ids = [
+                        source_id
+                        for source_id in source_ids
+                        if sources_by_id[source_id].source_type == "writing_sample"
+                    ]
+                    if writing_sample_source_ids:
+                        raise RunResumeNotAllowed(
+                            "writing_sample Sources are style-only and cannot be submitted "
+                            "as factual material"
+                        )
 
                     source_refs = [
                         {
@@ -2213,9 +2235,16 @@ class RunService:
                     submission_artifact_id = new_id("art")
 
                     if run.workflow_version == EDITOR_RESEARCH_WORKFLOW_VERSION:
+                        factual_initial_source_ids = [
+                            source_id
+                            for source_id in initial_source_ids
+                            if source_id in sources_by_id
+                            and sources_by_id[source_id].source_type != "writing_sample"
+                        ]
                         segments_by_key = {
                             (source.id, segment.id): segment
-                            for source in sources
+                            for source_id in factual_initial_source_ids
+                            for source in [sources_by_id[source_id]]
                             for segment in source.segments
                         }
                         missing_scaffold_references = [
@@ -2226,14 +2255,10 @@ class RunService:
                                 "interview scaffold source material is unavailable"
                             )
 
-                        initial_source_segments = [
-                            {
-                                "source_id": source_id,
-                                "source_segment_id": segment_id,
-                                "text": segments_by_key[(source_id, segment_id)].text,
-                            }
-                            for source_id, segment_id in scaffold_reference_keys
-                        ]
+                        initial_source_segments = _segments_for_sources(
+                            factual_initial_source_ids,
+                            sources_by_id,
+                        )
                         supplemental_source_segments = [
                             {
                                 "source_id": source.id,
@@ -2520,29 +2545,48 @@ class RunService:
                     ]
                     if missing_source_ids:
                         raise RunSourceNotFound(missing_source_ids[0])
+                    writing_sample_source_ids = [
+                        source_id
+                        for source_id in source_ids
+                        if sources_by_id[source_id].source_type == "writing_sample"
+                    ]
+                    if writing_sample_source_ids:
+                        raise RunResumeNotAllowed(
+                            "writing_sample Sources are style-only and cannot be submitted "
+                            "as factual material"
+                        )
 
-                    segments_by_key = {
+                    factual_initial_source_ids = [
+                        source_id
+                        for source_id in initial_source_ids
+                        if source_id in sources_by_id
+                        and sources_by_id[source_id].source_type != "writing_sample"
+                    ]
+                    initial_segments_by_key = {
                         (source.id, segment.id): segment
-                        for source in sources
+                        for source_id in factual_initial_source_ids
+                        for source in [sources_by_id[source_id]]
                         for segment in source.segments
                     }
                     missing_scaffold_references = [
-                        key for key in scaffold_reference_keys if key not in segments_by_key
+                        key for key in scaffold_reference_keys if key not in initial_segments_by_key
                     ]
                     if missing_scaffold_references:
                         raise RunResumeNotAllowed(
                             "interview scaffold source material is unavailable"
                         )
-                    initial_segments = [
-                        {
-                            "source_id": source_id,
-                            "source_segment_id": segment_id,
-                            "text": segments_by_key[(source_id, segment_id)].text,
-                        }
-                        for source_id, segment_id in scaffold_reference_keys
+                    initial_segments = _segments_for_sources(
+                        factual_initial_source_ids,
+                        sources_by_id,
+                    )
+                    factual_supplemental_source_ids = [
+                        source_id
+                        for source_id in supplemental_source_ids
+                        if source_id in sources_by_id
+                        and sources_by_id[source_id].source_type != "writing_sample"
                     ]
                     supplemental_segments = _segments_for_sources(
-                        supplemental_source_ids,
+                        factual_supplemental_source_ids,
                         sources_by_id,
                     )
                     if len(supplemental_segments) > MAX_EDITOR_SUPPLEMENTAL_SEGMENTS:

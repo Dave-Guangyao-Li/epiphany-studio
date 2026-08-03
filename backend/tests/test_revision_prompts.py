@@ -7,6 +7,7 @@ from epiphany.revision_schemas import (
 from epiphany.runtime.revision_prompts import (
     _REVISION_INSTRUCTIONS,
     _length_recovery_instructions,
+    _repair_rule_instruction,
 )
 
 
@@ -67,8 +68,47 @@ def test_revision_prompt_forbids_editorial_notes_from_leaking_into_spoken_text()
     assert "不得出现" in _REVISION_INSTRUCTIONS
 
 
+def test_revision_prompt_repairs_semantic_duplicates_and_source_conflicts() -> None:
+    assert "按事件比较父稿" in _REVISION_INSTRUCTIONS
+    assert "概要版和详细版" in _REVISION_INSTRUCTIONS
+    assert "即使字面没有完全重复" in _REVISION_INSTRUCTIONS
+    assert "也要合并成一次" in _REVISION_INSTRUCTIONS
+    assert "互斥事实" in _REVISION_INSTRUCTIONS
+    assert "采用该较新补充" in _REVISION_INSTRUCTIONS
+    assert "无法判断时避免" in _REVISION_INSTRUCTIONS
+
+
 def test_length_recovery_prompt_is_absent_without_the_explicit_action() -> None:
     task = _recovery_task()
     task.selected_actions = ["apply_selected_feedback"]
 
     assert _length_recovery_instructions(task) == ""
+
+
+def test_revision_instructions_require_targeted_answers_in_new_spoken_text() -> None:
+    assert "优先把这些 Source 中真正新增的具体场景" in _REVISION_INSTRUCTIONS
+    assert "不要把一次“补充素材”修订写成" in _REVISION_INSTRUCTIONS
+    assert "比父稿更短的重新起稿" in _REVISION_INSTRUCTIONS
+
+
+def test_revision_repair_rule_explains_safe_granular_validation_failures() -> None:
+    assert "根对象只能包含 patch_version" in _repair_rule_instruction(
+        "podcast_revision_patch_schema_invalid"
+    )
+    assert "根对象只能包含" in _repair_rule_instruction("podcast_revision_schema_invalid")
+    assert "allowed_source_refs" in _repair_rule_instruction(
+        "podcast_revision_invalid_source_reference"
+    )
+    assert "逐字复制 editor_bundle.topic" in _repair_rule_instruction(
+        "podcast_revision_title_topic_mismatch"
+    )
+    assert "style_only" in _repair_rule_instruction("podcast_revision_writing_style_sample_leak")
+    assert "priority_recovery_source_segments" in _repair_rule_instruction(
+        "podcast_revision_recovery_material_unused"
+    )
+
+
+def test_revision_repair_rule_never_reflects_unknown_persisted_text() -> None:
+    unknown = "unsafe arbitrary diagnostic text"
+
+    assert _repair_rule_instruction(unknown) == ""

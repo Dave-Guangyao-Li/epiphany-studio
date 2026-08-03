@@ -530,6 +530,20 @@ class FailReviewerOnceProvider(FakeProvider):
         return await super().generate(invocation)
 
 
+class InvalidReviewerEvidenceProvider(FakeProvider):
+    def __init__(self, *, invalid_attempts: frozenset[int]) -> None:
+        super().__init__()
+        self.invalid_attempts = invalid_attempts
+
+    async def generate(self, invocation: TaskInvocation) -> ProviderResult:
+        result = await super().generate(invocation)
+        if invocation.kind == REVIEW_PODCAST_DRAFT and invocation.attempt in self.invalid_attempts:
+            result.content["dimensions"][0]["evidence"][0]["exact_quote"] = (  # type: ignore[index]
+                "这句话并不存在于对应的 Draft block"
+            )
+        return result
+
+
 async def test_v7_reviewer_transient_failure_retries_without_duplicate_artifacts(
     runtime: tuple[Database, RunService, Worker],
 ) -> None:
@@ -554,6 +568,56 @@ async def test_v7_reviewer_transient_failure_retries_without_duplicate_artifacts
     assert sum(event.type == "task.retry_scheduled" for event in events) == 1
     assert sum(event.type == "workflow.draft_self_review.completed" for event in events) == 1
     assert sum(event.type == "workflow.draft_quality.completed" for event in events) == 1
+
+
+async def test_v7_reviewer_invalid_evidence_gets_one_bounded_repair(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    worker.provider = InvalidReviewerEvidenceProvider(invalid_attempts=frozenset({1}))
+    run_id = await _resume_with_enough_material(database, service, worker)
+
+    assert await worker.run_until_idle() == 3
+    completed = await service.get_run(run_id)
+    assert completed.status == "succeeded"
+    reviewer = next(task for task in completed.tasks if task.kind == REVIEW_PODCAST_DRAFT)
+    assert reviewer.status == "succeeded"
+    assert reviewer.attempt == 2
+    reviewer_calls = [call for call in completed.model_calls if call.task_id == reviewer.id]
+    assert [call.status for call in reviewer_calls] == ["succeeded", "succeeded"]
+    assert [artifact.kind for artifact in completed.artifacts].count(
+        f"{REVIEW_PODCAST_DRAFT}_result"
+    ) == 1
+    events = await service.list_events(run_id)
+    assert sum(event.type == "task.retry_scheduled" for event in events) == 1
+    assert sum(event.type == "workflow.draft_self_review.completed" for event in events) == 1
+
+
+async def test_v7_reviewer_second_invalid_evidence_degrades_without_weakening_validation(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    worker.provider = InvalidReviewerEvidenceProvider(invalid_attempts=frozenset({1, 2}))
+    run_id = await _resume_with_enough_material(database, service, worker)
+
+    assert await worker.run_until_idle() == 3
+    completed = await service.get_run(run_id)
+    assert completed.status == "succeeded"
+    reviewer = next(task for task in completed.tasks if task.kind == REVIEW_PODCAST_DRAFT)
+    assert reviewer.status == "failed"
+    assert reviewer.attempt == 2
+    assert reviewer.error_code == "invalid_model_review_evidence"
+    reviewer_calls = [call for call in completed.model_calls if call.task_id == reviewer.id]
+    assert [call.status for call in reviewer_calls] == ["succeeded", "succeeded"]
+    assert all(
+        artifact.kind != f"{REVIEW_PODCAST_DRAFT}_result" for artifact in completed.artifacts
+    )
+    report = (await service.get_draft_quality_report(run_id)).report
+    assert report.model_review_status == "unavailable"
+    assert report.model_review_unavailable_reason == "invalid_model_review_evidence"
+    events = await service.list_events(run_id)
+    assert sum(event.type == "task.retry_scheduled" for event in events) == 1
+    assert sum(event.type == "workflow.draft_self_review.unavailable" for event in events) == 1
 
 
 class PermanentlyFailingReviewerProvider(FakeProvider):

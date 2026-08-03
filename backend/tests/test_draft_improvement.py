@@ -427,6 +427,52 @@ def test_priority_candidates_skip_exact_spoken_copy_and_duplicate_source_text() 
     assert (distinct_ref["source_id"], distinct_ref["source_segment_id"]) in candidate_keys
 
 
+def test_priority_candidates_exclude_document_structure_from_recovery_volume() -> None:
+    """Headings and separators stay auditable but cannot promise spoken duration."""
+
+    draft = _draft()
+    editor_input = _editor_input(
+        target_minutes=10,
+        unused_text=None,
+    )
+    heading_ref = {
+        "source_id": "src_heading",
+        "source_segment_id": "seg_heading",
+    }
+    separator_ref = {
+        "source_id": "src_separator",
+        "source_segment_id": "seg_separator",
+    }
+    label_ref = {
+        "source_id": "src_label",
+        "source_segment_id": "seg_label",
+    }
+    prose_ref = {
+        "source_id": "src_prose",
+        "source_segment_id": "seg_prose",
+    }
+    prose = "母亲视频时问她晚饭吃了什么，她第一次直接说今天很累，只煮了速冻水饺。"
+    editor_input["initial_source_segments"].extend(
+        [
+            {**heading_ref, "text": "# Source A｜搬家后的前三个月"},
+            {**separator_ref, "text": "---"},
+            {**label_ref, "text": "标题"},
+            {**prose_ref, "text": prose},
+        ]
+    )
+
+    plan = _build_from_input(editor_input=editor_input, draft=draft)
+
+    # The full inventory remains visible for audit/debugging.
+    assert plan.material.unused_factual_segment_count == 4
+    assert plan.material.unused_factual_character_count > len(prose)
+    # Only prose contributes to the bounded recovery attempt/readiness.
+    assert [
+        reference.model_dump() for reference in plan.material.priority_candidate_source_refs
+    ] == [prose_ref]
+    assert plan.material.priority_candidate_character_count == len("".join(prose.split()))
+
+
 def test_raw_unused_volume_does_not_override_an_empty_candidate_shortlist() -> None:
     draft = _draft(extra_text="甲" * 1_000)
     editor_input = _editor_input(

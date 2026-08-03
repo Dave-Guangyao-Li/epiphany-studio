@@ -279,6 +279,96 @@ class InvalidCitationProvider(FakeProvider):
         return await super().generate(invocation)
 
 
+class QuoteMismatchOnceProvider(FakeProvider):
+    async def generate(self, invocation: TaskInvocation) -> ProviderResult:
+        result = await super().generate(invocation)
+        if invocation.kind == "theme_research" and invocation.attempt == 1:
+            result.content["quotes"][0]["quote"] = "这句原话并不在所引用的素材片段里"
+        return result
+
+
+class QuoteMismatchAlwaysProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.theme_attempts: list[int] = []
+
+    async def generate(self, invocation: TaskInvocation) -> ProviderResult:
+        result = await super().generate(invocation)
+        if invocation.kind == "theme_research":
+            self.theme_attempts.append(invocation.attempt)
+            result.content["quotes"][0]["quote"] = "这句原话并不在所引用的素材片段里"
+        return result
+
+
+async def test_quote_source_mismatch_gets_one_bounded_repair(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    source_id = await _import_source(database)
+    worker.provider = QuoteMismatchOnceProvider()
+
+    created = await service.create_run(
+        workflow_type="episode-research",
+        payload={
+            "topic": "五年后重新开始录播客",
+            "source_ids": [source_id],
+        },
+    )
+    assert await worker.run_until_idle() == 4
+
+    completed = await service.get_run(created.id)
+    assert completed.status == "waiting_for_user"
+    assert completed.model_call_count == 4
+    theme_task = next(task for task in completed.tasks if task.kind == "theme_research")
+    assert theme_task.status == "succeeded"
+    assert theme_task.attempt == 2
+    events = await service.list_events(created.id)
+    assert sum(event.type == "task.retry_scheduled" for event in events) == 1
+    retry = next(event for event in events if event.type == "task.retry_scheduled")
+    assert retry.payload["error_code"] == "quote_source_mismatch"
+
+
+async def test_repeated_quote_source_mismatch_retries_once_then_fails_run(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    source_id = await _import_source(database)
+    provider = QuoteMismatchAlwaysProvider()
+    worker.provider = provider
+
+    created = await service.create_run(
+        workflow_type="episode-research",
+        payload={
+            "topic": "五年后重新开始录播客",
+            "source_ids": [source_id],
+        },
+    )
+    assert await worker.run_until_idle() == 3
+
+    failed = await service.get_run(created.id)
+    assert failed.status == "failed"
+    assert failed.current_step == "failed"
+    assert failed.model_call_count == 3
+    assert provider.theme_attempts == [1, 2]
+    tasks_by_kind = {task.kind: task for task in failed.tasks}
+    assert tasks_by_kind["timeline_research"].status == "succeeded"
+    assert tasks_by_kind["theme_research"].status == "failed"
+    assert tasks_by_kind["theme_research"].attempt == 2
+    assert tasks_by_kind["theme_research"].error_code == "quote_source_mismatch"
+    assert tasks_by_kind["research_manager"].status == "failed"
+    assert tasks_by_kind["research_manager"].error_code == "child_task_failed"
+
+    events = await service.list_events(created.id)
+    assert sum(event.type == "task.retry_scheduled" for event in events) == 1
+    assert (
+        sum(
+            event.type == "task.failed" and event.task_id == tasks_by_kind["theme_research"].id
+            for event in events
+        )
+        == 1
+    )
+    assert events[-1].type == "run.failed"
+
+
 async def test_invalid_citation_fails_parent_and_fences_late_sibling(
     runtime: tuple[Database, RunService, Worker],
     caplog: pytest.LogCaptureFixture,

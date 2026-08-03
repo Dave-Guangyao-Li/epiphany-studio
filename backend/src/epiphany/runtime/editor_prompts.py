@@ -55,6 +55,14 @@ _EDITOR_INSTRUCTIONS = """
    3 个引用，不要机械复制全部引用。
 7. 所有自然语言字段使用中文；JSON 结构与引用保持精简，但不得为了压缩响应而牺牲
    Creative Brief 的正文目标长度。
+8. 写作前先按“事件”比较 initial_source_segments 与 supplemental_source_segments。
+   同一件事如果在早期素材里只有概要、在补充素材里有更完整的场景和细节，应合并为
+   一个叙事单元，优先使用信息更完整的版本，并保留最直接的相关引用。不得把概要版和
+   详细版前后各讲一遍，也不得把换一种措辞复述同一事件当作信息增量。
+9. 写作前比较不同来源对同一事件的事实表述。日期、地点、人物、动作、结果或事件状态
+   等互斥事实不得同时写入稿子。补充素材明确表示是在纠正或澄清早期记录时，采用该较新
+   补充；否则只采用来源能明确支持且不冲突的说法。无法判断哪一项可靠时，避免断言，
+   可以忠实保留“不确定”，但不得自行编造解释来调和矛盾。
 
 JSON 格式：
 {
@@ -260,7 +268,11 @@ def build_editor_prompt(
                     "supplemental_source_refs 中的对象；\n"
                     "2. show_notes 的 summary 或 key_points 至少一处原样引用 "
                     "supplemental_source_refs 中的对象；\n"
-                    "3. 不满足上述任一条的 JSON 会被应用程序拒绝。\n"
+                    "3. 跨段检查同一事件是否只讲了一次；即使两个段落字面不同，概要版和"
+                    "详细版重复出现仍算重复，必须合并；\n"
+                    "4. 跨来源检查同一事件是否存在互斥事实；不得把两个冲突版本同时写入，"
+                    "也不得自行补写调和解释；\n"
+                    "5. 不满足上述任一条的 JSON 会被应用程序拒绝。\n"
                     f"initial_source_refs={serialized_initial_refs}\n"
                     f"supplemental_source_refs={serialized_supplemental_refs}"
                 ),

@@ -43,6 +43,8 @@ def _build_deepseek_provider(
         model=model,
         billing_currency=settings.deepseek_billing_currency,
         max_tokens=settings.deepseek_max_tokens,
+        research_max_tokens=settings.deepseek_research_max_tokens,
+        interview_max_tokens=settings.deepseek_interview_max_tokens,
         editor_max_tokens=settings.deepseek_editor_max_tokens,
         max_source_chars=settings.deepseek_max_source_chars,
         max_interview_bundle_chars=settings.deepseek_max_interview_bundle_chars,

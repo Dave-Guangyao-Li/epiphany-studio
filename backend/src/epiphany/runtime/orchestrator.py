@@ -1911,8 +1911,25 @@ class Orchestrator:
             .scalars()
             .all()
         )
+        sources_by_id = {source.id: source for source in sources}
+        # ``source_ids`` is the user-approved factual scope.  The Interviewer is
+        # allowed to cite only a useful subset of that scope, but an omission in
+        # the scaffold must not silently hide the remaining selected evidence
+        # from material readiness or the downstream Editor.  Keep the explicit
+        # Source order and each Source's stable segment order.  The source-type
+        # check is a defence-in-depth boundary for legacy/malformed Runs: writing
+        # samples may shape style, never factual content.
+        factual_initial_source_ids = [
+            source_id
+            for source_id in run.input_json["source_ids"]
+            if source_id in sources_by_id
+            and sources_by_id[source_id].source_type != "writing_sample"
+        ]
         segments_by_key = {
-            (source.id, segment.id): segment for source in sources for segment in source.segments
+            (source.id, segment.id): segment
+            for source_id in factual_initial_source_ids
+            for source in [sources_by_id[source_id]]
+            for segment in source.segments
         }
         reference_keys = interview_scaffold_reference_keys(
             _without_execution(scaffold.content_json)
@@ -1922,11 +1939,13 @@ class Orchestrator:
             raise ValueError("interview scaffold references unavailable initial source material")
         initial_segments = [
             {
-                "source_id": source_id,
-                "source_segment_id": segment_id,
-                "text": segments_by_key[(source_id, segment_id)].text,
+                "source_id": source.id,
+                "source_segment_id": segment.id,
+                "text": segment.text,
             }
-            for source_id, segment_id in reference_keys
+            for source_id in factual_initial_source_ids
+            for source in [sources_by_id[source_id]]
+            for segment in sorted(source.segments, key=lambda item: item.position)
         ]
         follow_up_questions = [
             ReadinessFollowUpQuestion(
