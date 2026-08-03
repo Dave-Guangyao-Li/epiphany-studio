@@ -62,4 +62,6 @@ export const DURABLE_EVENT_NAMES = [
   "workflow.draft_supplemental_interview.completed",
   "workflow.draft_supplemental_interview.unavailable",
   "workflow.draft_supplemental_interview.limit_reached",
+  "workflow.source_starter.completed",
+  "workflow.source_starter.confirmed",
 ] as const;
