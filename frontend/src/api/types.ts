@@ -230,6 +230,15 @@ export interface ImprovementPlanRecord {
       suggested_target_duration_minutes?: number | null;
     }>;
     gaps?: Array<{ code: string; severity: string; explanation: string }>;
+    targeted_questions?: Array<{
+      prompt: string;
+      purpose: string;
+      anchor_kind: "material_gap" | "scaffold_question";
+      anchor_path: string;
+      anchor_text: string;
+      keywords: string[];
+      source_refs: Array<{ source_id: string; source_segment_id: string }>;
+    }>;
     [key: string]: unknown;
   };
   artifact: ArtifactView;

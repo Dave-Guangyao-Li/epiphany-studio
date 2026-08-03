@@ -169,6 +169,12 @@ export function SourceImporter({
     if (options.recovered && !sourceSettingsTouchedRef.current) {
       if (nextCandidate.source_title) updateTitle(nextCandidate.source_title, false);
       updateSourceType(nextCandidate.source_type, false);
+      const recoveredMode = nextRun.input_json.mode;
+      if (recoveredMode === "exploration_outline" || recoveredMode === "starter_draft") {
+        setStarterMode(recoveredMode);
+      }
+      const recoveredIntent = nextRun.input_json.intent;
+      setStarterIntent(typeof recoveredIntent === "string" ? recoveredIntent : "");
     }
     if (options.recovered && currentText.trim()) {
       // A slow recovery response must never overwrite text entered after the

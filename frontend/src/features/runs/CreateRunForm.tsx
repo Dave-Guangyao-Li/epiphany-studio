@@ -41,6 +41,10 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
   const [error, setError] = useState<unknown>(null);
 
   const selectedCount = factualIds.length + styleIds.length;
+  const factualSources = useMemo(
+    () => sources.filter((source) => source.source_type !== "writing_sample"),
+    [sources],
+  );
   const eligibleStyleSources = useMemo(
     () => sources.filter((source) => !isAiAssistedSource(source)),
     [sources],
@@ -134,7 +138,7 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
       <fieldset>
         <legend>事实素材 <span>至少 1 份</span></legend>
         <div className="source-choice-list">
-          {sources.map((source) => (
+          {factualSources.map((source) => (
             <label className={`source-choice ${factualIds.includes(source.id) ? "selected" : ""}`} key={source.id}>
               <input
                 type="checkbox"

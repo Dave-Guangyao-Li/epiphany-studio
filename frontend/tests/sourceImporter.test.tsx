@@ -241,8 +241,13 @@ describe("SourceImporter AI starter", () => {
 
   it("restores a waiting candidate from Project Run history after refresh", async () => {
     const waiting = runningRun("waiting_for_user", true);
+    waiting.input_json = {
+      mode: "starter_draft",
+      intent: "想先梳理耳压、失控感和第一次体验前要查证的问题",
+    };
     waiting.artifacts[0].content_json = {
       ...candidate,
+      mode: "starter_draft",
       source_title: "潜水探索提纲",
       source_type: "podcast_draft",
     } as unknown as Record<string, unknown>;
@@ -253,6 +258,10 @@ describe("SourceImporter AI starter", () => {
     await waitFor(() => expect(screen.getByLabelText("正文")).toHaveValue(candidate.starter_text));
     expect(screen.getByLabelText("标题")).toHaveValue("潜水探索提纲");
     expect(screen.getByLabelText("类型")).toHaveValue("podcast_draft");
+    expect(screen.getByLabelText("起步方式")).toHaveValue("starter_draft");
+    expect(screen.getByLabelText(/特别想探索什么/)).toHaveValue(
+      "想先梳理耳压、失控感和第一次体验前要查证的问题",
+    );
     expect(screen.getByText(/已从 Run Artifact 恢复/)).toBeInTheDocument();
     expect(screen.getByText("等待你编辑确认").closest("li")).toHaveClass("starter-step-active");
     expect(screen.getByRole("button", { name: "确认并导入 Source" })).toBeDisabled();

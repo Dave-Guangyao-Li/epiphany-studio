@@ -8,11 +8,12 @@ function source(
   id: string,
   title: string,
   metadata: Record<string, unknown> = {},
+  sourceType: SourceSummary["source_type"] = "journal",
 ): SourceSummary {
   return {
     id,
     title,
-    source_type: "journal",
+    source_type: sourceType,
     content_sha256: `${id}-sha`,
     char_count: 1200,
     segment_count: 3,
@@ -75,5 +76,26 @@ describe("Create Run writing-sample consent", () => {
     expect(screen.getByLabelText("作为风格样本选择：我的真实日记")).toBeInTheDocument();
     expect(screen.queryByLabelText("作为风格样本选择：AI 起步日记")).not.toBeInTheDocument();
     expect(screen.getByText(/1 份 AI 辅助素材未列入风格样本/)).toBeInTheDocument();
+  });
+
+  it("offers writing samples only in the explicit style-only selector", () => {
+    render(
+      <RouterProvider>
+        <CreateRunForm
+          projectId="project_test"
+          sources={[
+            source("src_fact", "真实日记"),
+            source("src_style", "过往播客稿", {}, "writing_sample"),
+          ]}
+        />
+      </RouterProvider>,
+    );
+
+    expect(screen.getByLabelText("作为事实素材选择：真实日记")).toBeInTheDocument();
+    expect(screen.queryByLabelText("作为事实素材选择：过往播客稿")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("作为风格样本选择：过往播客稿")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /展开 Creative Brief/ }));
+    expect(screen.getByLabelText("作为风格样本选择：过往播客稿")).toBeInTheDocument();
   });
 });

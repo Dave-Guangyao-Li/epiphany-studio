@@ -38,7 +38,11 @@ export function HumanCheckpointPanel({
   readiness: MaterialReadinessView | null;
   onChanged: () => Promise<void>;
 }) {
-  const retryRef = useRef<{ fingerprint: string; id: string } | null>(null);
+  const retryRef = useRef<{
+    fingerprint: string;
+    id: string;
+    sourceId?: string;
+  } | null>(null);
   const [title, setTitle] = useState("补充口述");
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -55,11 +59,14 @@ export function HumanCheckpointPanel({
     setSubmitting(true);
     setError(null);
     try {
-      const source = await importAnswerSource(run.project_id, title.trim(), text);
+      const sourceId = retryRef.current.sourceId ?? (
+        await importAnswerSource(run.project_id, title.trim(), text)
+      ).source.id;
+      retryRef.current.sourceId = sourceId;
       await runsApi.resume(run.id, {
         checkpoint,
         submission_id: retryRef.current.id,
-        source_ids: [source.source.id],
+        source_ids: [sourceId],
       });
       setText("");
       await onChanged();
@@ -201,6 +208,116 @@ export function FeedbackPanel({ runId }: { runId: string }) {
   );
 }
 
+export function ImprovementAnswerPanel({
+  run,
+  improvement,
+}: {
+  run: RunView;
+  improvement: ImprovementPlanRecord | null;
+}) {
+  const navigate = useNavigate();
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const retryRef = useRef<{
+    fingerprint: string;
+    id: string;
+    sourceId?: string;
+  } | null>(null);
+  const questions = improvement?.plan.targeted_questions ?? [];
+  const offersSupplementalMaterial = (improvement?.plan.options ?? []).some(
+    (option) => option.kind === "add_supplemental_material",
+  );
+  const answered = useMemo(
+    () => questions.filter((question) => (
+      answers[`${question.anchor_path}:${question.prompt}`]?.trim()
+    )),
+    [answers, questions],
+  );
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!answered.length) return;
+    const text = answered.map((question) => (
+      `## ${question.prompt}\n\n${answers[`${question.anchor_path}:${question.prompt}`].trim()}`
+    )).join("\n\n");
+    const fingerprint = `${improvement?.artifact.id ?? "improvement"}\n${text}`;
+    if (retryRef.current?.fingerprint !== fingerprint) {
+      retryRef.current = { fingerprint, id: stableId("ui-improvement-revision") };
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const sourceId = retryRef.current.sourceId ?? (
+        await importAnswerSource(
+          run.project_id,
+          "补充采访回答｜初稿后",
+          text,
+        )
+      ).source.id;
+      retryRef.current.sourceId = sourceId;
+      const response = await runsApi.revision(run.id, {
+        version: "draft_revision_request_v2_supplemental_interview",
+        submission_id: retryRef.current.id,
+        selected_actions: ["add_supplemental_material"],
+        selected_feedback_artifact_ids: [],
+        selected_gap_codes: [],
+        source_ids: [sourceId],
+        answered_question_ids: [],
+        supplemental_interview_plan_artifact_id: null,
+        target_duration_minutes: null,
+        revision_instruction: "优先使用本轮回答里的具体场景，保留父稿中已经成立的内容，不用空话补齐时长。",
+      });
+      navigate(`/runs/${response.run.id}`);
+    } catch (submitError) {
+      setError(submitError);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (
+    run.workflow_version === "v9" ||
+    !offersSupplementalMaterial ||
+    questions.length === 0
+  ) return null;
+
+  return (
+    <section className="action-card supplemental-action">
+      <p className="eyebrow">TARGETED FOLLOW-UP</p>
+      <h3>稿子还短，可以先回答几个具体问题。</h3>
+      <p>这是初稿进入 v9 Revision 的桥梁。只回答真的唤起记忆的问题，不需要为了凑时长把每题都答完。</p>
+      <form onSubmit={submit}>
+        <div className="question-stack">
+          {questions.map((question) => (
+            <article key={`${question.anchor_path}:${question.prompt}`}>
+              <blockquote>“{question.anchor_text}”</blockquote>
+              <label>
+                <strong>{question.prompt}</strong>
+                <small>{question.purpose}</small>
+                <textarea
+                  rows={5}
+                  aria-label={question.prompt}
+                  value={answers[`${question.anchor_path}:${question.prompt}`] ?? ""}
+                  onChange={(event) => setAnswers((current) => ({
+                    ...current,
+                    [`${question.anchor_path}:${question.prompt}`]: event.target.value,
+                  }))}
+                  placeholder="想到什么就说什么，尽量保留现场细节。"
+                />
+              </label>
+            </article>
+          ))}
+        </div>
+        <button className="button primary" disabled={submitting || !answered.length}>
+          {submitting ? "正在保存并创建 Revision…" : `用 ${answered.length} 个回答创建下一版`}
+        </button>
+      </form>
+      <ErrorNotice error={error} />
+    </section>
+  );
+}
+
 export function RevisionPanel({ run, improvement }: { run: RunView; improvement: ImprovementPlanRecord | null }) {
   const navigate = useNavigate();
   const [instruction, setInstruction] = useState("");
@@ -275,7 +392,11 @@ export function SupplementalInterviewPanel({
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const retryRef = useRef<{ fingerprint: string; id: string } | null>(null);
+  const retryRef = useRef<{
+    fingerprint: string;
+    id: string;
+    sourceId?: string;
+  } | null>(null);
   const answered = useMemo(
     () => record.plan.questions.filter((question) => answers[question.question_id]?.trim()),
     [answers, record.plan.questions],
@@ -294,17 +415,21 @@ export function SupplementalInterviewPanel({
     setSubmitting(true);
     setError(null);
     try {
-      const source = await importAnswerSource(
-        run.project_id,
-        `补充采访回答｜第 ${record.plan.round_number} 轮`,
-        text,
-      );
+      const sourceId = retryRef.current.sourceId ?? (
+        await importAnswerSource(
+          run.project_id,
+          `补充采访回答｜第 ${record.plan.round_number} 轮`,
+          text,
+        )
+      ).source.id;
+      retryRef.current.sourceId = sourceId;
       const response = await runsApi.revision(run.id, {
+        version: "draft_revision_request_v2_supplemental_interview",
         submission_id: retryRef.current.id,
         selected_actions: ["add_supplemental_material"],
         selected_feedback_artifact_ids: [],
         selected_gap_codes: [],
-        source_ids: [source.source.id],
+        source_ids: [sourceId],
         supplemental_interview_plan_artifact_id: record.artifact.id,
         answered_question_ids: answered.map((question) => question.question_id),
         target_duration_minutes: null,

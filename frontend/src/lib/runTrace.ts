@@ -103,6 +103,56 @@ export function supportsSupplementalInterview(workflowVersion: string): boolean 
   return workflowVersion === "v9";
 }
 
+export type RunMarkdownKind = "scaffold" | "draft" | "show-notes" | "quality";
+export type RunMarkdownAvailability = Record<RunMarkdownKind, boolean>;
+
+const draftArtifactKinds = new Set([
+  "build_podcast_draft_result",
+  "revise_podcast_draft_result",
+]);
+
+function hasArtifact(run: RunView, kind: string): boolean {
+  return run.artifacts.some((artifact) => artifact.kind === kind);
+}
+
+export function runMarkdownAvailability(run: RunView): RunMarkdownAvailability {
+  const outputArtifact = run.output_artifact_id
+    ? run.artifacts.find((artifact) => artifact.id === run.output_artifact_id)
+    : null;
+  const hasDraft = run.status === "succeeded" &&
+    outputArtifact !== null &&
+    outputArtifact !== undefined &&
+    draftArtifactKinds.has(outputArtifact.kind);
+
+  return {
+    scaffold: hasArtifact(run, "build_interview_scaffold_result"),
+    draft: hasDraft,
+    "show-notes": hasDraft,
+    quality: hasArtifact(run, "draft_quality_report"),
+  };
+}
+
+export function shouldLoadSupplementalInterview(run: RunView): boolean {
+  if (run.status !== "succeeded" || !supportsSupplementalInterview(run.workflow_version)) {
+    return false;
+  }
+
+  return hasArtifact(run, "plan_draft_supplemental_interview_result") ||
+    run.tasks.some((task) =>
+      task.kind === "plan_draft_supplemental_interview" &&
+      task.status === "succeeded" &&
+      task.output_artifact_id !== null,
+    );
+}
+
+export async function loadSupplementalInterviewForRun<T>(
+  run: RunView,
+  load: (runId: string) => Promise<T | null>,
+): Promise<T | null> {
+  if (!shouldLoadSupplementalInterview(run)) return null;
+  return load(run.id);
+}
+
 export function shouldLoadDerivedForRun(
   run: RunView,
   alreadyRequestedRunId: string | null,
