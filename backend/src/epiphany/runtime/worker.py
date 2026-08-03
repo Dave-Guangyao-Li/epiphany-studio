@@ -21,6 +21,7 @@ from epiphany.runtime.providers import (
     RetryableProviderError,
     TaskInvocation,
 )
+from epiphany.source_starter_schemas import BUILD_SOURCE_STARTER
 from epiphany.state_machine import (
     RunStatus,
     TaskStatus,
@@ -36,6 +37,26 @@ logger = logging.getLogger("epiphany.worker")
 
 class StaleLease(RuntimeError):
     pass
+
+
+class SanitizedTaskOutputError(ValueError):
+    """Persistable validation failure that never includes model-returned values."""
+
+    def __init__(self, *, code: str) -> None:
+        self.code = code
+        super().__init__(f"model output failed strict validation ({code})")
+
+
+def _sanitized_task_output_error(error: Exception) -> SanitizedTaskOutputError:
+    raw_code = getattr(error, "code", "task_output_invalid")
+    code = raw_code if isinstance(raw_code, str) else "task_output_invalid"
+    if (
+        not code
+        or len(code) > 80
+        or any(character != "_" and not character.isalnum() for character in code)
+    ):
+        code = "task_output_invalid"
+    return SanitizedTaskOutputError(code=code)
 
 
 class Worker:
@@ -204,7 +225,11 @@ class Worker:
                 artifact = Artifact(
                     run_id=run.id,
                     task_id=task.id,
-                    kind=f"{task.kind}_result",
+                    kind=(
+                        "source_starter_candidate"
+                        if task.kind == BUILD_SOURCE_STARTER
+                        else f"{task.kind}_result"
+                    ),
                     content_json={
                         **content,
                         "_execution": {
@@ -490,6 +515,11 @@ class Worker:
                 task_input=invocation.input_json,
                 content=result.content,
             )
+        except Exception as error:
+            await self.fail(invocation, _sanitized_task_output_error(error))
+            return
+
+        try:
             await self.complete(
                 invocation,
                 content=validated_content,

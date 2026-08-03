@@ -85,9 +85,14 @@ def create_app(
     resolved_settings = settings or Settings()
     database = Database(resolved_settings.database_url)
     orchestrator = Orchestrator(task_max_attempts=resolved_settings.task_max_attempts)
-    run_service = RunService(database, orchestrator)
+    run_mutation_lock = asyncio.Lock()
+    run_service = RunService(database, orchestrator, mutation_lock=run_mutation_lock)
     source_service = SourceService(database)
-    project_service = ProjectService(database, source_service)
+    project_service = ProjectService(
+        database,
+        source_service,
+        mutation_lock=run_mutation_lock,
+    )
     resolved_provider = provider or build_provider(resolved_settings)
     resolved_reviewer_provider = reviewer_provider
     if resolved_reviewer_provider is None and provider is None:

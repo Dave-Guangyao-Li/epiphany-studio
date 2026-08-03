@@ -221,3 +221,68 @@ async def test_project_run_requires_linked_sources_and_is_idempotent(tmp_path: P
         assert detail.json()["runs"][0]["id"] == created_run["id"]
 
     await app.state.database.close()
+
+
+async def test_ai_assisted_source_cannot_be_used_as_writing_style_identity(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        settings=Settings(
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'ai-style-boundary.db'}",
+            create_schema_on_start=False,
+            worker_enabled=False,
+        )
+    )
+    await app.state.database.create_schema()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        project = await _new_project(client, "写作身份边界")
+        project_id = project["id"]
+        factual = (
+            await client.post(
+                f"/projects/{project_id}/sources",
+                json=_source_body(title="事实素材", text="我在下雨的下午第一次录音。"),
+            )
+        ).json()["source"]
+        ai_style = (
+            await client.post(
+                f"/projects/{project_id}/sources",
+                json={
+                    "title": "模型生成但伪装成写作样本",
+                    "source_type": "writing_sample",
+                    "text": "这段内容由模型生成，不能反过来定义用户本人的声音。",
+                    "metadata": {"origin": "ai_assisted", "user_confirmed": True},
+                },
+            )
+        ).json()["source"]
+
+        rejected = await client.post(
+            f"/projects/{project_id}/runs",
+            json={
+                "submission_id": "reject-ai-assisted-style",
+                "workflow_type": "episode-research",
+                "payload": {
+                    "topic": "为什么要保护写作身份",
+                    "source_ids": [factual["id"]],
+                    "creative_brief": {},
+                    "writing_style_reference": {
+                        "samples": [
+                            {
+                                "source_id": ai_style["id"],
+                                "sample_kind": "written_prose",
+                            }
+                        ],
+                        "ownership_attested": True,
+                        "model_processing_consent": True,
+                        "usage": "style_only",
+                    },
+                },
+            },
+        )
+        assert rejected.status_code == 422
+        assert rejected.json() == {
+            "detail": "AI-assisted Sources cannot be used as writing-style samples"
+        }
+        assert (await client.get(f"/projects/{project_id}")).json()["run_count"] == 0
+
+    await app.state.database.close()

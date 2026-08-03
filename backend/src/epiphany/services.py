@@ -96,6 +96,12 @@ from epiphany.schemas import (
     RunView,
     TaskView,
 )
+from epiphany.source_starter_schemas import (
+    BUILD_SOURCE_STARTER,
+    SOURCE_STARTER_WORKFLOW_TYPE,
+    SOURCE_STARTER_WORKFLOW_VERSION,
+    SourceStarterTaskInput,
+)
 from epiphany.state_machine import (
     RunStatus,
     TaskStatus,
@@ -192,7 +198,13 @@ class SupplementalInterviewPlanNotReady(ValueError):
 
 
 class RunService:
-    def __init__(self, database: Database, orchestrator: Orchestrator) -> None:
+    def __init__(
+        self,
+        database: Database,
+        orchestrator: Orchestrator,
+        *,
+        mutation_lock: asyncio.Lock | None = None,
+    ) -> None:
         self.database = database
         self.orchestrator = orchestrator
         # The MVP is explicitly single-process. Every Run mutation that can
@@ -202,7 +214,7 @@ class RunService:
         # escape. The Artifact unique key remains the durable duplicate-data
         # guard for Resume in SQLite. Cross-process replay semantics are a later
         # deployment concern.
-        self._run_mutation_lock = asyncio.Lock()
+        self._run_mutation_lock = mutation_lock or asyncio.Lock()
 
     async def _load_writing_style_task_fields(
         self,
@@ -233,6 +245,8 @@ class RunService:
             if source_ids
             else []
         )
+        if any(_source_is_ai_assisted(source) for source in sources):
+            raise RunResumeNotAllowed("AI-assisted Sources cannot be used as writing-style samples")
         segments_by_key = {
             (source.id, segment.id): segment for source in sources for segment in source.segments
         }
@@ -272,6 +286,14 @@ class RunService:
                 raise ProjectNotFound(project_id)
             research_source_segments: list[dict[str, str]] | None = None
             writing_style_profile: WritingStyleProfile | None = None
+            if workflow_type == SOURCE_STARTER_WORKFLOW_TYPE:
+                try:
+                    starter_input = SourceStarterTaskInput.model_validate(
+                        {"task_kind": BUILD_SOURCE_STARTER, **payload}
+                    )
+                except ValidationError as error:
+                    raise InvalidRunPayload("invalid source-starter payload") from error
+                payload = starter_input.model_dump(mode="json", exclude={"task_kind"})
             if workflow_type == "episode-research":
                 try:
                     research_payload = EpisodeResearchPayload.model_validate(payload)
@@ -311,6 +333,15 @@ class RunService:
                 ]
                 if missing_style_source_ids:
                     raise RunSourceNotFound(missing_style_source_ids[0])
+                ai_assisted_style_source_ids = [
+                    source_id
+                    for source_id in style_source_ids
+                    if _source_is_ai_assisted(sources_by_id[source_id])
+                ]
+                if ai_assisted_style_source_ids:
+                    raise InvalidRunPayload(
+                        "AI-assisted Sources cannot be used as writing-style samples"
+                    )
                 if project_id is not None:
                     linked_source_ids = set(
                         (
@@ -359,10 +390,16 @@ class RunService:
                 ]
 
             initial_step = (
-                "research_fan_out" if workflow_type == "episode-research" else "prepare_sources"
+                BUILD_SOURCE_STARTER
+                if workflow_type == SOURCE_STARTER_WORKFLOW_TYPE
+                else "research_fan_out"
+                if workflow_type == "episode-research"
+                else "prepare_sources"
             )
             workflow_version = (
-                (
+                SOURCE_STARTER_WORKFLOW_VERSION
+                if workflow_type == SOURCE_STARTER_WORKFLOW_TYPE
+                else (
                     (
                         QUALITY_REVIEW_WORKFLOW_VERSION
                         if research_payload.draft_quality is not None
@@ -473,6 +510,63 @@ class RunService:
             run = await self.create_run(
                 workflow_type=workflow_type,
                 payload=payload,
+                project_id=project_id,
+                submission_id=submission_id,
+                request_fingerprint=fingerprint,
+            )
+            return CreateProjectRunResult(run=run, idempotent_replay=False)
+
+    async def create_project_source_starter(
+        self,
+        *,
+        project_id: str,
+        submission_id: str,
+        source_title: str | None,
+        source_type: str,
+        mode: str,
+        intent: str | None,
+    ) -> CreateProjectRunResult:
+        request_payload: dict[str, object] = {
+            "source_title": source_title,
+            "source_type": source_type,
+            "mode": mode,
+            "intent": intent,
+        }
+        fingerprint = _project_run_request_fingerprint(
+            workflow_type=SOURCE_STARTER_WORKFLOW_TYPE,
+            payload=request_payload,
+        )
+        async with self._run_mutation_lock:
+            async with self.database.sessions() as session:
+                project = await session.get(Project, project_id)
+                if project is None:
+                    raise ProjectNotFound(project_id)
+                existing = (
+                    await session.execute(
+                        select(Run).where(
+                            Run.project_id == project_id,
+                            Run.submission_id == submission_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                project_snapshot = {
+                    "project_id": project.id,
+                    "title": project.title,
+                    "description": project.description,
+                }
+            if existing is not None:
+                if existing.request_fingerprint != fingerprint:
+                    raise ProjectRunConflict(
+                        "submission_id was already used with a different source-starter request"
+                    )
+                return CreateProjectRunResult(
+                    run=await self.get_run(existing.id),
+                    idempotent_replay=True,
+                )
+
+            run = await self.create_run(
+                workflow_type=SOURCE_STARTER_WORKFLOW_TYPE,
+                payload={"project": project_snapshot, **request_payload},
                 project_id=project_id,
                 submission_id=submission_id,
                 request_fingerprint=fingerprint,
@@ -1307,6 +1401,21 @@ class RunService:
                             [],
                         )
                     }
+                    persisted_style_sources = (
+                        (
+                            await session.execute(
+                                select(Source).where(Source.id.in_(style_source_ids))
+                            )
+                        )
+                        .scalars()
+                        .all()
+                        if style_source_ids
+                        else []
+                    )
+                    if any(_source_is_ai_assisted(source) for source in persisted_style_sources):
+                        raise DraftRevisionNotAllowed(
+                            "AI-assisted Sources cannot be used as writing-style samples"
+                        )
                     duplicate_source_ids = [
                         source_id
                         for source_id in request.source_ids
@@ -2689,6 +2798,12 @@ def _stable_unique(values: list[str]) -> list[str]:
         seen.add(value)
         ordered.append(value)
     return ordered
+
+
+def _source_is_ai_assisted(source: Source) -> bool:
+    """Treat server-owned provenance as a hard style-identity trust boundary."""
+
+    return source.metadata_json.get("origin") == "ai_assisted"
 
 
 def _project_run_request_fingerprint(

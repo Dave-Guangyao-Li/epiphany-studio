@@ -20,7 +20,7 @@ from epiphany.editor_schemas import (
     PodcastDraftOutput,
     editor_output_reference_keys,
 )
-from epiphany.models import ModelCall, Project, ProjectSource, Run, Task
+from epiphany.models import ModelCall, Project, ProjectSource, Run, Source, Task
 from epiphany.revision_schemas import (
     LEGACY_DRAFT_REVISION_REQUEST_VERSION,
     REVISE_PODCAST_DRAFT,
@@ -780,6 +780,44 @@ async def test_reuse_unused_material_is_rejected_when_plan_does_not_offer_it(
             "model_calls": len((await session.execute(select(ModelCall.id))).scalars().all()),
         }
     assert after_counts == before_counts
+
+
+async def test_revision_rejects_ai_assisted_source_as_inherited_writing_style(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    parent_run_id, style_source_id, _ = await _create_completed_parent_with_style(
+        database,
+        service,
+        worker,
+    )
+    plan = (await service.get_draft_improvement_plan(parent_run_id)).plan
+    lower_duration = next(
+        option.suggested_target_duration_minutes
+        for option in plan.options
+        if option.kind == "lower_target_duration"
+    )
+
+    # Simulate legacy/imported provenance becoming visible only after the
+    # parent task was frozen.  Revision is a second trust boundary and must not
+    # silently inherit AI text as the user's identity sample.
+    async with database.sessions() as session, session.begin():
+        source = await session.get(Source, style_source_id)
+        assert source is not None
+        source.metadata_json = {**source.metadata_json, "origin": "ai_assisted"}
+
+    with pytest.raises(
+        DraftRevisionNotAllowed,
+        match="AI-assisted Sources cannot be used as writing-style samples",
+    ):
+        await service.create_draft_revision(
+            parent_run_id,
+            request=CreateDraftRevisionRequest(
+                submission_id="reject-ai-assisted-inherited-style",
+                selected_actions=["lower_target_duration"],
+                target_duration_minutes=lower_duration,
+            ),
+        )
 
 
 async def test_guided_revision_is_explicit_idempotent_scored_and_style_only(

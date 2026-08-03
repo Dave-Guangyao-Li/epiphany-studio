@@ -21,6 +21,7 @@ from epiphany.runtime.providers.base import (
     RetryableProviderError,
     TaskInvocation,
 )
+from epiphany.source_starter_schemas import BUILD_SOURCE_STARTER, SourceStarterTaskInput
 from epiphany.supplemental_interview_schemas import (
     PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW,
     DraftSupplementalInterviewTaskInput,
@@ -288,6 +289,7 @@ class FakeProvider:
             REVISE_PODCAST_DRAFT: self._revise_podcast_draft,
             REVIEW_PODCAST_DRAFT: self._review_podcast_draft,
             PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW: self._plan_draft_supplemental_interview,
+            BUILD_SOURCE_STARTER: self._build_source_starter,
         }
         try:
             content = handlers[invocation.kind](invocation.input_json)
@@ -295,6 +297,49 @@ class FakeProvider:
             raise ValueError(f"unsupported fake task kind: {invocation.kind}") from error
 
         return ProviderResult(content=content, provider=self.name, model=self.model)
+
+    @staticmethod
+    def _build_source_starter(input_json: dict[str, Any]) -> dict[str, Any]:
+        parsed = SourceStarterTaskInput.model_validate(input_json)
+        project = parsed.project
+        subject = parsed.source_title or project.title
+        intent = parsed.intent or project.description or "尚未补充具体方向"
+        if parsed.mode == "exploration_outline":
+            starter_text = (
+                f"主题：“{subject}”。项目里已经写下的方向是：{intent}。\n\n"
+                "仍需要补充：[待补充：最初为什么对它产生兴趣]、"
+                "[待补充：目前最想回答的一个具体问题]，以及"
+                "[待补充：希望最终形成什么样的记录]。如果涉及专业知识，"
+                "先标记为[待核实：需要查证的事实]，不要把猜测写成结论。"
+            )
+        else:
+            starter_text = (
+                f"关于“{subject}”，目前已经提供的方向是：{intent}。"
+                "下面先保留真实内容的位置，不假装已经了解很多。"
+                "可以先从[待补充：第一次产生这个念头的具体时刻]说起，"
+                "再写下[待补充：最吸引我的部分]和[待补充：我目前最大的疑问]。"
+                "涉及外部知识的地方先保留[待核实：具体事实或数据]。"
+            )
+        return {
+            "schema_version": "source-starter-candidate.v1",
+            "mode": parsed.mode,
+            "source_title": parsed.source_title,
+            "source_type": parsed.source_type,
+            "starter_text": starter_text,
+            "questions": [
+                f"你最早在什么具体场景里想到“{subject}”？",
+                "目前最吸引你的一个画面、问题或矛盾是什么？",
+                "你希望这份素材最终帮助你理解或完成什么？",
+            ],
+            "uncertainties": [
+                "用户尚未提供个人经历细节",
+                "涉及外部知识的内容尚未核实",
+            ],
+            "safety": {
+                "requires_user_confirmation": True,
+                "factual_claims_require_verification": True,
+            },
+        }
 
     @staticmethod
     def _plan_draft_supplemental_interview(
