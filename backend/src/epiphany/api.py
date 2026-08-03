@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
 
 from epiphany.draft_feedback_schemas import (
     DraftUserFeedbackRecord,
@@ -10,14 +11,22 @@ from epiphany.draft_feedback_schemas import (
     DraftUserFeedbackResponse,
 )
 from epiphany.draft_quality_schemas import DraftQualityReportRecord
+from epiphany.event_stream import stream_run_events
 from epiphany.human_input_schemas import ResumeRunRequest
+from epiphany.project_service import ProjectNotFound
 from epiphany.revision_schemas import (
     CreateDraftRevisionRequest,
     CreateDraftRevisionResponse,
     DraftImprovementPlanRecord,
     DraftRevisionComparisonRecord,
 )
-from epiphany.schemas import CreateRunRequest, EventView, ResumeRunResponse, RunView
+from epiphany.schemas import (
+    CreateRunRequest,
+    EventView,
+    ResumeRunResponse,
+    RunSummaryView,
+    RunView,
+)
 from epiphany.services import (
     DraftFeedbackConflict,
     DraftFeedbackNotAllowed,
@@ -29,6 +38,7 @@ from epiphany.services import (
     InterviewScaffoldExportNotReady,
     InvalidRunPayload,
     PodcastDraftExportNotReady,
+    ProjectSourceNotLinked,
     RunAlreadyTerminal,
     RunNotFound,
     RunResumeConflict,
@@ -48,6 +58,9 @@ def get_run_service(request: Request) -> RunService:
 
 RunServiceDependency = Annotated[RunService, Depends(get_run_service)]
 EventSequenceQuery = Annotated[int, Query(ge=0)]
+RunLimitQuery = Annotated[int, Query(ge=1, le=100)]
+ProjectIdQuery = Annotated[str | None, Query()]
+LastEventIdHeader = Annotated[str | None, Header(alias="Last-Event-ID")]
 
 
 @router.get("/health")
@@ -69,6 +82,18 @@ async def create_run(
         raise HTTPException(status_code=422, detail=str(error)) from error
     except RunSourceNotFound as error:
         raise HTTPException(status_code=404, detail=f"source not found: {error}") from error
+
+
+@router.get("/runs", response_model=list[RunSummaryView])
+async def list_runs(
+    service: RunServiceDependency,
+    project_id: ProjectIdQuery = None,
+    limit: RunLimitQuery = 100,
+) -> list[RunSummaryView]:
+    try:
+        return await service.list_runs(project_id=project_id, limit=limit)
+    except ProjectNotFound as error:
+        raise HTTPException(status_code=404, detail="project not found") from error
 
 
 @router.get("/runs/{run_id}", response_model=RunView)
@@ -215,6 +240,7 @@ async def create_draft_revision(
         raise HTTPException(status_code=404, detail=f"source not found: {error}") from error
     except (
         DraftImprovementPlanNotReady,
+        ProjectSourceNotLinked,
         DraftRevisionNotAllowed,
         DraftRevisionConflict,
     ) as error:
@@ -271,6 +297,50 @@ async def get_events(
         return await service.list_events(run_id, after=after)
     except RunNotFound as error:
         raise HTTPException(status_code=404, detail="run not found") from error
+
+
+@router.get("/runs/{run_id}/events/stream")
+async def stream_events(
+    run_id: str,
+    request: Request,
+    service: RunServiceDependency,
+    after: EventSequenceQuery = 0,
+    last_event_id: LastEventIdHeader = None,
+) -> StreamingResponse:
+    header_sequence = 0
+    if last_event_id:
+        try:
+            header_sequence = int(last_event_id)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=422,
+                detail="Last-Event-ID must be an integer",
+            ) from error
+        if header_sequence < 0:
+            raise HTTPException(status_code=422, detail="Last-Event-ID must be non-negative")
+
+    # Resolve the Run before returning StreamingResponse so a missing ID is a
+    # normal JSON 404 instead of a half-open 200 stream.
+    try:
+        await service.get_run(run_id)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+
+    cursor = max(after, header_sequence)
+    return StreamingResponse(
+        stream_run_events(
+            request=request,
+            service=service,
+            run_id=run_id,
+            after=cursor,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post(

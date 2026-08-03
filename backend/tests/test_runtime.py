@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -8,7 +9,7 @@ from sqlalchemy import select
 from epiphany.db import Database
 from epiphany.models import Task
 from epiphany.runtime.orchestrator import Orchestrator
-from epiphany.runtime.providers import FakeProvider
+from epiphany.runtime.providers import FakeProvider, TaskInvocation
 from epiphany.runtime.worker import StaleLease, Worker
 from epiphany.services import RunService
 
@@ -150,3 +151,90 @@ async def test_expired_lease_is_recovered_and_old_owner_is_fenced(
     completed = await service.get_run(created.id)
     assert completed.status == "succeeded"
     assert completed.tasks[0].attempt == 2
+
+
+async def test_run_forever_recovers_a_lease_that_expires_after_startup(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    created = await service.create_run(
+        workflow_type="fake-podcast",
+        payload={"topic": "delayed startup recovery"},
+    )
+    abandoned_invocation = await worker.claim_next()
+    assert abandoned_invocation is not None
+
+    # Simulate a replacement process starting just before the previous
+    # process's lease expires. A startup-only recovery scan would miss this.
+    async with database.sessions() as session, session.begin():
+        task = await session.get(Task, abandoned_invocation.task_id)
+        assert task is not None
+        task.lease_expires_at = datetime.now(UTC) + timedelta(milliseconds=30)
+
+    worker.poll_interval_seconds = 0.01
+    stop_event = asyncio.Event()
+    worker_task = asyncio.create_task(worker.run_forever(stop_event))
+    try:
+        for _ in range(200):
+            restored = await service.get_run(created.id)
+            if restored.status == "succeeded":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("replacement Worker did not recover the later-expiring lease")
+    finally:
+        stop_event.set()
+        await worker_task
+
+    restored = await service.get_run(created.id)
+    assert restored.status == "succeeded"
+    assert restored.tasks[0].attempt == 2
+    assert any(event.type == "task.recovered" for event in await service.list_events(created.id))
+
+
+async def test_cancel_fences_a_provider_result_that_finishes_in_flight(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    started = asyncio.Event()
+    release = asyncio.Event()
+    fake = FakeProvider()
+
+    class BlockingProvider:
+        name = fake.name
+        model = fake.model
+        billing_currency = fake.billing_currency
+
+        async def generate(self, invocation: TaskInvocation):
+            started.set()
+            await release.wait()
+            return await fake.generate(invocation)
+
+    worker.provider = BlockingProvider()
+    created = await service.create_run(
+        workflow_type="fake-podcast",
+        payload={"topic": "cancel an in-flight provider"},
+    )
+    execution = asyncio.create_task(worker.run_once())
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    cancelled = await service.cancel_run(created.id)
+    assert cancelled.status == "cancelled"
+    release.set()
+    assert await asyncio.wait_for(execution, timeout=1) is True
+
+    restored = await service.get_run(created.id)
+    assert restored.status == "cancelled"
+    assert restored.tasks[0].status == "cancelled"
+    assert restored.artifacts == []
+
+    # The external request may still have consumed provider time/cost, but its
+    # late result cannot cross the lease fence into product state.
+    assert len(restored.model_calls) == 1
+    assert restored.model_calls[0].status == "succeeded"
+    assert not any(
+        event.type == "task.succeeded" for event in await service.list_events(created.id)
+    )
+
+    async with database.sessions() as session:
+        assert await session.get(Task, restored.tasks[0].id) is not None

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -54,7 +57,8 @@ from epiphany.material_readiness import (
     ReadinessFollowUpQuestion,
     assess_material_readiness,
 )
-from epiphany.models import Artifact, Event, Run, Source, Task
+from epiphany.models import Artifact, Event, Project, ProjectSource, Run, Source, Task
+from epiphany.project_service import ProjectNotFound
 from epiphany.research_schemas import EpisodeResearchPayload
 from epiphany.revision_schemas import (
     LEGACY_DRAFT_REVISION_REQUEST_VERSION,
@@ -88,6 +92,7 @@ from epiphany.schemas import (
     EventView,
     ModelCallView,
     ResumeRunResponse,
+    RunSummaryView,
     RunView,
     TaskView,
 )
@@ -122,6 +127,20 @@ class InvalidRunPayload(ValueError):
 
 class RunSourceNotFound(LookupError):
     pass
+
+
+class ProjectSourceNotLinked(ValueError):
+    pass
+
+
+class ProjectRunConflict(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class CreateProjectRunResult:
+    run: RunView
+    idempotent_replay: bool
 
 
 class InterviewScaffoldExportNotReady(ValueError):
@@ -244,8 +263,13 @@ class RunService:
         *,
         workflow_type: str,
         payload: dict[str, object],
+        project_id: str | None = None,
+        submission_id: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> RunView:
         async with self.database.sessions() as session, session.begin():
+            if project_id is not None and await session.get(Project, project_id) is None:
+                raise ProjectNotFound(project_id)
             research_source_segments: list[dict[str, str]] | None = None
             writing_style_profile: WritingStyleProfile | None = None
             if workflow_type == "episode-research":
@@ -287,6 +311,24 @@ class RunService:
                 ]
                 if missing_style_source_ids:
                     raise RunSourceNotFound(missing_style_source_ids[0])
+                if project_id is not None:
+                    linked_source_ids = set(
+                        (
+                            await session.execute(
+                                select(ProjectSource.source_id).where(
+                                    ProjectSource.project_id == project_id,
+                                    ProjectSource.source_id.in_(source_ids_to_load),
+                                )
+                            )
+                        ).scalars()
+                    )
+                    unlinked_source_ids = [
+                        source_id
+                        for source_id in source_ids_to_load
+                        if source_id not in linked_source_ids
+                    ]
+                    if unlinked_source_ids:
+                        raise ProjectSourceNotLinked(unlinked_source_ids[0])
 
                 payload = research_payload.model_dump(mode="json")
                 writing_style_profile = build_writing_style_profile(
@@ -334,6 +376,9 @@ class RunService:
                 else "v1"
             )
             run = Run(
+                project_id=project_id,
+                submission_id=submission_id,
+                request_fingerprint=request_fingerprint,
                 workflow_type=workflow_type,
                 workflow_version=workflow_version,
                 status=RunStatus.QUEUED,
@@ -391,6 +436,49 @@ class RunService:
         )
         return await self.get_run(run_id)
 
+    async def create_project_run(
+        self,
+        *,
+        project_id: str,
+        submission_id: str,
+        workflow_type: str,
+        payload: dict[str, object],
+    ) -> CreateProjectRunResult:
+        fingerprint = _project_run_request_fingerprint(
+            workflow_type=workflow_type,
+            payload=payload,
+        )
+        async with self._run_mutation_lock:
+            async with self.database.sessions() as session:
+                if await session.get(Project, project_id) is None:
+                    raise ProjectNotFound(project_id)
+                existing = (
+                    await session.execute(
+                        select(Run).where(
+                            Run.project_id == project_id,
+                            Run.submission_id == submission_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+            if existing is not None:
+                if existing.request_fingerprint != fingerprint:
+                    raise ProjectRunConflict(
+                        "submission_id was already used with a different Run request"
+                    )
+                return CreateProjectRunResult(
+                    run=await self.get_run(existing.id),
+                    idempotent_replay=True,
+                )
+
+            run = await self.create_run(
+                workflow_type=workflow_type,
+                payload=payload,
+                project_id=project_id,
+                submission_id=submission_id,
+                request_fingerprint=fingerprint,
+            )
+            return CreateProjectRunResult(run=run, idempotent_replay=False)
+
     async def get_run(self, run_id: str) -> RunView:
         async with self.database.sessions() as session:
             statement = (
@@ -414,6 +502,7 @@ class RunService:
             )
             return RunView(
                 id=run.id,
+                project_id=run.project_id,
                 parent_run_id=run.parent_run_id,
                 workflow_type=run.workflow_type,
                 workflow_version=run.workflow_version,
@@ -431,6 +520,29 @@ class RunService:
                     ModelCallView.model_validate(model_call) for model_call in model_calls
                 ],
             )
+
+    async def list_runs(
+        self,
+        *,
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> list[RunSummaryView]:
+        async with self.database.sessions() as session:
+            if project_id is not None and await session.get(Project, project_id) is None:
+                raise ProjectNotFound(project_id)
+            statement = select(Run)
+            if project_id is not None:
+                statement = statement.where(Run.project_id == project_id)
+            runs = (
+                (
+                    await session.execute(
+                        statement.order_by(Run.created_at.desc(), Run.id).limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [RunSummaryView.model_validate(run) for run in runs]
 
     async def list_events(self, run_id: str, *, after: int = 0) -> list[EventView]:
         async with self.database.sessions() as session:
@@ -1225,6 +1337,24 @@ class RunService:
                     ]
                     if missing_source_ids:
                         raise RunSourceNotFound(missing_source_ids[0])
+                    if parent.project_id is not None and request.source_ids:
+                        linked_source_ids = set(
+                            (
+                                await session.execute(
+                                    select(ProjectSource.source_id).where(
+                                        ProjectSource.project_id == parent.project_id,
+                                        ProjectSource.source_id.in_(request.source_ids),
+                                    )
+                                )
+                            ).scalars()
+                        )
+                        unlinked_source_ids = [
+                            source_id
+                            for source_id in request.source_ids
+                            if source_id not in linked_source_ids
+                        ]
+                        if unlinked_source_ids:
+                            raise ProjectSourceNotLinked(unlinked_source_ids[0])
                     added_segments = _segments_for_sources(
                         request.source_ids,
                         added_sources_by_id,
@@ -1239,6 +1369,7 @@ class RunService:
                         )
 
                     child = Run(
+                        project_id=parent.project_id,
                         parent_run_id=parent.id,
                         workflow_type="podcast-revision",
                         workflow_version=(
@@ -2558,6 +2689,20 @@ def _stable_unique(values: list[str]) -> list[str]:
         seen.add(value)
         ordered.append(value)
     return ordered
+
+
+def _project_run_request_fingerprint(
+    *,
+    workflow_type: str,
+    payload: dict[str, object],
+) -> str:
+    serialized = json.dumps(
+        {"workflow_type": workflow_type, "payload": payload},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _segments_for_sources(

@@ -20,7 +20,7 @@ from epiphany.editor_schemas import (
     PodcastDraftOutput,
     editor_output_reference_keys,
 )
-from epiphany.models import ModelCall, Run, Task
+from epiphany.models import ModelCall, Project, ProjectSource, Run, Task
 from epiphany.revision_schemas import (
     LEGACY_DRAFT_REVISION_REQUEST_VERSION,
     REVISE_PODCAST_DRAFT,
@@ -258,6 +258,51 @@ async def _create_completed_parent_with_style(
     assert completed.status == "succeeded"
     assert completed.model_call_count == 5
     return created.id, style_source_id, supplemental_source_id
+
+
+async def test_project_revision_inherits_parent_workspace(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    (
+        parent_run_id,
+        style_source_id,
+        supplemental_source_id,
+    ) = await _create_completed_parent_with_style(
+        database,
+        service,
+        worker,
+        supplemental_paragraph_count=15,
+    )
+
+    async with database.sessions() as session, session.begin():
+        parent = await session.get(Run, parent_run_id)
+        assert parent is not None
+        project = Project(title="Project lineage test")
+        session.add(project)
+        await session.flush()
+        factual_source_ids = list(parent.input_json["source_ids"])
+        for source_id in {
+            *factual_source_ids,
+            style_source_id,
+            supplemental_source_id,
+        }:
+            session.add(ProjectSource(project_id=project.id, source_id=source_id))
+        parent.project_id = project.id
+        project_id = project.id
+
+    plan = await service.get_draft_improvement_plan(parent_run_id)
+    assert plan.plan.duration_resolution == "reuse_unused_material"
+    created = await service.create_draft_revision(
+        parent_run_id,
+        request=CreateDraftRevisionRequest(
+            submission_id="project-lineage-revision",
+            selected_actions=["reuse_unused_material"],
+        ),
+    )
+
+    assert created.run.parent_run_id == parent_run_id
+    assert created.run.project_id == project_id
 
 
 async def test_reuse_unused_material_revision_receives_exact_length_recovery_plan(

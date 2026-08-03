@@ -553,8 +553,12 @@ class Worker:
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         logger.info("Worker started", extra={"event": "worker.started"})
         try:
-            await self.recover_expired()
             while not stop_event.is_set():
+                # Recovery is deliberately periodic instead of startup-only.
+                # A replacement Worker can start while an old lease is still
+                # valid; that lease may expire a few seconds later and must not
+                # leave the durable Task stuck in ``running`` forever.
+                await self.recover_expired()
                 if await self.run_batch():
                     continue
                 try:
