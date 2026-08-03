@@ -75,6 +75,9 @@ POST Project source-starter
   -> reserve one ModelCall
   -> Fake / DeepSeek Provider
   -> strict SourceStarterCandidate validation
+  -> at most one model-output repair attempt
+  -> if still unsafe: server_line_grounding or server_safe_template
+  -> validate the repaired/fallback candidate with the same full contract
   -> persist source_starter_candidate Artifact
   -> Run waiting_for_user / awaiting_source_confirmation
   -> 页面恢复候选并等待用户编辑与确认
@@ -116,8 +119,10 @@ create_run
   -> render Podcast Draft / Show Notes
   -> evaluate deterministic Draft metrics
   -> project + validate trusted deterministic facts
+  -> build bounded D/W evidence catalogs from persisted text
   -> review_podcast_draft (serial root Quality Reviewer)
-  -> validate location + verbatim quote evidence
+  -> hydrate selected opaque evidence IDs on the server
+  -> strictly validate location + verbatim quote + source scope
   -> synthesize code-owned Draft Quality Report + non-compensatory caps
   -> human final review
   -> complete
@@ -206,6 +211,19 @@ blocker 时 decision 仍为 `blocked`，否则为
 `automated_review_incomplete`。Run 正常完成，使已经通过来源合同的 Draft
 仍可导出。用户反馈通过独立 append-only Artifact 保存；当前 origin 是
 调用方自报的分类，E2E 的 `synthetic_test` 会明确标记为非真人信号。
+
+当前 Reviewer 不再要求模型自己复制容易出错的 `location`、逐字 quote 和内部
+Source reference。普通代码先从 Draft block 建立 `D001`、`D002`……目录；只有
+Writing Sample profile 已就绪时，才另建 style-only 的 `W001`、`W002`……目录。
+目录值仍由服务端掌握，模型只返回 opaque evidence ID。Provider 收到模型 JSON
+后，在进入公开输出 validator 以前把 ID hydration 成代码所有的精确位置、短逐字
+引文和引用范围。未知、重复或越界 ID 会被还原为空证据并触发原有严格校验，不会
+被猜测或静默接受。
+
+`review_podcast_draft` 对这类 Schema、逐字证据、引用范围或样本文风证据失败只允许
+一次 bounded repair。第二次调用拿到明确的修复 Prompt，但校验规则完全相同；若仍
+失败，就进入已有的 advisory Reviewer 降级路径，保留 Draft、确定性指标和失败
+provenance。所谓 repair 是再给模型一次满足同一合同的机会，不是放松合同。
 
 M3.5 为新质量 Run 使用 workflow v7，不增加 Task、Artifact 类型或
 migration。版本升级冻结了持久化语义：v6 继续使用 M3.4 的 Reviewer Task
@@ -326,18 +344,27 @@ gap code、限制说明和带 SourceReference 的追问。
 
 M3.4 的 Quality Reviewer 是一个独立串行 Task，但在默认配置下可能复用
 Editor 的同一个模型。它只读取 Draft 实际引用到的 SourceSegment，并通过
-strict schema 返回六张证据卡。`assessable=true` 时必须带 1–5 分、稳定
-location 和存在于该 block 中的 exact quote；无法可靠评价时必须使用
-`assessable=false` 并说明 limitation，不能编造证据。最终 decision 和
-60/40 实验性分数由普通代码计算，且无论结果如何都要求人工审稿。M3.5 又把
-确定性事实放进受校验的 Reviewer Task 输入，并在 60/40 结果之后应用
-代码所有的非补偿 cap；模型高分不能把 blocker 平均掉。
+strict schema 返回六张证据卡。当前合同中，`assessable=true` 时必须带 1–5 分并
+选择服务端给出的 `Dxxx` evidence ID；个人文风维度还必须选择 `Wxxx`。应用代码再
+hydration 成稳定 location、存在于该 block 中的 exact quote 和 Source 范围，并走
+不变的严格 validator。无法可靠评价时必须使用 `assessable=false` 并说明
+limitation，不能编造证据。输出不合格时只允许一次同合同 repair。
+
+最终 decision 和 60/40 实验性分数由普通代码计算，且无论结果如何都要求人工审稿。
+M3.5 又把确定性事实放进受校验的 Reviewer Task 输入，并在 60/40 结果之后应用代码
+所有的非补偿 cap；模型高分不能把 blocker 平均掉。
 
 M3.6 的 Revision Editor 同样是一个串行根 Task。它只读取父 Draft、用户明确
-选择的 feedback/gap/修订指令，以及允许的事实和 style-only 上下文。它必须
-返回完整的新候选而不是原地 patch，并且不能把父 Draft 当作新增事实来源。
-随后创建的 Reviewer Task 与 Revision Editor 属于同一个子 Run，因而预算、
-重试、取消、恢复和 trace 都不会借用父 Run。
+选择的 feedback/gap/修订指令，以及允许的事实和 style-only 上下文。一般 Revision
+仍必须返回完整的新候选，并且不能把父 Draft 当作新增事实来源。唯一例外是同时选择
+`reuse_unused_material` 且带有可信 `length_recovery_plan` 的 M3.8 长度恢复：这条
+路径返回小型 `podcast_revision_patch_v1`，由服务端在父 Draft 的深拷贝上追加受限
+paragraph / section，再把合并结果交给完整 Podcast Draft、引用范围、补充材料、
+Writing Sample 泄漏和 recovery-material 使用校验。模型不能借 patch 修改不可变父稿，
+其他 feedback、风格或补充回答 Revision 也不会偷偷改用 patch 合同。
+
+随后创建的 Reviewer Task 与 Revision Editor 属于同一个子 Run，因而预算、重试、
+取消、恢复和 trace 都不会借用父 Run。
 
 M3.8 没有增加新的 Agent、状态机循环、API 或数据库表。它收紧了
 `reuse_unused_material` 进入 Revision Editor 前的确定性输入：
@@ -348,6 +375,8 @@ M3.8 没有增加新的 Agent、状态机循环、API 或数据库表。它收�
 - 去除完全重复和已经复制进口播的文本后，普通代码最多选 12 个候选；
 - 候选按缺失 must-include、Scaffold gap、补充素材、数字/标点/长度等信号排序；
 - 普通代码根据 Creative Brief 生成当前、85% 最低、目标、115% 最高和缺口；
+- 仅这条带 Recovery Plan 的路径要求模型返回 `podcast_revision_patch_v1`；
+- 服务端合并父稿和 patch 后，仍执行与完整 Draft 相同的全部校验；
 - Revision 后沿用同一套 metrics、Reviewer、非补偿 cap 与 comparison。
 
 该盘点是 ref-level，不是 claim-level。只要一个 Segment 在任一口播单元被引用，
@@ -394,6 +423,19 @@ Planner 是增益步骤：最终失败或输出不合法时，Task 保留失败�
 `generation_mode=deterministic_fallback` 的问题计划。有效 Draft、质量报告和
 Run 成功状态不受影响。整个阶段复用现有 `runs`、`tasks`、`artifacts`、
 `model_calls`、`events` 和 Source 表，因此不需要新的 migration。
+
+2026-08-03 的固定合成 Persona + 真实 DeepSeek + 浏览器操作留下了以下回放证据：
+
+| Run | 角色 | 估算时长 | 结果 |
+| --- | --- | ---: | --- |
+| `run_c41c726fdcca4136bd1e317dbcbce21a` | 初始父稿 | 10.11 分钟 | 低于 15 分钟目标的 12.75 分钟下限 |
+| `run_c344c19e9cb844c29c4daac81434cb00` | grounded length recovery | 12.61 分钟 | patch 合并和完整校验成功；仍短，生成定向问题 |
+| `run_2fec917404234405b9ec7c2c9ab16802` | 四个回答后的显式 Revision | 14.59 分钟 | 引用覆盖 100%，最终分 79，`revision_recommended` |
+
+这条 lineage 不是自动无限扩写：第一条 child Run 来自用户显式选择已有材料恢复；
+第二条 child Run 来自四个问题的新增事实 Source 和另一份显式请求。12.61 分钟没有
+被四舍五入成“已达标”，14.59 分钟也没有因为时长合格就自动宣布可发布；确定性
+warning 仍把分数封顶为 79，最终由用户决定是否继续消除模板化表达或直接录制。
 
 ## 6. 持久化模型
 
@@ -725,11 +767,20 @@ M5 切片。
 fingerprint 创建或重放一个 `source-starter` Run。Run input 保存服务端读取的
 Project 快照、素材设置和可选 intent；浏览器不能把另一份 Project 上下文偷偷
 塞进这个 Run。普通 Worker 为唯一 Task 复用 lease、retry、cancel、fencing、
-调用预算和 ModelCall 账本，严格输出通过后保存候选 Artifact 并进入确认检查点。
-这里的“严格输出”不只验证 JSON Schema：确定性 first-person guard 还会剥离
-`[待补充]` / `[待核实]` 区域，逐句拒绝服务端输入无法支持、又不是问句的第一
-人称陈述。第一次 live Provider 验收正是通过发现这一缺口，推动了 Prompt 与代码
-双层修复；被拒绝的原句不会进入持久错误信息。
+调用预算和 ModelCall 账本。这里的“严格输出”不只验证 JSON Schema：确定性 guard
+还会剥离 `[待补充]` / `[待核实]` 区域，逐句拒绝服务端输入无法支持的第一人称
+陈述、直接引语、预设经历和未标注外部事实。第一次 live Provider 验收正是通过发现
+这一缺口，推动了 Prompt 与代码双层修复；被拒绝的原句不会进入持久错误信息。
+
+Hosted model 返回不合格候选时，恢复路径有明确上限：第一次失败只排队一次带修复
+Prompt 的模型重试；第二次若 JSON 结构合法但仍触发安全 guard，普通代码执行
+`server_line_grounding`，保留逐行验证通过的主题内容，只把失败行改成显式
+`[待补充]` 候选；如果结构本身无效、逐行处理失败，或处理后的整体候选仍不合法，
+则使用完全由服务端生成的 `server_safe_template`。两种本地结果都必须再次通过同一
+完整 validator 才能持久化。Candidate Artifact 的 `_execution.fallback` 和
+`model_output_validation_error` 会记录 `server_line_grounding` /
+`server_safe_template` provenance；它们不会伪装成未经修改的模型输出，也不会自动
+成为事实 Source。
 
 候选通过后，Run 进入
 `waiting_for_user / awaiting_source_confirmation`，且仍不会写 Source。

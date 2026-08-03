@@ -546,12 +546,24 @@ Artifact/Event 并让 Run 成功。确认按标题/类型/正文做语义幂等�
 审计；网络重试只 GET 同一 Run，不重复模型调用。写作样本和口述转写禁用这条
 路径，确认后的 AI-assisted Source 也不能作为后续 Writing Sample。
 
-backend 387 项完整 pytest 与 Ruff、frontend 7 个测试文件（31 项）及 production build
-已通过。Fake 浏览器 E2E 验证了候选恢复、确认前前三步 complete/第四步 active、
-确认后的原子 Source 落库和完整 Trace。第一次 live DeepSeek 暴露推测性第一人称
-陈述后，系统增加 Prompt 约束、确定性 guard 与回归测试；第二次受控
-exploration-outline 调用成功停在确认检查点，合成 Run 随后取消且没有导入 Source。
-因此 M5.1 已完成；可视化 Scaffold/Draft 编辑仍是后续独立项。
+M5.1b 将 live 失败边界收紧为“至多一次模型 repair → `server_line_grounding` →
+安全模板”：逐行 grounding 只保留通过确定性校验的主题内容，危险部分变成显式待
+补充/待核实；完整候选随后仍需再次校验和人工确认。页面刷新还能从 Run input 恢复
+原 `mode` 与 `intent`。
+
+Playwright/DeepSeek 在零 Source 的潜水 Project 上验证了两种模式：探索提纲 Run
+`run_3c637233a17843119f546c1521ec0024` 一次通过后未导入；示例草稿 Run
+`run_8eda93938e4b4a1881eb47453bd5073f` 经 line grounding 后，由模拟用户编辑并确认
+成 516 字 Source。另一条三段口播 Run 链最终达到 14.59 分钟与 100% 段落引用，
+但因平行对照句式过多仍被限制为 79 分和 `revision_recommended`。这证明 UI、持久
+状态、人工检查点、Revision 与质量刹车能一起工作，不代表内容自动达到发布质量。
+
+当前 442 项 backend pytest、Ruff、43 项 frontend tests 与 production build 已通过。
+因此 M5.1 已完成；可视化 Scaffold/Draft 编辑、Docker、部署和备份仍是未勾选的
+后续独立项。完整实验见
+[`docs/experiments/m5-1b-real-browser-e2e.zh-CN.md`](experiments/m5-1b-real-browser-e2e.zh-CN.md)，
+复现素材见
+[`backend/fixtures/e2e/m5-1b-real-browser/`](../backend/fixtures/e2e/m5-1b-real-browser/)。
 
 演示：在本地浏览器从 Project/Source 走到 Run Trace，并完成一次人工暂停与
 恢复。线上部署留在后续独立切片。

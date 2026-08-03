@@ -4,9 +4,9 @@
 
 - 阶段：M5.1
 - 日期：2026-08-03
-- Commit：`a5837cf`（backend）、`a8a418c`（frontend）；本章随当前 docs commit 提交
-- 状态：Completed；backend 387 项测试/Ruff、frontend 7 个测试文件（31 项）、
-  production build、Fake 浏览器 E2E 与修复后的受控 DeepSeek 验收均已通过
+- Commit：`a5837cf`（backend）、`a8a418c`（frontend）；M5.1b 加固随当前 PR 提交
+- 状态：Completed；backend 全量 442 项测试通过，frontend 43 项测试与
+  production build 通过；Fake 与真实 DeepSeek 浏览器 E2E 均已完成
 
 ## 1. 为什么做这一步
 
@@ -101,7 +101,7 @@ Project 的 `source_count` 不会增加。模型也不能自行创建确认 Arti
 | `backend/src/epiphany/source_service.py` | 在调用方事务中导入或去重 Source/Segments | 让确认事务不会在中途提前 commit |
 | `backend/src/epiphany/main.py` | Run/确认共享 mutation lock | 防止确认、取消等写操作同时越过状态边界 |
 | `backend/src/epiphany/runtime/orchestrator.py` | 排队唯一 Task，并在候选成功后进入 durable confirmation checkpoint | 调度与模型生成分离 |
-| `backend/src/epiphany/runtime/worker.py` | 调用 Provider、校验并保存候选 Artifact | 复用 retry、lease、fencing 和 ModelCall 账本 |
+| `backend/src/epiphany/runtime/worker.py` | 调用 Provider、校验、有限修复并保存候选 Artifact | 复用 retry、lease、fencing 和 ModelCall 账本；失败时不会无限调用模型 |
 | `backend/src/epiphany/runtime/providers/fake.py` | 可重复、零费用的起步候选 | 本地开发和自动测试不依赖网络 |
 | `backend/src/epiphany/runtime/providers/deepseek.py` | 将同一 Task 接到可选 DeepSeek Provider | 保持 Provider 可替换 |
 | `frontend/src/features/sources/SourceImporter.tsx` | 起步设置、生成、编辑、确认和导入 | 用户就在这里创建 Source |
@@ -151,9 +151,8 @@ Prompt 要求：
 - Project 文本和 intent 都按不可信输入处理；
 - 输出必须满足 strict JSON Schema。
 
-第一次 live DeepSeek 验收说明，Prompt 本身仍可能被模型宽松理解：模型曾把输入中
-没有提供的常见担忧写成第一人称事实。该候选没有被确认或导入，验收 Run 随后被
-取消。修复因此增加两层约束：
+live DeepSeek 验收说明，Prompt 本身仍可能被模型宽松理解：模型可能把输入中
+没有提供的常见担忧写成第一人称事实。修复因此增加两层约束：
 
 - Prompt 明确要求检查正文、问题和不确定项中的个人叙事；只允许输入中已有的
   第一人称原话、真正的问句或 `[待补充]` / `[待核实]` 占位；
@@ -163,9 +162,21 @@ Prompt 要求：
   这些是有界启发式规则，不冒充通用事实判定器；命中时统一以
   `task_output_invalid` 拒绝。
 
-guard 的错误只暴露 fragment 编号，不保存被拒绝的具体句子。即使这两层都通过，
-系统仍不能证明模型每句话都真实，因此还保留第三层边界：候选不是 Source，确认
-必须由用户显式完成。
+guard 的错误只暴露 fragment 编号，不保存被拒绝的具体句子。为了避免“整个候选
+只因一句越界就全部退化成车轱辘占位符”，当前失败处理是有界的三级链路：
+
+```text
+首次模型输出不合规
+  -> 同一 Task 最多一次 repair retry（第二笔 ModelCall 可在 Trace 中看到）
+  -> 第二次形状正确但仍有内容越界：server_line_grounding
+       保留逐行验证通过的主题内容，只把危险行改成 [待补充] / [待核实]
+  -> 行级修复后仍无法通过完整合同，或 JSON 形状本身不可用：server_safe_template
+```
+
+`server_line_grounding` 之后仍会再次执行同一套完整 Schema 与安全校验；它不是绕过
+校验。Provider/网络本身失败也不会被伪装成一份“成功模板”。即使三级链路通过，
+系统仍不能证明模型每句话都真实，因此还保留最后一道产品边界：候选不是 Source，
+必须由用户显式编辑并确认。
 
 ### 5.4 四步进度不是装饰动画
 
@@ -282,6 +293,8 @@ npm test -- tests/sourceStarter.test.ts tests/sourceImporter.test.tsx
 - 网络失败后的重试只 GET 当前 Run，不重复模型调用；
 - 取消请求响应丢失后 GET 同一个 Run 对账；快速双击不会创建第二个替换 Run；
 - 刷新可恢复服务器 Candidate Artifact，失败/取消并放弃的 Run 不会复活；
+- 刷新不仅恢复候选正文，也会从 Run input 恢复当时选择的 `mode` 与 `intent`，
+  不会把“示例草稿”悄悄显示成默认“探索提纲”；
 - 未确认时不能导入；
 - 禁用两种身份/采集来源类型；
 - 请求失败后保留标题和正文。
@@ -302,11 +315,11 @@ npm run build
 
 2026-08-03 的结果：
 
-- backend 共收集并通过 387 项 `pytest`；`ruff check .` 与
+- backend 共收集并通过 442 项 `pytest`；`ruff check .` 与
   `ruff format --check .` 通过；
-- frontend 共 7 个测试文件、31 项测试通过；`npm run build` 通过；
+- frontend 共 43 项测试通过；`npm run build` 通过；
 - Fake 浏览器 E2E 通过；
-- 最终加固后的受控 `deepseek-v4-flash` exploration-outline 验收通过。
+- Playwright 驱动的真实 `deepseek-v4-flash` Source Starter 与主口播链路通过。
 
 ## 7. 浏览器与 live Provider 验收证据
 
@@ -328,47 +341,42 @@ npm run build
 `run_d833323a39fd4a59a8f2838e8ad86b78`。浏览器验证证明页面能操作真实持久状态；
 注入崩溃后的全事务回滚仍由 backend 自动测试证明。
 
-### 7.2 第一次 live 调用发现了什么
+### 7.2 M5.1b：同一个零素材 Project 的两种真实模式
 
-第一次受控 DeepSeek 调用成功返回了结构合法候选，却包含一条输入没有支持的推测
-性第一人称陈述。这说明“JSON Schema 合法”和“内容不替用户编造”是两个不同的
-问题。验收没有把该候选确认成 Source，而是取消 Run，然后增加了：
+Playwright 在一个“潜水入门”合成 Project 上像真实用户一样点击页面，而不是绕过
+UI 调接口：
 
-- 更严格的 first-person Prompt 规则；
-- Provider 之后的确定性 first-person guard；
-- “拒绝不受支持陈述且错误信息不泄漏原句”的回归测试；
-- “允许输入已有原话、问句和占位符”的正向回归测试。
+| 模式 | Run | 结果 |
+| --- | --- | --- |
+| 探索提纲 | `run_3c637233a17843119f546c1521ec0024` | 一次真实调用即通过严格校验；问题地图可用，但用户为比较模式而放弃，Source 数保持 0 |
+| 示例草稿 | `run_8eda93938e4b4a1881eb47453bd5073f` | 有界 repair 后仍含未经提供的第一人称内容；`server_line_grounding` 保留主题线索、把危险部分显式标为待补充 |
 
-文档刻意不保存那条候选原句，避免把失败内容复制到公开仓库。
+第二条 Run 没有把模型文字直接升级成事实。Playwright 模拟用户在普通文本框中补入
+自己的动机、耳压与失控担忧、需要查证的问题和下一步计划，勾选确认后才导入一份
+516 字 Source。刷新/恢复时页面还从 Run input 还原了 `starter_draft` 和原 `intent`，
+没有回到默认模式。可复现输入在
+[`backend/fixtures/e2e/m5-1b-real-browser/`](../../backend/fixtures/e2e/m5-1b-real-browser/)。
 
-### 7.3 修复后的第二次 live 调用
+这次对比说明：零个人事实时，“探索提纲”天然比“示例草稿”更稳；示例草稿可以
+帮助迈出第一笔，但必须清楚显示候选性质，并让用户补事实后再确认。
 
-第二次使用 `exploration_outline` 模式进行受控验收：
+### 7.3 同一浏览器里的完整口播主链
 
-| 项目 | 结果 |
-| --- | --- |
-| Run | `run_2dcf880f20ff4983b7d2eda643d766c5` |
-| Provider / model | `deepseek / deepseek-v4-flash` |
-| 候选生成后状态 | `waiting_for_user / awaiting_source_confirmation` |
-| ModelCall | 1 次，成功 |
-| Tokens | 713 input / 570 output |
-| Provider duration | 7,009 ms |
-| 本地估算费用 | CNY 0.001853 |
-| 四步 DOM | 前三步 `complete`，第四步 `active` |
+M5.1b 还使用完整合成 persona、事实 Source、Writing Sample 与补充口述，从页面
+跑通三段不可变 Run：
 
-生成后，日志只包含 Run/Task/ModelCall ID、状态、Token、耗时与费用等元数据，没有
-Project 正文、Prompt 或候选正文。因为这是合成验收内容而不是真实用户核对后的
-个人素材，记录证据后主动取消 Run，没有确认或导入 Source。该费用是本地账本估算，
-不是 Provider 发票。
+| Run | 阶段 | 结果 |
+| --- | --- | --- |
+| `run_c41c726fdcca4136bd1e317dbcbce21a` | 初稿 | 10.11 分钟，100% 段落引用 |
+| `run_c344c19e9cb844c29c4daac81434cb00` | 有证据的时长恢复 | 12.61 分钟，100% 引用；仍低于内容目标 |
+| `run_2fec917404234405b9ec7c2c9ab16802` | 回答四个稿件定向问题后的 Revision | 14.59 分钟，26/26 段落引用，5 Sources / 31 Segments |
 
-这次 live 验收只证明修复后的安全边界、状态流和 Provider 接线能够工作，不代表
-所有主题的内容质量都已经通过真人评审。
+最终稿达到 15 分钟目标的 85% 接受下限，但质量系统仍检测到 7 处平行对照句式，
+把综合分限制为 79，并给出 `revision_recommended`。这不是自相矛盾：时长与引用
+通过只表示证据和篇幅合格，不等于语言已经值得发布。
 
-最终 strict live Run `run_dcaeeadc20964a2dbc15568112d87c28` 用一次调用通过确认
-检查点：886 input / 590 output tokens、7,695 ms、估算 CNY 0.002066。浏览器显示
-`complete / complete / complete / active`；模拟取消响应丢失时，服务端已取消、
-重复 POST 冲突，页面随后 GET 对账并无错误清除候选，ModelCall 仍为一次。该 Run
-未导入 Source，文档不保存候选全文。
+完整步骤、费用、Trace 证据、踩坑与剩余问题记录在
+[`M5.1b 真实浏览器 E2E`](../experiments/m5-1b-real-browser-e2e.zh-CN.md)。
 
 ## 8. 本地手动验证
 
@@ -483,7 +491,7 @@ Project 说明、素材标题之外的正文、Prompt、模型响应、最终 So
 - AI 候选的多版本并排比较；
 - 外部事实检索、网页引用和潜水安全知识校验；
 - 真实录音、STT、TTS 或 voice cloning；
-- 更大主题样本与真人参与的 live DeepSeek 内容质量验收；
+- 真实用户私有素材与真人可录性验收；当前只有完整合成 persona 的浏览器证据；
 - Docker、单机部署和备份。
 
 M5.1 已经完成。下一步回到 M5 的可视化 Scaffold/Draft 编辑与恢复。Source

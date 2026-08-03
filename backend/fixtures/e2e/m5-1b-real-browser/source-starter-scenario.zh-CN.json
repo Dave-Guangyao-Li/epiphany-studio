@@ -1,0 +1,25 @@
+{
+  "schema_version": "source_starter_browser_fixture_v1",
+  "fixture_kind": "synthetic_non_sensitive",
+  "locale": "zh-CN",
+  "project": {
+    "title": "潜水入门｜AI 起步助手真实 E2E 2026-08-03",
+    "description": "完全没有潜水经验，想从好奇、担忧和需要查证的问题开始建立第一份探索素材。"
+  },
+  "source": {
+    "title": "第一次理解潜水：我为什么会被水下世界吸引",
+    "source_type": "journal"
+  },
+  "intent": "我真正好奇的是什么、我对耳压和失控的担忧从哪里来、第一次体验前哪些专业知识必须查证",
+  "modes": [
+    "exploration_outline",
+    "starter_draft"
+  ],
+  "expected_boundaries": {
+    "model_candidate_is_not_a_source": true,
+    "unsupported_first_person_claims_are_not_silently_accepted": true,
+    "professional_claims_must_remain_marked_for_verification": true,
+    "user_must_edit_and_confirm_before_import": true,
+    "confirmed_fixture": "source-starter-confirmed-user-edit.md"
+  }
+}

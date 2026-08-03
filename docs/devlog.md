@@ -2,6 +2,45 @@
 
 ## 2026-08-03
 
+### M5.1b real-browser DeepSeek E2E and Source Starter hardening
+
+- Used Playwright to exercise the local React Console as a real user instead of
+  calling the workflow only through Swagger. The committed data is a fully
+  synthetic persona and is reproducible from
+  `backend/fixtures/e2e/m5-1b-real-browser/`; API keys, local databases, model
+  response bodies, and private material remain uncommitted.
+- Hardened Source Starter invalid-output handling into a bounded chain: one
+  model repair retry, deterministic `server_line_grounding`, then the
+  server-owned safe template only if line grounding cannot pass the same full
+  contract. Line grounding retains useful topic-specific lines and replaces
+  only unsupported user history, dialogue, or unverified facts with visible
+  completion/verification regions. It cannot confirm a Source, and Provider
+  failures are not converted into apparent success.
+- Restored the original Source Starter `mode` and `intent` from persisted Run
+  input after refresh. The browser can now recover the exact pending settings,
+  while still warning that unconfirmed local textarea edits are not durable.
+- Real `exploration_outline` Run `run_3c637233a17843119f546c1521ec0024`
+  passed strict validation in one DeepSeek call and was intentionally abandoned
+  without importing evidence. Real `starter_draft` Run
+  `run_8eda93938e4b4a1881eb47453bd5073f` reached the confirmation checkpoint via
+  line grounding; a simulated user edited it into a 516-character factual
+  Source and explicitly confirmed the import.
+- Completed a separate three-Run podcast chain through the browser:
+  `run_c41c726fdcca4136bd1e317dbcbce21a` (10.11 minutes),
+  `run_c344c19e9cb844c29c4daac81434cb00` (12.61 minutes), and
+  `run_2fec917404234405b9ec7c2c9ab16802` (14.59 minutes). The final draft had
+  26/26 cited paragraphs across 5 Sources / 31 Segments and no exact duplicate
+  paragraph. Duration passed the 85% floor, but seven parallel-contrast warnings
+  capped the score at 79 and preserved `revision_recommended`.
+- Fixed the Run Trace UI so Markdown/export actions are derived from actual
+  Artifacts rather than workflow version alone. A final Revision no longer
+  requests an unavailable supplemental plan or advertises a missing Scaffold,
+  eliminating the observed 409 without hiding real errors.
+- The current validation baseline is 442 passing backend tests, Ruff checks,
+  43 passing frontend tests, and a production frontend build. Full actions,
+  costs, quality evidence, trace files, and residual debts are recorded in
+  `docs/experiments/m5-1b-real-browser-e2e.zh-CN.md`.
+
 ### M5.1 AI-assisted Source Starter and visible progress
 
 - Added a Project-scoped `source-starter` workflow v1 for the blank-page
@@ -64,8 +103,9 @@
   forbidden types, AI-assisted style-sample rejection, invalid-output error
   redaction, GET-only recovery, refresh/no-overwrite behavior, edited-candidate
   regeneration blocking, persisted progress evidence, and confirmation gating.
-  All 387 collected backend tests and Ruff checks pass. Frontend validation
-  passes 7 test files / 31 tests plus the production build.
+  The later M5.1b regression baseline supersedes this snapshot with 442 passing
+  backend tests and 43 passing frontend tests, plus Ruff and the production
+  build.
 - Completed a Fake real-browser E2E covering refresh recovery, three completed
   automatic steps plus one active confirmation step, atomic Source confirmation,
   all-four-steps completion, and the durable waiting/confirmed/succeeded Event

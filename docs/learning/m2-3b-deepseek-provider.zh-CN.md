@@ -248,9 +248,17 @@ Provider 会发送真实 Key 和 Source Segment。任意 Base URL 会带来泄�
 ```env
 EPIPHANY_DEEPSEEK_MAX_SOURCE_CHARS=24000
 EPIPHANY_DEEPSEEK_MAX_TOKENS=2000
+EPIPHANY_DEEPSEEK_RESEARCH_MAX_TOKENS=4000
 ```
 
-这只是第一道字符级保险丝，还不是精确 Token 预算。
+`MAX_TOKENS` 留给较短的通用生成；Timeline 和 Theme Research 使用独立的
+`RESEARCH_MAX_TOKENS`，避免证据较多时把合法 JSON 截断。若 Research 仍以
+`finish_reason=length` 结束，durable Worker 最多再执行一次更紧凑的修复：减少
+候选、缩短说明，并让 Theme 暂不输出可选 quotes。两次调用都会单独记录 Token、
+费用和状态；第二次仍被截断就终止，不会无限烧钱。其他任务的截断不会因为这条
+规则被盲目重试。
+
+这些只是字符级和输出级保险丝，还不是精确 Token 预算。
 
 ### 5.8 为什么真实调用不能放进 pytest
 

@@ -39,7 +39,7 @@ M3.8 的目标不是让任何 Draft 都机械达到规定字数，而是建立�
     ↓
 告诉 Revision Editor 当前长度、最低长度和优先卡片
     ↓
-只生成一次完整的新候选稿
+模型返回一次受限 patch，由服务端合并成一份完整新候选稿
     ↓
 重新做硬指标检查和模型审阅
 ```
@@ -268,6 +268,34 @@ POST /runs/{parent_run_id}/revisions
 - 不得为覆盖全部引用而破坏信息密度；
 - 素材实际不足时宁可保持短稿，不得重复、灌水或虚构。
 
+### 6.1 为什么长度恢复改用小型 patch 合同
+
+早期实现要求 Revision Editor 每次都重新返回完整 Podcast Draft。真实长稿中，模型
+即使已经写出了有价值的新段落，也可能因为重建整棵 JSON 时漏掉 Show Notes 字段、
+改变父稿结构或输出被截断而整体失败。让第二次调用再复制一次完整树，会把 Token 和
+失败面都浪费在本轮没有要求改变的内容上。
+
+当前只有同时满足以下两个条件的请求改用
+`podcast_revision_patch_v1`：
+
+- `selected_actions` 包含 `reuse_unused_material`；
+- Task input 带有服务端重新验证过的 `length_recovery_plan`。
+
+模型只能返回：
+
+- 向现有 section 追加的受来源约束 paragraph；
+- 少量完整的新 section。
+
+它不能通过 patch 改写父稿标题、开场、收束或 Show Notes。服务端从不可变父稿的深
+拷贝开始应用 patch，再把合并后的**完整候选稿**送入原有全部校验：Podcast Draft
+结构、topic、初始/补充引用、允许来源范围、Writing Sample 泄漏、新稿确实改变，
+以及至少一个 priority recovery ref 真正进入新口播单元。patch schema 或合并结果
+不合法时，仍只允许一次同合同的 bounded repair；不会退回“随便给一段文字也接受”。
+
+其他 Revision——例如采用用户反馈、调整语气，或融合新一轮回答——仍返回完整
+Podcast Draft。patch 是针对“保留父稿，只用未使用事实增加口播正文”这一窄问题的
+可靠性合同，不是通用编辑接口。
+
 ## 7. 为什么必须是“一次显式 Revision”
 
 系统没有设置“Reviewer 不满意就自动让 Editor 重写，直到分数够高”的循环。
@@ -324,6 +352,18 @@ POST /runs/{parent_run_id}/revisions
 
 Reviewer 的结论仍是 advisory。即使它把六维或七维都打得很高，只要正文还低于
 硬性下限、引用不完整或重复严重，系统仍应显示需要修订，而不是“可以直接发布”。
+
+为了减少“模型看对了，却在复制逐字证据时少一个标点”造成的伪失败，当前代码先为
+Draft block 生成 bounded `D001`、`D002`……证据目录；Writing Sample 可用时，再
+生成 style-only 的 `W001`、`W002`……目录。模型只选择 opaque ID，Provider 在服务端
+把它 hydration 成代码保存的 location、短逐字 quote 和 Source reference，然后才
+执行原有严格 Reviewer validator。未知、重复或越界 ID 不会被猜测，而会变成无效
+证据并触发失败。
+
+Reviewer 输出失败最多获得一次 repair-specific 调用。第二次必须重新选择目录中已有
+ID，且仍经过完全相同的 Schema、逐字 quote、引用范围和 style-only 证据校验；规则
+不会因为是 repair 就放宽。如果第二次仍失败，系统保留确定性报告和可导出的 Draft，
+把自动审阅标记为不完整。这一设计提升的是可满足性，不是把 Reviewer 变成安全真相。
 
 ### 8.3 用户负责最后的真实判断
 
@@ -416,6 +456,8 @@ Reviewer 的结论仍是 advisory。即使它把六维或七维都打得很高�
 cd /Users/mac/Documents/wise_project/epiphany-studio/backend
 source .venv/bin/activate
 pytest tests/test_draft_improvement.py \
+       tests/test_draft_quality_provider.py \
+       tests/test_draft_quality_workflow.py \
        tests/test_revision_schemas.py \
        tests/test_revision_workflow.py \
        tests/test_length_recovery_e2e.py -vv
@@ -427,8 +469,13 @@ pytest tests/test_draft_improvement.py \
 - Recovery Plan 的实际、最低、目标、最高和缺口数字相互一致；
 - 优先引用必须解析到真实事实 Segment，且父稿正文尚未使用；
 - 选择 `reuse_unused_material` 时必须同时带 Recovery Plan；
+- 只有 `reuse_unused_material + length_recovery_plan` 使用 patch，其他 Revision
+  继续要求完整 Draft；
+- patch 必须由服务端合并父稿，并通过完整 Draft 与来源合同校验；
 - Fake Revision 增加正文长度和新的事实引用；
-- 新稿引用仍然不能越过允许的事实集合。
+- 新稿引用仍然不能越过允许的事实集合；
+- Reviewer 只返回 `Dxxx` / `Wxxx`，服务端 hydration 后仍执行相同严格校验；
+- Reviewer 输出不合格只允许一次 bounded repair，第二次失败走可审计降级。
 
 ### 11.2 用 Swagger 手动走一次 Fake 流程
 
@@ -520,8 +567,10 @@ python -m epiphany.length_recovery_e2e \
   --execute
 ```
 
-完整路径最多五次父 Run 调用加两次子 Run 调用，不做隐藏重试。固定合成人设的
-DeepSeek v2 已按这条命令完成：
+### 12.1 历史 v2：工程成功、内容仍短
+
+固定合成人设的 DeepSeek v2 曾按这条命令执行固定五次父 Run 调用和两次子 Run
+调用；该历史驱动器没有额外输出修复调用。结果是：
 
 | 指标 | 父稿 | 子稿 |
 | --- | ---: | ---: |
@@ -553,6 +602,35 @@ editorial instruction leakage。修正规则没有产生新付费调用。
 最后一项仍待真人完成；自动指标和同家族 Reviewer 不能代替“我愿不愿意录”。
 完整失败、费用、父子稿定性审阅和安全证据见
 [M3.8 实验报告](../experiments/m3-8-grounded-length-recovery-e2e.zh-CN.md)。
+
+这个失败结果必须保留。它证明“把 Recovery Plan 传给模型”本身还不等于模型会
+充分利用素材，也推动了后来的 patch 输出合同、Reviewer 证据目录和定向补充采访。
+
+### 12.2 真实浏览器闭环：patch 恢复后，再用四个回答达标
+
+2026-08-03，另一组固定合成 Persona 通过真实页面和 DeepSeek 走完了三条不可变
+Run。它不是把历史失败覆盖掉，而是验证修复后的完整决策链：
+
+| Run | 操作 | 口播字符 | 估算时长 | 关键结果 |
+| --- | --- | ---: | ---: | --- |
+| `run_c41c726fdcca4136bd1e317dbcbce21a` | 初始父稿 | 2,831 | 10.11 分钟 | 低于 12.75 分钟下限 |
+| `run_c344c19e9cb844c29c4daac81434cb00` | `reuse_unused_material` grounded recovery | 3,530 | 12.61 分钟 | patch 合并成功，但仍差 40 字符，不能冒充达标 |
+| `run_2fec917404234405b9ec7c2c9ab16802` | 四个定向回答后的显式 Revision | 4,086 | 14.59 分钟 | 时长进入区间，段落引用覆盖 100% |
+
+第二条 Run 证明了 `podcast_revision_patch_v1` 的价值：模型只提交新段落，服务端把
+它们合并到父稿，再运行完整校验；Reviewer 首次证据输出不合法时，bounded repair
+按相同严格合同成功。由于 12.61 仍小于精确的 12.75 下限，系统没有按显示分钟数
+四舍五入，而是基于最新稿生成有原句 Anchor 的补充问题。
+
+第三条 Run 使用用户明确回答的四个问题作为新 Source，再由显式 child Revision
+融合。最终稿没有完全重复段落，引用覆盖 100%，但综合分仍因可观察的并列/对照表达
+warning 被非补偿上限封到 79，decision 为 `revision_recommended`。这正是期望边界：
+时长达标只解决一个约束，不会覆盖口播自然度风险，也不会自动发布。
+
+三条 Run 中没有“Reviewer 不满意就继续写”的隐藏循环。第一次 child 来自显式已有
+素材恢复；第二次 child 来自四个新增回答和另一份显式请求。若回答后仍短或表达风险
+继续恶化，系统仍应停在候选稿和报告，交给用户选择继续补材料、做一次明确修订或降低
+目标，而不是自动无限扩写。
 
 ## 13. 日志和数据库应该看什么
 
@@ -610,6 +688,7 @@ M3.8 解决了“先用已有证据，再决定是否补材料”的编排漏洞
 > 有预算、有日志、可复核的 Revision；如果仍然不足，就停止连续复用，诚实地
 > 补材料或降时长。
 
-固定长素材的 DeepSeek 闭环已经完成：模型增加了真实信息，但没有越过下限。
-下一步不再发起新的付费改稿实验，而是进入 M4 可回放 Trace，随后进入 M5.1
-最小 Run Trace UI；真人可以在界面中补充可录性与真实时长反馈。
+历史 v2 只证明模型增加了真实信息、却没有越过下限；后续真实浏览器闭环又证明：
+小型 patch 能可靠利用已有材料，仍短时可以用最新稿定向收集四个新事实，并在下一条
+显式 Revision 中达到时长区间。最终 79 分和 `revision_recommended` 同时提醒我们：
+完整工程闭环不等于内容已经可以发布，真人仍要判断“像不像我、愿不愿意录”。

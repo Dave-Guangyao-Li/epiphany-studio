@@ -74,7 +74,7 @@ Run tests:
 pytest
 ```
 
-The current full backend suite collects and passes 387 tests. Historical milestone-specific test
+The current full backend suite collects and passes 442 tests. Historical milestone-specific test
 counts are kept in the learning chapters and development log instead of being
 presented here as a permanently current total.
 
@@ -206,10 +206,20 @@ Project Run or Revision later builds writing-style context.
 
 Browser retry after a polling/network error only repeats `GET /runs/{id}` and
 `GET /runs/{id}/events`; it does not create another Run or ModelCall. Refresh
-can restore the server candidate Artifact, but cannot recover edits that only
-existed in the browser and were never confirmed. Regeneration is blocked after
-the candidate text has been edited, so two generated candidates are not
-silently stacked into one Source.
+can restore the server candidate Artifact and the Run's original `mode` and
+`intent`, but cannot recover edits that only existed in the browser and were
+never confirmed. Regeneration is blocked after the candidate text has been
+edited, so two generated candidates are not silently stacked into one Source.
+
+Live validation has a bounded failure chain. A first invalid hosted result may
+schedule one repair attempt, which is recorded as a second ModelCall. If the
+second response has a valid candidate shape but some lines still invent user
+history, dialogue, or unverified facts, `server_line_grounding` preserves only
+individually safe lines/items and converts the unsafe parts into explicit
+completion/verification regions. The complete candidate is then validated
+again. If that deterministic repair cannot pass, the Worker uses a
+server-owned safe template. Provider/network failures are not disguised as a
+successful template, and none of these paths confirms or imports a Source.
 
 Targeted zero-network tests:
 
@@ -217,11 +227,13 @@ Targeted zero-network tests:
 pytest tests/test_source_starter.py -q
 ```
 
-See `docs/learning/m5-1-source-starter.zh-CN.md` for the four visible progress
-steps, Fake-browser walkthrough, first-person guard, debugging path, and the
-bounded live DeepSeek validation record. The live record contains only state,
-usage, duration, and estimated cost metadata, never the API key or candidate
-body.
+See the [M5.1 learning chapter](../docs/learning/m5-1-source-starter.zh-CN.md)
+for the four visible progress steps, Fake-browser walkthrough, grounding chain,
+and debugging path. The complete synthetic Playwright/DeepSeek evidence and its
+reproducible inputs are in the
+[M5.1b experiment report](../docs/experiments/m5-1b-real-browser-e2e.zh-CN.md)
+and [`fixtures/e2e/m5-1b-real-browser/`](fixtures/e2e/m5-1b-real-browser/). The
+public record never contains an API key or private user material.
 
 ## Current episode-research API (workflow v4)
 
@@ -392,9 +404,18 @@ EPIPHANY_DEEPSEEK_API_KEY=
 EPIPHANY_DEEPSEEK_MODEL=deepseek-v4-flash
 EPIPHANY_DEEPSEEK_BILLING_CURRENCY=USD
 EPIPHANY_DEEPSEEK_MAX_TOKENS=2000
+EPIPHANY_DEEPSEEK_RESEARCH_MAX_TOKENS=4000
+EPIPHANY_DEEPSEEK_INTERVIEW_MAX_TOKENS=4000
 EPIPHANY_DEEPSEEK_MAX_SOURCE_CHARS=24000
 EPIPHANY_DEEPSEEK_MAX_INTERVIEW_BUNDLE_CHARS=24000
 ```
+
+The output limits are task-specific: the generic 2,000-token limit remains for
+short utility generations, while Timeline/Theme Research and the Interview
+Scaffold each receive a bounded 4,000-token allowance. A Research response that
+ends with `finish_reason=length` receives at most one durable compact-repair
+attempt; both paid attempts remain visible in `model_calls`. Truncation in other
+task kinds is not blindly retried with the same instructions.
 
 The two character limits are independent. `MAX_SOURCE_CHARS` protects raw
 Researcher input; `MAX_INTERVIEW_BUNDLE_CHARS` protects the validated

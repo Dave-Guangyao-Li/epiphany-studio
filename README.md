@@ -698,23 +698,28 @@ selection in the UI and backend style-context boundaries.
 The Project page translates the durable trace into four steps: context, model
 generation, validation, and the real user-confirmation checkpoint. This works
 with the existing plain-text area and therefore is not blocked by the
-still-open visual Scaffold/Draft editor. All 387 collected backend tests and
-Ruff checks, plus 7 frontend test files (31 tests) and the production build,
-pass. A Fake browser E2E verified candidate recovery, the persisted four-step
-checkpoint, atomic confirmation, Source creation, and Trace Events.
+still-open visual Scaffold/Draft editor. Refresh restores the persisted
+candidate plus its original `mode` and `intent`, without claiming that unsaved
+local edits are durable.
 
-The first live DeepSeek attempt exposed an unsupported speculative first-person
-claim. It was not imported; Prompt rules, a deterministic first-person guard,
-and regression tests were added. A second bounded `exploration_outline` call
-then reached the expected waiting checkpoint with one call (713 input / 570
-output tokens, 7,009 ms, estimated CNY 0.001853). The synthetic Run was
-cancelled without importing a Source. M5.1 is complete; visual Scaffold/Draft
-editing remains a later M5 slice.
+Hosted output is handled through a bounded safety chain: one model repair retry,
+then deterministic `server_line_grounding` that preserves safe topic-specific
+lines while marking unsupported material for completion, and finally a fully
+server-owned safe template only when line grounding cannot satisfy the complete
+contract. No fallback silently imports a Source; the user still edits and
+confirms it.
 
-A final strict live Run, `run_dcaeeadc20964a2dbc15568112d87c28`, passed the
-waiting checkpoint with one call (886 input / 590 output tokens, 7,695 ms,
-estimated CNY 0.002066). It was cancelled without import after browser recovery
-also reconciled a stale cancel response through GET without a duplicate call.
+A real Playwright/DeepSeek comparison used a zero-Source diving Project.
+`run_3c637233a17843119f546c1521ec0024` produced an exploration outline in one
+call and was deliberately abandoned without import. The starter-draft Run
+`run_8eda93938e4b4a1881eb47453bd5073f` required line grounding; a simulated user
+then edited and confirmed it into a 516-character Source. A separate three-Run
+podcast chain (`run_c41c...` -> `run_c344...` -> `run_2fec...`) reached 14.59
+estimated minutes with 100% paragraph citations. Its deterministic score was
+still capped at 79 with `revision_recommended`, proving that reaching duration
+does not override style warnings. The full backend suite (442 tests), Ruff,
+43 frontend tests, and the production build pass. Visual Scaffold/Draft editing
+and deployment remain later M5 work.
 
 See the
 [M3.6 learning chapter](docs/learning/m3-6-guided-revision-writing-style.zh-CN.md)
@@ -744,6 +749,11 @@ browser walkthrough, and debugging boundaries are documented in the
 The candidate-versus-Source boundary, four-step progress evidence, confirmation
 provenance, Fake tests, and manual page walkthrough are documented in the
 [M5.1 Source Starter chapter](docs/learning/m5-1-source-starter.zh-CN.md).
+The synthetic persona, browser actions, exact Run chain, costs, quality metrics,
+and remaining debts are recorded in the
+[M5.1b real-browser E2E report](docs/experiments/m5-1b-real-browser-e2e.zh-CN.md),
+with reproducible inputs under
+[`backend/fixtures/e2e/m5-1b-real-browser/`](backend/fixtures/e2e/m5-1b-real-browser/).
 
 ## License
 
