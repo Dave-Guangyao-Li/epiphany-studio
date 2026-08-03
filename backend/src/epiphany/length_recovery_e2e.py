@@ -772,6 +772,7 @@ async def _continue_with_revision(
                         },
                     )
                 revision_body = {
+                    "version": "draft_revision_request_v1",
                     "submission_id": REVISION_SUBMISSION_ID,
                     "selected_actions": ["reuse_unused_material"],
                     "selected_feedback_artifact_ids": [],

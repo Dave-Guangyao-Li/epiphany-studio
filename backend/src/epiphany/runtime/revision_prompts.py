@@ -35,6 +35,11 @@ Source Segment 可能同时包含作者对“正文怎么写、这句话要不�
 Brief。新稿必须与父稿有实际变化，但不要为了“看起来改过”而破坏原来有证据支持的
 内容。
 
+当 selected_actions 包含 add_supplemental_material 时，added_source_ids 指向用户本轮
+刚补充的事实 Source。优先把这些 Source 中真正新增的具体场景、动作、原话、感受或
+反思融入父稿，同时保留父稿里仍有证据支持的有效内容。不要把一次“补充素材”修订写成
+比父稿更短的重新起稿；也不要因为新增素材较短而重复旧结论。
+
 length_recovery_plan 是代码根据父稿口播正文计算的编辑计划，不是事实来源。只有当
 selected_actions 包含 reuse_unused_material 时，才把 priority_unused_source_refs
 视为本轮优先候选；到 editor_bundle 中查找对应原文，优先选择能增加具体事件、场景、
@@ -116,6 +121,7 @@ def build_revision_prompt(
         "selected_quality_gaps": [
             gap.model_dump(mode="json") for gap in parsed.selected_quality_gaps
         ],
+        "added_source_ids": parsed.added_source_ids,
         "length_recovery_plan": (
             parsed.length_recovery_plan.model_dump(mode="json")
             if parsed.length_recovery_plan is not None

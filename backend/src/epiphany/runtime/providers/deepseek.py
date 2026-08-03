@@ -34,6 +34,12 @@ from epiphany.runtime.providers.base import (
 from epiphany.runtime.quality_prompts import build_quality_review_prompt
 from epiphany.runtime.research_prompts import build_research_prompt
 from epiphany.runtime.revision_prompts import build_revision_prompt
+from epiphany.runtime.supplemental_interview_prompts import (
+    build_supplemental_interview_prompt,
+)
+from epiphany.supplemental_interview_schemas import (
+    PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW,
+)
 
 logger = logging.getLogger("epiphany.provider.deepseek")
 
@@ -138,7 +144,14 @@ class DeepSeekProvider:
         self._client = client
 
     async def generate(self, invocation: TaskInvocation) -> ProviderResult:
-        if invocation.kind == REVIEW_PODCAST_DRAFT:
+        if invocation.kind == PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW:
+            prompt = build_supplemental_interview_prompt(
+                task_input=invocation.input_json,
+                max_bundle_chars=self.max_interview_bundle_chars,
+            )
+            max_tokens = self.max_tokens
+            temperature = 0.2
+        elif invocation.kind == REVIEW_PODCAST_DRAFT:
             prompt = build_quality_review_prompt(
                 task_input=invocation.input_json,
                 max_bundle_chars=self.max_quality_bundle_chars,

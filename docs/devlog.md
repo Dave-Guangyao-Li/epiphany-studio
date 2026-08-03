@@ -2,6 +2,109 @@
 
 ## 2026-07-31
 
+### M4/M5 local Project workspace and Run Trace Console
+
+- Added durable `Project` and `ProjectSource` records. Sources remain globally
+  content-addressed and deduplicated, while the association table groups them
+  into one local creative workspace without copying source text.
+- Added nullable `Run.project_id` plus Project-scoped `submission_id` and
+  request fingerprinting. A same-key/same-payload retry returns the original
+  Run with `X-Idempotent-Replay: true`; a same-key/different-payload request
+  returns 409. Revision children inherit the parent Project.
+- Added Alembic revision `0005_project_workspace` and validated clean upgrade,
+  schema check, downgrade to `0004_run_lineage`, and re-upgrade. Existing
+  non-Project Runs remain readable because `project_id` is nullable.
+- Added Project list/detail/create, Project Source import/linking, Project Run
+  creation, and filtered Run-list APIs. Factual and style-only Source IDs must
+  already belong to the selected Project; cross-Project references are
+  rejected before a Run is created.
+- Added replayable SSE at `GET /runs/{id}/events/stream`. It replays durable
+  SQLite Events after a query/header cursor, polls for newly committed Events,
+  emits comment heartbeats without inventing Event rows, and closes after the
+  Run reaches `succeeded`, `failed`, or `cancelled`.
+- Added a React/Vite local Console with Project list/workspace, Source import
+  and detail, Run configuration/history, durable Event Timeline, Task,
+  Artifact and ModelCall panels, Markdown viewers, cancellation, human
+  checkpoint Resume, quality feedback, and explicit Revision actions.
+- Kept browser state disposable: refresh reloads Project and Run state from
+  FastAPI/SQLite. Event replay and UI polling remain available if the live SSE
+  connection drops. Frontend requests carry an `X-Request-ID` for correlation.
+- Verified 363 backend tests and 15 frontend tests. Project tests cover durable
+  refresh discovery, Source-link replay, Project Run idempotency, cross-Project
+  rejection, Run listing, and child lineage. SSE tests cover ordering,
+  reconnect replay, heartbeat, disconnect, missing Run, and terminal closure.
+- This slice is a local development Console, not completed deployment work.
+  Visual Scaffold editing, Dockerfile, production single-machine deployment,
+  authentication, audio/STT, and backup automation remain intentionally open.
+
+### M4/M5 real-browser E2E evidence
+
+- Created one Project through the Vite UI, imported a 587-character journal
+  split into 5 segments and a 335-character writing sample split into 3, and
+  verified that factual/style roles remain mutually exclusive in the form.
+- Created one workflow-v8 Run and visibly replayed two-Researcher fan-out,
+  deterministic fan-in, Interviewer, and the material-readiness checkpoint.
+  Four supplemental Source submissions moved the latest readiness evidence
+  from 78 available / 2,302 missing characters to 2,403 / 0.
+- Editor and Reviewer then completed. The succeeded Run exposed 6 Tasks,
+  5 zero-cost Fake calls, 19 Artifacts, 64 durable Events, Draft, Show Notes,
+  and quality output in the browser.
+- Deterministic quality correctly blocked the roughly 1.6/10-minute Fake Draft.
+  This is workflow/UI evidence, not acceptance of Fake-generated prose or a
+  substitute for human recordability review.
+- The walkthrough exposed and then verified fixes for two UI issues. The
+  checkpoint now shows exact readiness counts, supported duration, gaps, and
+  concrete questions without raw Source IDs. SSE-driven refreshes are
+  coalesced and in-flight deduplicated; terminal Runs do not open SSE, derived
+  records load once, and only workflow v9 requests a supplemental Plan.
+- A second waiting Run showed 78 current / 2,380 minimum / 2,302 missing
+  characters, a 0.24--0.32 minute support estimate, six concrete questions,
+  and a live SSE state. A fresh terminal-v8 session produced no supplemental
+  409, favicon 404, repeated polling, or browser console error.
+- Preserved one explicit research caveat: initial readiness currently counts
+  only initial Segments cited by the Scaffold, not every character in a
+  selected Source. This prevents unrelated volume from inflating readiness,
+  but may undercount useful material when Scaffold coverage is narrow; the E2E
+  records the policy and does not claim it is fixed.
+
+### M3.9 draft-aware supplemental interview
+
+- Added workflow v9 only for current v2 `podcast-revision` child Runs. New
+  initial episode Runs and explicit legacy Revision Request v1 keep their
+  frozen v8 behavior; an omitted version can still idempotently replay a
+  persisted historical v1 request.
+- Added the serial `plan_draft_supplemental_interview` Planner after a Revision
+  Editor and Reviewer when the exact spoken-character count remains below the
+  Creative Brief's 85% floor. Duration gating no longer relies on the rounded
+  display-minute value.
+- Build at most 24 trusted anchors from the latest Draft's spoken opening,
+  section paragraphs, and closing. Each model question must bind one allowed
+  anchor and copy an exact quote; code validates it and injects stable
+  `q1`--`q6` IDs.
+- Persist the question Plan as an Artifact while leaving the valid Draft as the
+  succeeded Run output. `GET /runs/{id}/supplemental-interview-plan` is
+  read-only and creates no Task, ModelCall, or fee.
+- Store user answers as new factual Sources, and version the Revision Request
+  so Plan Artifact ID, answered question IDs, and Source IDs remain exactly
+  traceable. The answer Revision explicitly prioritizes those Sources while
+  preserving grounded parent content.
+- Derive interview rounds on the server and stop after two or once the exact
+  duration floor is reached. Once a Plan exists, another
+  `reuse_unused_material` Revision cannot bypass the answered-question path.
+- Preserve valid Drafts when the Planner exhausts retries or returns invalid
+  output. A deterministic fallback Plan remains tied to exact latest-Draft
+  anchors, and round two uses different dialogue, sensory, and contrast angles
+  instead of repeating round one.
+- Reused the existing Run, Task, Artifact, ModelCall, Event, Source, lease,
+  retry, cancellation, and lineage tables; no Alembic migration or new
+  framework was required. No paid DeepSeek request was made in this slice.
+- The complete Fake E2E grows 2,509 → 3,073 → 3,637 spoken characters across
+  two answer-driven Revisions, crosses the 3,570-character floor, and proves
+  read replay, Plan enforcement, unknown-question rejection, provenance,
+  fallback, idempotency, and the no-third-round boundary.
+- Final validation passed all 354 backend tests, Ruff formatting/lint, and
+  `git diff --check`.
+
 ### M3.8 source-grounded spoken-length recovery
 
 - Corrected the Improvement Plan's material inventory to use only references

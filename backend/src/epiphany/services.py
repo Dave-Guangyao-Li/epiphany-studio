@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -54,9 +57,11 @@ from epiphany.material_readiness import (
     ReadinessFollowUpQuestion,
     assess_material_readiness,
 )
-from epiphany.models import Artifact, Event, Run, Source, Task
+from epiphany.models import Artifact, Event, Project, ProjectSource, Run, Source, Task
+from epiphany.project_service import ProjectNotFound
 from epiphany.research_schemas import EpisodeResearchPayload
 from epiphany.revision_schemas import (
+    LEGACY_DRAFT_REVISION_REQUEST_VERSION,
     REVISE_PODCAST_DRAFT,
     CreateDraftRevisionRequest,
     CreateDraftRevisionResponse,
@@ -72,10 +77,12 @@ from epiphany.revision_schemas import (
     duration_character_bounds,
 )
 from epiphany.runtime.orchestrator import (
+    DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION,
     EDITOR_RESEARCH_WORKFLOW_VERSION,
     GUIDED_REVISION_WORKFLOW_VERSION,
     INTERVIEW_RESEARCH_WORKFLOW_VERSION,
     MATERIAL_READINESS_WORKFLOW_VERSION,
+    MAX_SUPPLEMENTAL_INTERVIEW_ROUNDS,
     QUALITY_REVIEW_WORKFLOW_VERSION,
     QUALITY_REVIEW_WORKFLOW_VERSIONS,
     Orchestrator,
@@ -85,6 +92,7 @@ from epiphany.schemas import (
     EventView,
     ModelCallView,
     ResumeRunResponse,
+    RunSummaryView,
     RunView,
     TaskView,
 )
@@ -93,6 +101,11 @@ from epiphany.state_machine import (
     TaskStatus,
     validate_run_transition,
     validate_task_transition,
+)
+from epiphany.supplemental_interview_schemas import (
+    PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW,
+    SupplementalInterviewPlan,
+    SupplementalInterviewPlanRecord,
 )
 from epiphany.writing_style import build_writing_style_profile
 from epiphany.writing_style_schemas import WritingStyleProfile
@@ -114,6 +127,20 @@ class InvalidRunPayload(ValueError):
 
 class RunSourceNotFound(LookupError):
     pass
+
+
+class ProjectSourceNotLinked(ValueError):
+    pass
+
+
+class ProjectRunConflict(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class CreateProjectRunResult:
+    run: RunView
+    idempotent_replay: bool
 
 
 class InterviewScaffoldExportNotReady(ValueError):
@@ -157,6 +184,10 @@ class DraftRevisionConflict(ValueError):
 
 
 class DraftRevisionComparisonNotReady(ValueError):
+    pass
+
+
+class SupplementalInterviewPlanNotReady(ValueError):
     pass
 
 
@@ -232,8 +263,13 @@ class RunService:
         *,
         workflow_type: str,
         payload: dict[str, object],
+        project_id: str | None = None,
+        submission_id: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> RunView:
         async with self.database.sessions() as session, session.begin():
+            if project_id is not None and await session.get(Project, project_id) is None:
+                raise ProjectNotFound(project_id)
             research_source_segments: list[dict[str, str]] | None = None
             writing_style_profile: WritingStyleProfile | None = None
             if workflow_type == "episode-research":
@@ -275,6 +311,24 @@ class RunService:
                 ]
                 if missing_style_source_ids:
                     raise RunSourceNotFound(missing_style_source_ids[0])
+                if project_id is not None:
+                    linked_source_ids = set(
+                        (
+                            await session.execute(
+                                select(ProjectSource.source_id).where(
+                                    ProjectSource.project_id == project_id,
+                                    ProjectSource.source_id.in_(source_ids_to_load),
+                                )
+                            )
+                        ).scalars()
+                    )
+                    unlinked_source_ids = [
+                        source_id
+                        for source_id in source_ids_to_load
+                        if source_id not in linked_source_ids
+                    ]
+                    if unlinked_source_ids:
+                        raise ProjectSourceNotLinked(unlinked_source_ids[0])
 
                 payload = research_payload.model_dump(mode="json")
                 writing_style_profile = build_writing_style_profile(
@@ -322,6 +376,9 @@ class RunService:
                 else "v1"
             )
             run = Run(
+                project_id=project_id,
+                submission_id=submission_id,
+                request_fingerprint=request_fingerprint,
                 workflow_type=workflow_type,
                 workflow_version=workflow_version,
                 status=RunStatus.QUEUED,
@@ -379,6 +436,49 @@ class RunService:
         )
         return await self.get_run(run_id)
 
+    async def create_project_run(
+        self,
+        *,
+        project_id: str,
+        submission_id: str,
+        workflow_type: str,
+        payload: dict[str, object],
+    ) -> CreateProjectRunResult:
+        fingerprint = _project_run_request_fingerprint(
+            workflow_type=workflow_type,
+            payload=payload,
+        )
+        async with self._run_mutation_lock:
+            async with self.database.sessions() as session:
+                if await session.get(Project, project_id) is None:
+                    raise ProjectNotFound(project_id)
+                existing = (
+                    await session.execute(
+                        select(Run).where(
+                            Run.project_id == project_id,
+                            Run.submission_id == submission_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+            if existing is not None:
+                if existing.request_fingerprint != fingerprint:
+                    raise ProjectRunConflict(
+                        "submission_id was already used with a different Run request"
+                    )
+                return CreateProjectRunResult(
+                    run=await self.get_run(existing.id),
+                    idempotent_replay=True,
+                )
+
+            run = await self.create_run(
+                workflow_type=workflow_type,
+                payload=payload,
+                project_id=project_id,
+                submission_id=submission_id,
+                request_fingerprint=fingerprint,
+            )
+            return CreateProjectRunResult(run=run, idempotent_replay=False)
+
     async def get_run(self, run_id: str) -> RunView:
         async with self.database.sessions() as session:
             statement = (
@@ -402,6 +502,7 @@ class RunService:
             )
             return RunView(
                 id=run.id,
+                project_id=run.project_id,
                 parent_run_id=run.parent_run_id,
                 workflow_type=run.workflow_type,
                 workflow_version=run.workflow_version,
@@ -419,6 +520,29 @@ class RunService:
                     ModelCallView.model_validate(model_call) for model_call in model_calls
                 ],
             )
+
+    async def list_runs(
+        self,
+        *,
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> list[RunSummaryView]:
+        async with self.database.sessions() as session:
+            if project_id is not None and await session.get(Project, project_id) is None:
+                raise ProjectNotFound(project_id)
+            statement = select(Run)
+            if project_id is not None:
+                statement = statement.where(Run.project_id == project_id)
+            runs = (
+                (
+                    await session.execute(
+                        statement.order_by(Run.created_at.desc(), Run.id).limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [RunSummaryView.model_validate(run) for run in runs]
 
     async def list_events(self, run_id: str, *, after: int = 0) -> list[EventView]:
         async with self.database.sessions() as session:
@@ -769,6 +893,90 @@ class RunService:
         )
         return DraftImprovementPlanRecord(plan=plan, artifact=artifact_view)
 
+    async def get_supplemental_interview_plan(
+        self,
+        run_id: str,
+    ) -> SupplementalInterviewPlanRecord:
+        """Read one already-persisted latest-Draft interview plan.
+
+        This read path never invokes a Provider. Question generation is owned by
+        the durable planner Task, while this method only validates and exposes
+        its committed Artifact.
+        """
+
+        async with self.database.sessions() as session:
+            run = await session.get(Run, run_id)
+            if run is None:
+                raise RunNotFound(run_id)
+            if run.status != RunStatus.SUCCEEDED or run.output_artifact_id is None:
+                raise SupplementalInterviewPlanNotReady(
+                    "supplemental interview plan requires a succeeded Draft Run"
+                )
+            artifact = (
+                await session.execute(
+                    select(Artifact)
+                    .where(
+                        Artifact.run_id == run.id,
+                        Artifact.kind == f"{PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW}_result",
+                    )
+                    .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if artifact is None or artifact.task_id is None:
+                raise SupplementalInterviewPlanNotReady("supplemental interview plan is not ready")
+            task = await session.get(Task, artifact.task_id)
+            try:
+                plan = SupplementalInterviewPlan.model_validate(
+                    {
+                        key: value
+                        for key, value in artifact.content_json.items()
+                        if key != "_execution"
+                    }
+                )
+            except ValidationError as error:
+                raise SupplementalInterviewPlanNotReady(
+                    "persisted supplemental interview plan is invalid"
+                ) from error
+            task_status_is_valid = task is not None and (
+                task.status == TaskStatus.SUCCEEDED
+                or (
+                    task.status == TaskStatus.FAILED
+                    and plan.generation_mode == "deterministic_fallback"
+                )
+            )
+            if (
+                task is None
+                or task.run_id != run.id
+                or task.kind != PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW
+                or not task_status_is_valid
+                or task.output_artifact_id != artifact.id
+            ):
+                raise SupplementalInterviewPlanNotReady(
+                    "supplemental interview plan provenance is unavailable"
+                )
+            if (
+                plan.draft_artifact_id != run.output_artifact_id
+                or plan.round_number > MAX_SUPPLEMENTAL_INTERVIEW_ROUNDS
+            ):
+                raise SupplementalInterviewPlanNotReady(
+                    "supplemental interview plan does not target the latest Draft"
+                )
+            artifact_view = ArtifactView.model_validate(artifact)
+
+        logger.info(
+            "Supplemental interview plan ready",
+            extra={
+                "event": "workflow.draft_supplemental_interview.plan_read",
+                "run_id": run_id,
+                "artifact_id": artifact_view.id,
+                "draft_artifact_id": plan.draft_artifact_id,
+                "round_number": plan.round_number,
+                "question_count": len(plan.questions),
+            },
+        )
+        return SupplementalInterviewPlanRecord(plan=plan, artifact=artifact_view)
+
     async def create_draft_revision(
         self,
         parent_run_id: str,
@@ -857,6 +1065,136 @@ class RunService:
                     ):
                         raise DraftRevisionNotAllowed(
                             "parent quality report provenance is unavailable"
+                        )
+
+                    parent_supplemental_round = _supplemental_interview_round(parent.input_json)
+                    child_supplemental_round = parent_supplemental_round
+                    interview_plan_artifact: Artifact | None = None
+                    interview_plan: SupplementalInterviewPlan | None = None
+                    interview_provenance_present = bool(
+                        request.supplemental_interview_plan_artifact_id
+                        or request.answered_question_ids
+                    )
+                    supplemental_action_selected = (
+                        "add_supplemental_material" in request.selected_actions
+                    )
+                    reuse_action_selected = "reuse_unused_material" in request.selected_actions
+                    persisted_interview_plan_artifact = (
+                        await session.execute(
+                            select(Artifact)
+                            .where(
+                                Artifact.run_id == parent.id,
+                                Artifact.kind == f"{PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW}_result",
+                            )
+                            .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    if (
+                        parent.workflow_version == DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION
+                        and persisted_interview_plan_artifact is not None
+                        and reuse_action_selected
+                    ):
+                        raise DraftRevisionNotAllowed(
+                            "v9 parent already has a supplemental interview plan; "
+                            "unused-material recovery cannot bypass the answered-question path"
+                        )
+                    if (
+                        parent.workflow_version == DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION
+                        and supplemental_action_selected
+                        and (
+                            persisted_interview_plan_artifact is not None
+                            or interview_provenance_present
+                        )
+                    ):
+                        if (
+                            request.supplemental_interview_plan_artifact_id is None
+                            or not request.answered_question_ids
+                        ):
+                            raise DraftRevisionNotAllowed(
+                                "v9 supplemental material requires one persisted interview "
+                                "plan and answered question IDs"
+                            )
+                        if parent_supplemental_round >= MAX_SUPPLEMENTAL_INTERVIEW_ROUNDS:
+                            raise DraftRevisionNotAllowed(
+                                "supplemental interview round limit has been reached"
+                            )
+                        interview_plan_artifact = await session.get(
+                            Artifact,
+                            request.supplemental_interview_plan_artifact_id,
+                        )
+                        if (
+                            interview_plan_artifact is None
+                            or persisted_interview_plan_artifact is None
+                            or interview_plan_artifact.id != persisted_interview_plan_artifact.id
+                            or interview_plan_artifact.run_id != parent.id
+                            or interview_plan_artifact.kind
+                            != f"{PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW}_result"
+                            or interview_plan_artifact.task_id is None
+                        ):
+                            raise DraftRevisionNotAllowed(
+                                "supplemental interview plan is unavailable for this parent Run"
+                            )
+                        interview_plan_task = await session.get(
+                            Task,
+                            interview_plan_artifact.task_id,
+                        )
+                        try:
+                            interview_plan = SupplementalInterviewPlan.model_validate(
+                                {
+                                    key: value
+                                    for key, value in interview_plan_artifact.content_json.items()
+                                    if key != "_execution"
+                                }
+                            )
+                        except ValidationError as error:
+                            raise DraftRevisionNotAllowed(
+                                "supplemental interview plan is invalid"
+                            ) from error
+                        interview_task_status_is_valid = interview_plan_task is not None and (
+                            interview_plan_task.status == TaskStatus.SUCCEEDED
+                            or (
+                                interview_plan_task.status == TaskStatus.FAILED
+                                and interview_plan.generation_mode == "deterministic_fallback"
+                            )
+                        )
+                        if (
+                            interview_plan_task is None
+                            or interview_plan_task.run_id != parent.id
+                            or interview_plan_task.kind != PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW
+                            or not interview_task_status_is_valid
+                            or interview_plan_task.output_artifact_id != interview_plan_artifact.id
+                        ):
+                            raise DraftRevisionNotAllowed(
+                                "supplemental interview plan provenance is unavailable"
+                            )
+                        expected_round = parent_supplemental_round + 1
+                        if (
+                            interview_plan.draft_artifact_id != parent_draft.id
+                            or interview_plan.quality_report_artifact_id != parent_report.id
+                            or interview_plan.round_number != expected_round
+                            or interview_plan.round_number > MAX_SUPPLEMENTAL_INTERVIEW_ROUNDS
+                        ):
+                            raise DraftRevisionNotAllowed(
+                                "supplemental interview plan is stale or targets another Draft"
+                            )
+                        available_question_ids = {
+                            question.question_id for question in interview_plan.questions
+                        }
+                        unknown_question_ids = [
+                            question_id
+                            for question_id in request.answered_question_ids
+                            if question_id not in available_question_ids
+                        ]
+                        if unknown_question_ids:
+                            raise DraftRevisionNotAllowed(
+                                "answered supplemental interview question is unavailable: "
+                                f"{unknown_question_ids[0]}"
+                            )
+                        child_supplemental_round = interview_plan.round_number
+                    elif interview_provenance_present:
+                        raise DraftRevisionNotAllowed(
+                            "supplemental interview provenance is not available for this Run"
                         )
 
                     selected_gaps = {gap.code: gap for gap in plan_record.plan.gaps}
@@ -999,6 +1337,24 @@ class RunService:
                     ]
                     if missing_source_ids:
                         raise RunSourceNotFound(missing_source_ids[0])
+                    if parent.project_id is not None and request.source_ids:
+                        linked_source_ids = set(
+                            (
+                                await session.execute(
+                                    select(ProjectSource.source_id).where(
+                                        ProjectSource.project_id == parent.project_id,
+                                        ProjectSource.source_id.in_(request.source_ids),
+                                    )
+                                )
+                            ).scalars()
+                        )
+                        unlinked_source_ids = [
+                            source_id
+                            for source_id in request.source_ids
+                            if source_id not in linked_source_ids
+                        ]
+                        if unlinked_source_ids:
+                            raise ProjectSourceNotLinked(unlinked_source_ids[0])
                     added_segments = _segments_for_sources(
                         request.source_ids,
                         added_sources_by_id,
@@ -1013,9 +1369,14 @@ class RunService:
                         )
 
                     child = Run(
+                        project_id=parent.project_id,
                         parent_run_id=parent.id,
                         workflow_type="podcast-revision",
-                        workflow_version=GUIDED_REVISION_WORKFLOW_VERSION,
+                        workflow_version=(
+                            GUIDED_REVISION_WORKFLOW_VERSION
+                            if request.version == LEGACY_DRAFT_REVISION_REQUEST_VERSION
+                            else DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION
+                        ),
                         status=RunStatus.QUEUED,
                         current_step=REVISE_PODCAST_DRAFT,
                         input_json={
@@ -1030,6 +1391,7 @@ class RunService:
                             "parent_draft_artifact_id": parent_draft.id,
                             "parent_quality_report_artifact_id": parent_report.id,
                             "plan_artifact_id": plan_record.artifact.id,
+                            "supplemental_interview_round": child_supplemental_round,
                             **(
                                 {
                                     "writing_style_profile": base_editor_input[
@@ -1045,6 +1407,7 @@ class RunService:
                     await session.flush()
 
                     request_record = DraftRevisionRequestRecord(
+                        version=request.version,
                         submission_id=request.submission_id,
                         parent_run_id=parent.id,
                         child_run_id=child.id,
@@ -1055,6 +1418,10 @@ class RunService:
                         selected_feedback_artifact_ids=(request.selected_feedback_artifact_ids),
                         selected_gap_codes=request.selected_gap_codes,
                         source_ids=request.source_ids,
+                        supplemental_interview_plan_artifact_id=(
+                            request.supplemental_interview_plan_artifact_id
+                        ),
+                        answered_question_ids=request.answered_question_ids,
                         target_duration_minutes=request.target_duration_minutes,
                         revision_instruction=request.revision_instruction,
                     )
@@ -1085,6 +1452,7 @@ class RunService:
                         "parent_quality_report_artifact_id": parent_report.id,
                         "plan_artifact_id": plan_record.artifact.id,
                         "request_artifact_id": request_artifact.id,
+                        "supplemental_interview_round": child_supplemental_round,
                         "creative_brief": parent_brief,
                         "interview_scaffold": base_editor_input["interview_scaffold"],
                         "scaffold_artifact_id": base_editor_input["scaffold_artifact_id"],
@@ -1101,6 +1469,7 @@ class RunService:
                         "initial_source_segments": base_editor_input["initial_source_segments"],
                         "supplemental_source_segments": supplemental_segments,
                         "selected_actions": request.selected_actions,
+                        "added_source_ids": request.source_ids,
                         "selected_feedback": selected_feedback,
                         "selected_quality_gaps": [
                             selected_gaps[code].model_dump(mode="json")
@@ -1145,6 +1514,17 @@ class RunService:
                             "selected_feedback_count": len(selected_feedback),
                             "selected_gap_count": len(request.selected_gap_codes),
                             "supplemental_source_count": len(request.source_ids),
+                            "supplemental_interview_round": child_supplemental_round,
+                            "answered_question_count": len(request.answered_question_ids),
+                            **(
+                                {
+                                    "supplemental_interview_plan_artifact_id": (
+                                        interview_plan_artifact.id
+                                    )
+                                }
+                                if interview_plan_artifact is not None
+                                else {}
+                            ),
                             **(
                                 {
                                     "length_recovery_readiness": (length_recovery_plan.readiness),
@@ -2311,6 +2691,20 @@ def _stable_unique(values: list[str]) -> list[str]:
     return ordered
 
 
+def _project_run_request_fingerprint(
+    *,
+    workflow_type: str,
+    payload: dict[str, object],
+) -> str:
+    serialized = json.dumps(
+        {"workflow_type": workflow_type, "payload": payload},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def _segments_for_sources(
     source_ids: list[str],
     sources_by_id: dict[str, Source],
@@ -2355,14 +2749,35 @@ def _revision_request_matches(
     parent_run_id: str,
     plan_artifact_id: str,
 ) -> bool:
+    version_matches = record.version == request.version or (
+        record.version == LEGACY_DRAFT_REVISION_REQUEST_VERSION
+        and "version" not in request.model_fields_set
+        and request.supplemental_interview_plan_artifact_id is None
+        and not request.answered_question_ids
+    )
     return (
-        record.submission_id == request.submission_id
+        version_matches
+        and record.submission_id == request.submission_id
         and record.parent_run_id == parent_run_id
         and record.plan_artifact_id == plan_artifact_id
         and record.selected_actions == request.selected_actions
         and record.selected_feedback_artifact_ids == request.selected_feedback_artifact_ids
         and record.selected_gap_codes == request.selected_gap_codes
         and record.source_ids == request.source_ids
+        and record.supplemental_interview_plan_artifact_id
+        == request.supplemental_interview_plan_artifact_id
+        and record.answered_question_ids == request.answered_question_ids
         and record.target_duration_minutes == request.target_duration_minutes
         and record.revision_instruction == request.revision_instruction
     )
+
+
+def _supplemental_interview_round(input_json: dict[str, Any]) -> int:
+    """Read only the server-owned bounded round counter from durable Run input."""
+
+    value = input_json.get("supplemental_interview_round", 0)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise DraftRevisionNotAllowed("parent supplemental interview round provenance is invalid")
+    if value < 0 or value > MAX_SUPPLEMENTAL_INTERVIEW_ROUNDS:
+        raise DraftRevisionNotAllowed("parent supplemental interview round provenance is invalid")
+    return value

@@ -2,7 +2,7 @@
 
 状态：Draft
 
-日期：2026-07-30
+日期：2026-07-31
 
 ## 1. 产品命题
 
@@ -98,6 +98,8 @@ Subagent 对话。
     旧稿的 Revision 子 Run，再人工比较两个候选。
 13. 如果候选稿明显偏短，系统先展示尚未进入口播正文的事实片段和长度缺口；
     用户可以显式尝试一次有来源的时长恢复，也可以补充材料或降低目标时长。
+14. 如果这次恢复仍短，系统围绕最新稿的具体原句生成补充问题；用户回答后把
+    新事实作为 Source 导入，再显式创建下一版 Revision，最多两轮。
 
 ## 5. MVP 范围
 
@@ -116,6 +118,7 @@ Subagent 对话。
 - 经明确授权、与事实素材分离的可选写作样本；
 - 确定性 Improvement Plan 与用户显式触发的 Revision 子 Run；
 - 只盘点口播正文完全未引用事实的、单次显式时长恢复 Revision；
+- 绑定最新 Draft 原句、最多两轮的补充采访与回答 Source Revision；
 - 可替换的托管模型 Provider（首个为 DeepSeek）与测试用 Fake Provider。
 
 ### 暂不包含
@@ -607,6 +610,45 @@ Improvement Plan v2 保存 `prior_length_recovery_attempted`。一次 Revision �
 ¥0.201153；同样证明机制可运行、质量刹车会生效，但没有达到 15 分钟内容标准。
 真人是否愿意录仍需单独验收。
 
+### M3.9 最新稿定向补充采访
+
+一次有来源的时长恢复后仍低于 Creative Brief 的 85% 下限时，新的 v2
+Revision 子 Run 使用 workflow v9 排队一个
+`plan_draft_supplemental_interview` Task。初始 `episode-research` Run 和
+显式 legacy v1 Revision 继续保持 workflow v8，避免改变既有持久化语义。
+
+Planner 不直接改稿。可信代码只从最新 Draft 的 opening、正文 Paragraph 和
+closing 建立最多 24 个 Anchor；Show Notes、标题和 Section 元数据不能成为
+问题依据。模型返回 3—6 个开放问题，每个都必须绑定允许的 Anchor，并逐字复制
+该 Anchor 中的一段 `anchor_quote`。代码验证 quote 后再注入稳定的
+`q1`—`q6`，拒绝不存在的 Anchor、旧稿引用、重复问题和内部 ID 泄漏。
+
+有效 Draft 与 Quality Report 已经完成，因此 Revision Run 仍为 `succeeded`，
+`output_artifact_id` 继续指向最新 Draft。问题计划作为
+`supplemental_interview_plan` Artifact 持久化，状态为 `awaiting_user`。
+`GET /runs/{run_id}/supplemental-interview-plan` 只读取该 Artifact，不创建
+Task、ModelCall 或费用。
+
+用户可把回答文字导入一个或多个事实 Source，再提交
+`draft_revision_request_v2_supplemental_interview`。Request 必须记录 Plan
+Artifact ID、回答的 question IDs 和新 Source IDs；服务端重新核对它们都属于
+同一最新 Draft/Report，并自行推导 round。答案不会藏在 Source metadata 中，
+精确问答关系由 versioned Revision Request Artifact 保存。
+
+回答 Revision 的 Editor 优先融合本轮新 Source，同时保留父 Draft 中有效、
+有来源的内容。随后仍执行结构/引用校验、确定性指标、Reviewer 和非补偿上限。
+达到 85% 下限就停止；仍短时最多再规划一轮。两轮后不会继续自动追问，也不会
+自动创建子 Run，用户仍可主动补充一般素材或降低目标时长。
+
+Planner 最终失败或输出不合法时，失败 Task 和错误码仍保留；普通代码从不同的
+最新 Draft Anchor 生成一份 `generation_mode=deterministic_fallback` 的保守
+问题计划。它不会让已经有效的 Draft 失败或消失。
+
+零费用 Fake E2E 验证了 2,509 → 3,073 → 3,637 的两轮闭环，其中 3,637 越过
+15 分钟目标的 3,570 字符下限；同时覆盖重复 GET 零调用、Plan 绕过拒绝、
+未知 question ID、轮次 0→1→2、fallback 和第三轮停止。它证明工程合同，不
+代表真实模型提问质量或真人可录性。
+
 ## 7. 成功标准
 
 完成 MVP 时，应能演示：
@@ -628,6 +670,8 @@ Improvement Plan v2 保存 `prior_length_recovery_attempted`。一次 Revision �
     同时确认父 Draft/Report 没有被覆盖。
 12. 初稿偏短且仍有完全未引用事实时，用户能够执行一次有依据的长度恢复；
     系统能区分工程上的字符达标与真人认为内容有价值、愿意录制。
+13. 恢复后仍短时，用户能看到绑定最新稿具体原句的问题；回答可追溯到新
+    Source 和下一版 Revision，且系统最多规划两轮而不会用套话无限扩写。
 
 ## 8. 衡量指标
 
@@ -646,4 +690,6 @@ Improvement Plan v2 保存 `prior_length_recovery_attempted`。一次 Revision �
 - Revision 的字符、时长、确定性分数与实验分数变化，以及用户最终选择；
 - 长度恢复前后的 spoken-only 字符、完全未引用事实数量、新增引用、重复/套话
   变化，以及恢复后是否仍需补材料或降时长；
+- 补充采访轮次、问题 Anchor/quote 校验结果、回答 Source 数量、每轮新增
+  spoken-only 字符和最终是否越过时长下限；
 - `synthetic_test` 与 human feedback 必须分开统计。

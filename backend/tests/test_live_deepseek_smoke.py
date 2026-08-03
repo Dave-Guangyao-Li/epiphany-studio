@@ -103,14 +103,26 @@ def test_smoke_database_uses_current_alembic_migrations(tmp_path: Path) -> None:
         run_columns = {row[1] for row in connection.execute("PRAGMA table_info('runs')").fetchall()}
         run_foreign_keys = connection.execute("PRAGMA foreign_key_list('runs')").fetchall()
         run_indexes = {row[1] for row in connection.execute("PRAGMA index_list('runs')").fetchall()}
-    assert revision == ("0004_run_lineage",)
-    assert {"runs", "tasks", "events", "artifacts", "model_calls"} <= tables
-    assert "parent_run_id" in run_columns
+    assert revision == ("0005_project_workspace",)
+    assert {
+        "runs",
+        "tasks",
+        "events",
+        "artifacts",
+        "model_calls",
+        "projects",
+        "project_sources",
+    } <= tables
+    assert {"parent_run_id", "project_id", "submission_id", "request_fingerprint"} <= (run_columns)
     assert any(
         row[2] == "runs" and row[3] == "parent_run_id" and row[4] == "id"
         for row in run_foreign_keys
     )
-    assert "ix_runs_parent_run_id" in run_indexes
+    assert any(
+        row[2] == "projects" and row[3] == "project_id" and row[4] == "id"
+        for row in run_foreign_keys
+    )
+    assert {"ix_runs_parent_run_id", "ix_runs_project_id"} <= run_indexes
 
 
 async def test_smoke_harness_is_bounded_and_summary_hides_content(

@@ -21,6 +21,10 @@ from epiphany.runtime.providers.base import (
     RetryableProviderError,
     TaskInvocation,
 )
+from epiphany.supplemental_interview_schemas import (
+    PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW,
+    DraftSupplementalInterviewTaskInput,
+)
 
 _TIME_EXPRESSION = re.compile(
     r"(?:"
@@ -283,6 +287,7 @@ class FakeProvider:
             BUILD_PODCAST_DRAFT: self._build_podcast_draft,
             REVISE_PODCAST_DRAFT: self._revise_podcast_draft,
             REVIEW_PODCAST_DRAFT: self._review_podcast_draft,
+            PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW: self._plan_draft_supplemental_interview,
         }
         try:
             content = handlers[invocation.kind](invocation.input_json)
@@ -290,6 +295,103 @@ class FakeProvider:
             raise ValueError(f"unsupported fake task kind: {invocation.kind}") from error
 
         return ProviderResult(content=content, provider=self.name, model=self.model)
+
+    @staticmethod
+    def _plan_draft_supplemental_interview(
+        input_json: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return deterministic questions tied to three distinct Draft anchors."""
+
+        parsed = DraftSupplementalInterviewTaskInput.model_validate(input_json)
+        selected = []
+        seen_sections: set[str] = set()
+        for anchor in parsed.draft_anchors:
+            if anchor.section_title in seen_sections:
+                continue
+            selected.append(anchor)
+            seen_sections.add(anchor.section_title)
+            if len(selected) == 3:
+                break
+        if len(selected) < 3:
+            selected_ids = {anchor.anchor_id for anchor in selected}
+            selected.extend(
+                anchor for anchor in parsed.draft_anchors if anchor.anchor_id not in selected_ids
+            )
+            selected = selected[:3]
+
+        missing_characters = round(
+            parsed.duration_gap.missing_duration_minutes
+            * parsed.creative_brief.speaking_rate_chars_per_minute
+        )
+        estimate = max(180, min(1_600, round(missing_characters / 3)))
+        variants = (
+            [
+                (
+                    "scene",
+                    "这句话对应的时刻，你具体在哪里，周围最先注意到什么？"
+                    "如果不记得或没有更多细节，也可以直接说。",
+                    "把一句概括还原成可进入的具体现场，而不替用户补写事实。",
+                    ["时间和地点", "一个环境细节", "没有细节也可以"],
+                ),
+                (
+                    "action",
+                    "这句话前后，你具体做了什么，事情又怎样继续？"
+                    "如果没有可以补充的经过，也可以直接说没有。",
+                    "补足动作和前后连接，避免只换一种方式重复现有结论。",
+                    ["前一个动作", "接下来发生什么", "没有经过也可以"],
+                ),
+                (
+                    "reflection",
+                    "现在回看这句话，当时有没有还没说清楚的想法或矛盾？"
+                    "如果仍没有答案，也可以保留这种不确定。",
+                    "补充真实的认知层次，同时允许经历没有整齐的事后结论。",
+                    ["当时怎么想", "现在怎么看", "仍没答案也可以"],
+                ),
+            ]
+            if parsed.round_number == 1
+            else [
+                (
+                    "sensory",
+                    "换一个角度回到这里：当时有没有声音、光线或手边物品"
+                    "能帮助你定位那个瞬间？如果没有，也可以直接说没有。",
+                    "第二轮只寻找尚未出现的感官证据，不重复第一轮的场景概括。",
+                    ["一种声音或光线", "手边物品", "没有也可以"],
+                ),
+                (
+                    "dialogue",
+                    "这段经历里有没有一句你说过、听过或忍住没说的话？"
+                    "如果没有明确原话，可以说明当时没有。",
+                    "补充可能存在的真实语言动作，同时避免虚构对话。",
+                    ["说出口的话", "没说出口的话", "没有原话也可以"],
+                ),
+                (
+                    "contrast",
+                    "如果把这句话里的当时和现在并排看，最具体的一处变化是什么？"
+                    "如果你觉得并没有明显变化，也可以保留这个答案。",
+                    "补足前后对照中的信息增量，而不是再次复述结论。",
+                    ["当时的做法", "现在的做法", "没有变化也可以"],
+                ),
+            ]
+        )
+        questions = []
+        for anchor, (detail_type, suffix, purpose, cues) in zip(
+            selected,
+            variants,
+            strict=True,
+        ):
+            excerpt = anchor.excerpt[:72].rstrip()
+            questions.append(
+                {
+                    "anchor_id": anchor.anchor_id,
+                    "anchor_quote": excerpt,
+                    "prompt": (f"稿子在“{anchor.section_title}”写到“{excerpt}”。{suffix}"),
+                    "purpose": purpose,
+                    "detail_type": detail_type,
+                    "answer_cues": cues,
+                    "estimated_new_character_count": estimate,
+                }
+            )
+        return {"questions": questions}
 
     @staticmethod
     def _configured_failures(input_json: dict[str, Any]) -> int:
@@ -760,6 +862,85 @@ class FakeProvider:
                 revised["show_notes"]["key_points"][-1] = {
                     "text": _clip(added_paragraphs[-1]["text"], 360),
                     "source_refs": list(added_paragraphs[-1]["source_refs"]),
+                }
+            return revised
+
+        if "add_supplemental_material" in parsed.selected_actions and parsed.added_source_ids:
+            revised = deepcopy(parsed.parent_podcast_draft.model_dump(mode="json"))
+            added_ids = set(parsed.added_source_ids)
+            added_segments = [
+                segment
+                for segment in base_input["supplemental_source_segments"]
+                if str(segment["source_id"]) in added_ids
+            ]
+            cited_keys = {
+                (reference["source_id"], reference["source_segment_id"])
+                for unit in [
+                    revised["podcast_script"]["opening"],
+                    *[
+                        paragraph
+                        for section in revised["podcast_script"]["sections"]
+                        for paragraph in section["paragraphs"]
+                    ],
+                    revised["podcast_script"]["closing"],
+                ]
+                for reference in unit["source_refs"]
+            }
+            current_characters = _spoken_script_character_count(revised)
+            maximum_characters = round(
+                parsed.creative_brief.target_duration_minutes
+                * parsed.creative_brief.speaking_rate_chars_per_minute
+                * 1.15
+            )
+            appended: list[dict[str, Any]] = []
+            section_cursor = 0
+            for segment in added_segments:
+                key = (
+                    str(segment["source_id"]),
+                    str(segment["source_segment_id"]),
+                )
+                if key in cited_keys:
+                    continue
+                available_room = maximum_characters - current_characters
+                if available_room <= 0:
+                    break
+                text = _clip(str(segment["text"]), min(600, available_room))
+                if not _clean_text(text):
+                    continue
+                sections = revised["podcast_script"]["sections"]
+                selected_section: dict[str, Any] | None = None
+                for offset in range(len(sections)):
+                    candidate_index = (section_cursor + offset) % len(sections)
+                    if len(sections[candidate_index]["paragraphs"]) < 10:
+                        selected_section = sections[candidate_index]
+                        section_cursor = (candidate_index + 1) % len(sections)
+                        break
+                if selected_section is None:
+                    if len(sections) >= 8:
+                        break
+                    selected_section = {
+                        "title": "补充口述带回的具体细节",
+                        "source_refs": [_source_ref(segment)],
+                        "paragraphs": [],
+                    }
+                    sections.append(selected_section)
+                    section_cursor = 0
+                paragraph = {
+                    "text": text,
+                    "source_refs": [_source_ref(segment)],
+                }
+                selected_section["paragraphs"].append(paragraph)
+                selected_section["source_refs"] = _merge_refs(
+                    list(selected_section["source_refs"]),
+                    list(paragraph["source_refs"]),
+                )[:10]
+                appended.append(paragraph)
+                cited_keys.add(key)
+                current_characters += len("".join(text.split()))
+            if appended:
+                revised["show_notes"]["key_points"][-1] = {
+                    "text": _clip(appended[-1]["text"], 360),
+                    "source_refs": list(appended[-1]["source_refs"]),
                 }
             return revised
 

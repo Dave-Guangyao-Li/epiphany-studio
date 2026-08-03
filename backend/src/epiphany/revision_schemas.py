@@ -19,7 +19,8 @@ from epiphany.schemas import ArtifactView, RunView, SourceReference
 
 LEGACY_DRAFT_IMPROVEMENT_PLAN_VERSION = "draft_improvement_plan_v1"
 DRAFT_IMPROVEMENT_PLAN_VERSION = "draft_improvement_plan_v2_recovery_history"
-DRAFT_REVISION_REQUEST_VERSION = "draft_revision_request_v1"
+LEGACY_DRAFT_REVISION_REQUEST_VERSION = "draft_revision_request_v1"
+DRAFT_REVISION_REQUEST_VERSION = "draft_revision_request_v2_supplemental_interview"
 DRAFT_REVISION_COMPARISON_VERSION = "draft_revision_comparison_v1"
 REVISE_PODCAST_DRAFT = "revise_podcast_draft"
 MAX_LENGTH_RECOVERY_PRIORITY_REFS = 12
@@ -366,12 +367,21 @@ class CreateDraftRevisionRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    version: Literal["draft_revision_request_v1"] = DRAFT_REVISION_REQUEST_VERSION
+    version: Literal[
+        "draft_revision_request_v1",
+        "draft_revision_request_v2_supplemental_interview",
+    ] = DRAFT_REVISION_REQUEST_VERSION
     submission_id: str = Field(min_length=1, max_length=200)
     selected_actions: list[RevisionAction] = Field(min_length=1, max_length=4)
     selected_feedback_artifact_ids: list[str] = Field(default_factory=list, max_length=20)
     selected_gap_codes: list[str] = Field(default_factory=list, max_length=50)
     source_ids: list[str] = Field(default_factory=list, max_length=20)
+    supplemental_interview_plan_artifact_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
+    answered_question_ids: list[str] = Field(default_factory=list, max_length=6)
     target_duration_minutes: Literal[10, 15, 30] | None = None
     revision_instruction: str | None = Field(default=None, min_length=1, max_length=2_000)
 
@@ -382,6 +392,7 @@ class CreateDraftRevisionRequest(BaseModel):
         "selected_actions",
         "selected_feedback_artifact_ids",
         "source_ids",
+        "answered_question_ids",
     )
     @classmethod
     def lists_must_be_unique(cls, value: list[str]) -> list[str]:
@@ -392,6 +403,11 @@ class CreateDraftRevisionRequest(BaseModel):
     @field_validator("revision_instruction")
     @classmethod
     def normalize_optional_instruction(cls, value: str | None) -> str | None:
+        return None if value is None else _normalize_required_text(value)
+
+    @field_validator("supplemental_interview_plan_artifact_id")
+    @classmethod
+    def normalize_optional_plan_id(cls, value: str | None) -> str | None:
         return None if value is None else _normalize_required_text(value)
 
     @model_validator(mode="after")
@@ -405,6 +421,20 @@ class CreateDraftRevisionRequest(BaseModel):
             )
         if ("add_supplemental_material" in actions) != bool(self.source_ids):
             raise ValueError("add_supplemental_material must match source_ids")
+        interview_provenance_present = bool(
+            self.supplemental_interview_plan_artifact_id or self.answered_question_ids
+        )
+        if interview_provenance_present and (
+            "add_supplemental_material" not in actions
+            or self.supplemental_interview_plan_artifact_id is None
+            or not self.answered_question_ids
+        ):
+            raise ValueError(
+                "supplemental interview provenance requires add_supplemental_material, "
+                "one plan artifact, and answered question IDs"
+            )
+        if self.version == LEGACY_DRAFT_REVISION_REQUEST_VERSION and interview_provenance_present:
+            raise ValueError("legacy revision requests cannot carry supplemental interview data")
         if ("lower_target_duration" in actions) != (self.target_duration_minutes is not None):
             raise ValueError("lower_target_duration must match target_duration_minutes")
         if {"reuse_unused_material", "lower_target_duration"} <= actions:
@@ -419,7 +449,10 @@ class DraftRevisionRequestRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    version: Literal["draft_revision_request_v1"] = DRAFT_REVISION_REQUEST_VERSION
+    version: Literal[
+        "draft_revision_request_v1",
+        "draft_revision_request_v2_supplemental_interview",
+    ] = DRAFT_REVISION_REQUEST_VERSION
     submission_id: str
     parent_run_id: str
     child_run_id: str
@@ -430,6 +463,8 @@ class DraftRevisionRequestRecord(BaseModel):
     selected_feedback_artifact_ids: list[str]
     selected_gap_codes: list[str]
     source_ids: list[str]
+    supplemental_interview_plan_artifact_id: str | None = None
+    answered_question_ids: list[str] = Field(default_factory=list, max_length=6)
     target_duration_minutes: Literal[10, 15, 30] | None
     revision_instruction: str | None
 
@@ -441,6 +476,39 @@ class DraftRevisionRequestRecord(BaseModel):
         "parent_draft_artifact_id",
         "parent_quality_report_artifact_id",
     )(_normalize_required_text)
+
+    @field_validator(
+        "selected_actions",
+        "selected_feedback_artifact_ids",
+        "selected_gap_codes",
+        "source_ids",
+        "answered_question_ids",
+    )
+    @classmethod
+    def record_lists_must_be_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("items must be unique")
+        return value
+
+    @field_validator("supplemental_interview_plan_artifact_id")
+    @classmethod
+    def normalize_record_plan_id(cls, value: str | None) -> str | None:
+        return None if value is None else _normalize_required_text(value)
+
+    @model_validator(mode="after")
+    def supplemental_provenance_must_be_complete(self) -> DraftRevisionRequestRecord:
+        provenance_present = bool(
+            self.supplemental_interview_plan_artifact_id or self.answered_question_ids
+        )
+        if provenance_present and (
+            "add_supplemental_material" not in self.selected_actions
+            or self.supplemental_interview_plan_artifact_id is None
+            or not self.answered_question_ids
+        ):
+            raise ValueError("persisted supplemental interview provenance is incomplete")
+        if self.version == LEGACY_DRAFT_REVISION_REQUEST_VERSION and provenance_present:
+            raise ValueError("legacy revision records cannot carry supplemental interview data")
+        return self
 
 
 class CreateDraftRevisionResponse(BaseModel):
@@ -596,6 +664,7 @@ class PodcastRevisionTaskInput(PodcastDraftTaskInput):
     parent_quality_report_artifact_id: str = Field(min_length=1, max_length=200)
     plan_artifact_id: str = Field(min_length=1, max_length=200)
     request_artifact_id: str = Field(min_length=1, max_length=200)
+    supplemental_interview_round: Literal[0, 1, 2] = 0
     parent_podcast_draft: PodcastDraftOutput
     selected_actions: list[RevisionAction] = Field(min_length=1, max_length=4)
     selected_feedback: list[SelectedRevisionFeedback] = Field(
@@ -606,6 +675,7 @@ class PodcastRevisionTaskInput(PodcastDraftTaskInput):
         default_factory=list,
         max_length=50,
     )
+    added_source_ids: list[str] = Field(default_factory=list, max_length=20)
     length_recovery_plan: DraftLengthRecoveryPlan | None = None
     revision_instruction: str | None = Field(default=None, min_length=1, max_length=2_000)
 
@@ -627,6 +697,13 @@ class PodcastRevisionTaskInput(PodcastDraftTaskInput):
             raise ValueError("selected_actions must be unique")
         return value
 
+    @field_validator("added_source_ids")
+    @classmethod
+    def added_source_ids_must_be_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("added_source_ids must be unique")
+        return value
+
     @field_validator("revision_instruction")
     @classmethod
     def normalize_task_instruction(cls, value: str | None) -> str | None:
@@ -645,6 +722,8 @@ class PodcastRevisionTaskInput(PodcastDraftTaskInput):
             raise ValueError("selected feedback artifacts must be unique")
         if len({gap.code for gap in self.selected_quality_gaps}) != len(self.selected_quality_gaps):
             raise ValueError("selected quality gaps must be unique")
+        if self.added_source_ids and "add_supplemental_material" not in actions:
+            raise ValueError("added_source_ids require the add_supplemental_material action")
         if self.length_recovery_plan is not None and "reuse_unused_material" not in actions:
             raise ValueError("a length_recovery_plan requires reuse_unused_material")
         # Compatibility: already-persisted v8 Revision Tasks created before

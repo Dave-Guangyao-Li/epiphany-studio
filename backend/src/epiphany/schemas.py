@@ -61,6 +61,7 @@ class RunView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    project_id: str | None
     parent_run_id: str | None
     workflow_type: str
     workflow_version: str
@@ -75,6 +76,23 @@ class RunView(BaseModel):
     tasks: list[TaskView]
     artifacts: list[ArtifactView]
     model_calls: list[ModelCallView]
+
+
+class RunSummaryView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    project_id: str | None
+    parent_run_id: str | None
+    workflow_type: str
+    workflow_version: str
+    status: str
+    current_step: str | None
+    output_artifact_id: str | None
+    model_call_count: int
+    cancel_requested_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class ResumeRunResponse(BaseModel):

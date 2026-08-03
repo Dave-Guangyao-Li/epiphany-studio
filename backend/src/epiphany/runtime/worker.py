@@ -27,6 +27,9 @@ from epiphany.state_machine import (
     validate_run_transition,
     validate_task_transition,
 )
+from epiphany.supplemental_interview_schemas import (
+    PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW,
+)
 
 logger = logging.getLogger("epiphany.worker")
 
@@ -510,6 +513,10 @@ class Worker:
     def _provider_for(self, invocation: TaskInvocation) -> ModelProvider:
         if invocation.kind == REVIEW_PODCAST_DRAFT and self.reviewer_provider is not None:
             return self.reviewer_provider
+        if invocation.kind == PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW:
+            # The supplemental Interviewer is a generation Agent, not the
+            # advisory Reviewer. It deliberately uses the main provider.
+            return self.provider
         return self.provider
 
     async def run_batch(self, *, limit: int | None = None) -> int:
@@ -546,8 +553,12 @@ class Worker:
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         logger.info("Worker started", extra={"event": "worker.started"})
         try:
-            await self.recover_expired()
             while not stop_event.is_set():
+                # Recovery is deliberately periodic instead of startup-only.
+                # A replacement Worker can start while an old lease is still
+                # valid; that lease may expire a few seconds later and must not
+                # leave the durable Task stuck in ``running`` forever.
+                await self.recover_expired()
                 if await self.run_batch():
                     continue
                 try:

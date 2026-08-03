@@ -1,6 +1,6 @@
 # MVP 路线图
 
-更新时间：2026-07-30
+更新时间：2026-07-31
 
 路线图按可演示的纵向切片推进，不按“先把所有基础设施搭完”推进。
 
@@ -475,28 +475,68 @@ winner、多用户统计或盲评 UI。它同时暴露了一个可以用小切�
 成稿侧报告明显编辑指令泄漏。一次恢复后，产品应提示补充具体素材或降低目标
 时长，而不是继续推荐同一批素材或自动循环扩写。
 
+### M3.9：根据最新稿定向追问，再用回答继续修订
+
+- [x] 只在显式 Revision 重新审稿后仍低于 85% 时长下限时规划补充采访
+- [x] 从最新 Draft 的 opening、正文 Paragraph 与 closing 建立可信 Anchor
+- [x] 每个问题必须绑定 Anchor，并逐字引用最新稿中的具体行文
+- [x] 把问题计划持久化为只读 Artifact；重复读取不调用模型
+- [x] 用户回答以新 Source 保存，并在 versioned Revision Request 中绑定
+  Plan、question ID 与 Source ID
+- [x] 回答 Revision 优先融合新事实，同时保留父稿已有的有效内容
+- [x] 服务端推导轮次并限制最多两轮；达到下限后不再创建 Planner
+- [x] Planner 失败时保留有效 Draft，并生成可追踪的确定性 fallback Plan
+- [x] workflow v9 只用于新的 v2 Revision 子 Run；既有 v8 语义继续可恢复
+- [x] Fake E2E 验证 2,509 → 3,073 → 3,637，并覆盖绕过、幂等、失败回退和
+  第三轮停止
+- [ ] 用受限 DeepSeek 与真人回答验证问题是否真的触发具体记忆
+
+M3.9 不会自动替用户回答，也不会自动创建下一版稿子。每一轮新事实都来自用户
+显式导入的新 Source，每一版稿子都来自显式 Revision 请求。问题 Planner 只负责
+把最新稿的具体缺口变成可回答问题；Editor 和 Reviewer 继续各守自己的职责。
+两轮后仍短时，系统停止规划，交由用户选择继续主动补充或降低目标时长。
+
+至此 M3 的产品闭环冻结。下一阶段不再继续优化 Prompt，而是把已有 Run、Task、
+ModelCall、Draft、质量报告、问题计划和 Revision lineage 放进可回放 Trace 与
+最小 UI。详细实现与验证见
+[M3.9 学习章节](learning/m3-9-draft-aware-supplemental-interview.zh-CN.md)。
+
 ## M4：可靠性与 Trace
 
-- [ ] timeout / bounded retry
-- [ ] idempotency key
-- [ ] lease / fencing
-- [ ] startup recovery
-- [ ] cancel propagation
-- [ ] SSE replay + live stream
-- [ ] 故障注入测试
+- [x] timeout / bounded retry
+- [x] idempotency key
+- [x] lease / fencing
+- [x] startup recovery
+- [x] cancel propagation
+- [x] SSE replay + live stream
+- [x] 故障注入测试
 
 演示：运行中杀掉 Worker，重启后恢复；取消父 Run 后迟到结果无法提交。
 
+可靠性能力不是为了 UI 临时补出来的：M1—M3 已持续覆盖 timeout、retry、
+lease、fencing、恢复、取消传播与幂等提交。本阶段补齐可重放 SSE：服务端先按
+Event `sequence` 从 SQLite 回放，再轮询新事件；空闲连接发送 heartbeat，Run
+进入 `succeeded / failed / cancelled` 后结束。前端同时保留 HTTP replay 和
+定时状态刷新，因此 SSE 断开不会改变数据库真相。相关实现与本地验证见
+[M4/M5 本地工作台学习章节](learning/m4-m5-local-console.zh-CN.md)。
+
 ## M5：最小 Web UI 与部署
 
-- [ ] Project/Source 页面
-- [ ] Run trace 页面
+- [x] Project/Source 页面
+- [x] Run trace 页面
 - [ ] Scaffold 编辑与恢复
 - [ ] Dockerfile
 - [ ] 单机部署
 - [ ] 健康检查、结构化日志、备份说明
 
-演示：从浏览器完整走通一次创作流程。
+当前本地 Console 已能创建 Project、导入/查看 Source、配置并创建 Run，随后
+查看 Event、Task、Artifact、ModelCall、错误、费用和 Markdown 输出；在人工
+检查点还能粘贴补充口述并 Resume。Project 创建 Run 使用调用方稳定的
+`submission_id` 防止双击或网络重试产生两个 Run。Scaffold 仍然只能查看/导出，
+还没有可视化编辑器；Docker、单机部署和生产备份也没有完成，因此不提前勾选。
+
+演示：在本地浏览器从 Project/Source 走到 Run Trace，并完成一次人工暂停与
+恢复。线上部署留在后续独立切片。
 
 ## Later
 

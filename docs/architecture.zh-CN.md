@@ -2,7 +2,7 @@
 
 状态：Draft
 
-日期：2026-07-30
+日期：2026-07-31
 
 ## 1. 目标
 
@@ -17,11 +17,12 @@
 ## 2. 系统边界
 
 ```text
-Web UI
+Local Web Console (React + Vite)
   |
-  | HTTP + SSE
+  | /api proxy: HTTP + SSE
   v
 FastAPI
+  |- Project Service
   |- Run Service
   |- Source Service
   |- Event Service
@@ -34,6 +35,11 @@ FastAPI
           +--> Hosted Model Provider
           +--> Fake Provider
 ```
+
+本地 Console 是现有后端契约的可视化入口，不保存第二份业务状态。Project、
+Source、Run、Task、Artifact、Event 与 ModelCall 的真相仍在 SQLite；浏览器
+刷新后会重新读取它们。Vite 开发服务器只把 `/api` 代理到本机 FastAPI，避免
+为了本地开发额外引入网关或跨域配置。
 
 ## 3. 编排与调度的边界
 
@@ -91,14 +97,20 @@ optional explicit revision
   -> when reusing material, attach exact spoken-length Recovery Plan
   -> revise_podcast_draft (serial root Revision Editor)
   -> metrics + Reviewer + code-owned quality report
+  -> if still short, build trusted anchors from the latest spoken Draft
+  -> plan_draft_supplemental_interview (serial root Planner)
+  -> persist 3-6 anchored questions; completed Draft remains the Run output
+  -> user imports answers as new factual Sources
+  -> user explicitly creates the next answer-driven child Revision
   -> lazily persist parent/revision comparison
-  -> human chooses; no automatic winner
+  -> stop at the duration floor or after two interview rounds
+  -> human chooses; no automatic winner or hidden rewrite loop
 ```
 
 其中 `prepare_sources`、`fan_in` 和状态更新是普通代码；
 `timeline_research`、`theme_research`、`build_interview_scaffold`、
 `build_podcast_draft`、`revise_podcast_draft` 和
-`review_podcast_draft` 才调用模型。
+`review_podcast_draft`、`plan_draft_supplemental_interview` 才调用模型。
 `assess_material_readiness`、写作风格 profile、Improvement Plan 和新旧稿
 comparison 都不调用模型。
 
@@ -240,7 +252,9 @@ winner。这个比较是帮助人工判断的证据，不是自动发布条件�
 Interviewer；v2 仍在采访脚手架完成后成功；v3 Resume 后仍按 M3.1 语义
 确定性结束，不产生 Editor 调用；没有 Creative Brief 的请求仍走 v4；
 显式关闭质量审阅的 Brief 请求走 v5；旧 v6/v7 继续按各自冻结合同恢复；
-新质量与 Revision 路径走 v8。M3.6 通过 Alembic
+新建初始质量 Run 和 legacy Revision Request v1 继续走 v8；当前
+`draft_revision_request_v2_supplemental_interview` 创建的 Revision 子 Run
+走 v9。M3.6 通过 Alembic
 `0004_run_lineage` 只给 `runs` 增加可空 `parent_run_id`、外键和索引。
 
 ## 5. Subagent 定义
@@ -317,12 +331,46 @@ M3.8 没有增加新的 Agent、状态机循环、API 或数据库表。它收�
 `style.editorial_instruction_leakage` 报告明显的元编辑语句。普通“最后一个”
 不再被误判为列举，只有“最后，”等带列举标记的表达才计入该启发式。
 
+M3.9 增加一个有边界的 Supplemental Interviewer，但没有增加动态 Agent
+拓扑或数据库表。它只在 workflow-v9 的 Revision 子 Run 已完成 Editor、
+Reviewer 和质量报告、且口播仍低于 85% 时长下限时排队：
+
+```text
+latest valid Draft + latest Quality Report
+  -> deterministic spoken anchors (maximum 24)
+  -> plan_draft_supplemental_interview
+  -> validate exact anchor quote and question contract
+  -> supplemental_interview_plan Artifact
+  -> Run succeeded with the same Draft output
+```
+
+Anchor 只来自最新 Draft 的 opening、正文 Paragraph 和 closing，保存稳定 path、
+逐字 excerpt 与该段已验证的 Source references。Planner 输出 3—6 个开放问题；
+每个问题必须引用一个允许的 `anchor_id`，且 `anchor_quote` 必须是对应 excerpt
+的逐字子串。模型不能自造 question ID；提交 Artifact 前由代码稳定注入
+`q1`—`q6`。
+
+用户回答仍通过普通 Source/SourceSegment 保存。下一次显式 Revision Request
+把 Plan Artifact ID、回答的 question IDs 和新增 Source IDs 一起持久化，
+`PodcastRevisionTaskInput.added_source_ids` 让 Editor 优先融合这些新事实并
+保留父稿有效内容。服务端根据 lineage 推导 0/1/2 轮，客户端不能伪造轮次。
+达到时长下限或完成两轮后都不会再创建 Planner。
+
+Planner 是增益步骤：最终失败或输出不合法时，Task 保留失败状态和错误码，普通
+代码从不同的最新 Draft Anchor 生成
+`generation_mode=deterministic_fallback` 的问题计划。有效 Draft、质量报告和
+Run 成功状态不受影响。整个阶段复用现有 `runs`、`tasks`、`artifacts`、
+`model_calls`、`events` 和 Source 表，因此不需要新的 migration。
+
 ## 6. 持久化模型
 
 ### `runs`
 
 - `id`
+- `project_id`（可为空，Project 页面创建的 Run 必须绑定）
 - `parent_run_id`（普通 Run 为空；Revision 子 Run 指向父 Run）
+- `submission_id`（Project 内创建 Run 的调用方幂等键）
+- `request_fingerprint`（同一幂等键是否仍是同一请求的摘要）
 - `workflow_type`
 - `workflow_version`
 - `status`
@@ -333,6 +381,11 @@ M3.8 没有增加新的 Agent、状态机循环、API 或数据库表。它收�
 - `cancel_requested_at`
 - `created_at`
 - `updated_at`
+
+`(project_id, submission_id)` 有唯一约束。浏览器双击或网络重试提交相同 key 与
+相同 payload 时，服务端回读原 Run，并返回
+`X-Idempotent-Replay: true`；同 key 换 payload 返回 409。Revision 子 Run
+继承父 Run 的 `project_id`，因此整条 lineage 仍出现在同一个 Project 历史里。
 
 ### `tasks`
 
@@ -385,7 +438,10 @@ M3.8 没有增加新的 Agent、状态机循环、API 或数据库表。它收�
 
 ### 领域对象
 
-- `projects`（M3 前补充）
+- `projects`
+  - 本地创作工作区的标题、描述和时间戳
+- `project_sources`
+  - Project 与全局去重 Source 的多对多关联；复合主键防止重复关联
 - `sources`
   - 规范化全文、SHA-256、类型、metadata、字符数
 - `source_segments`
@@ -564,6 +620,9 @@ exact quote 和引用范围；模型不能返回最终 decision。本阶段不�
 
 正常 v4/v5 都需要四次 Provider 调用，正常 v6/v7/v8 父质量 Run 需要五次；
 一次 v8 Revision 子 Run 只运行 Revision Editor 和 Reviewer，正常需要两次。
+新的 v9 Revision 子 Run 在达到时长下限时仍是两次；仍短且满足追问条件时，
+再运行一次 Supplemental Interviewer，因此正常上限为三次。读取已经持久化的
+问题 Plan、导入回答 Source 和提交 Revision 请求本身都不调用模型。
 将单 Run 预算设为三时，Editor 调用会在
 进入 Provider 以前以 `model_call_limit_exceeded` 被拒绝。Editor retry、
 timeout、lease、fencing、startup recovery 和 cancel 复用同一 Worker 机制；
@@ -578,8 +637,11 @@ timeout、lease、fencing、startup recovery 和 cancel 复用同一 Worker 机�
 
 ```text
 POST /projects
+GET  /projects
+GET  /projects/{id}
 POST /projects/{id}/sources
-POST /projects/{id}/episode-runs
+POST /projects/{id}/runs
+GET  /runs?project_id={id}
 GET  /runs/{id}
 GET  /runs/{id}/exports/interview-scaffold.md
 GET  /runs/{id}/exports/podcast-draft.md
@@ -591,14 +653,37 @@ GET  /runs/{id}/quality-feedback
 GET  /runs/{id}/improvement-plan
 POST /runs/{id}/revisions
 GET  /runs/{child_id}/revision-comparison
+GET  /runs/{id}/supplemental-interview-plan
 POST /runs/{id}/resume
 POST /runs/{id}/cancel
 GET  /runs/{id}/events
 GET  /runs/{id}/events/stream
 ```
 
-SSE 用于低成本实时显示。客户端断线后先从数据库按 `sequence` 补事件，
-再连接实时流。SSE 不是状态真相。
+SSE 用于低成本实时显示，但不是状态真相。每个 durable Event 在同一 Run 内有
+单调递增的 `sequence`。连接建立后，服务端先返回 `sequence > cursor` 的历史
+Event，再以短轮询读取 SQLite 中的新 Event；客户端可以用 `after` query 或
+`Last-Event-ID` 恢复，服务端取两者较大值，避免重复倒退。浏览器按 sequence
+排序和去重，因此 HTTP replay 与 SSE 同时看到同一 Event 也只展示一次。
+
+空闲且非终态的 Run 每 15 秒发送 SSE 注释 heartbeat，维持代理连接但不伪造
+领域 Event。Run 进入 `succeeded`、`failed` 或 `cancelled` 后，服务端在发送完
+剩余 durable Event 后正常结束流。UI 还会定时执行 HTTP refresh；断流只改变
+连接提示，不会改变 Run 状态，也不会触发模型调用。
+
+### 本地 Console 的职责边界
+
+- `/projects`：创建、列出并重新打开本地 Project；
+- `/projects/{id}`：导入/查看 Source、配置 Run、查看不可变 Run 历史；
+- `/runs/{id}`：展示 Event Timeline、Task、Artifact、ModelCall、错误与费用；
+- 在人工检查点把文字保存为新 Source，再显式 Resume；
+- 查看 Scaffold、Draft、Show Notes、质量报告，并显式提交反馈或 Revision。
+
+Console 当前不是部署后的多用户产品：没有登录、权限、协作、可视化 Scaffold
+编辑器、音频上传、STT，也不承担数据库备份。Docker 与单机部署仍属于未完成的
+M5 切片。
+
+### 输出与审稿 API
 
 Scaffold 导出接受 `waiting_for_user` 或 `succeeded`，并从该 Run 已完成的
 `build_interview_scaffold_result` Artifact 读取内容；它不依赖最终
@@ -640,6 +725,13 @@ Recovery Plan 写进子 Run Task input；Schema 会重新验证目标时长、�
 子 Run 的 Improvement Plan 会记录已经发生过一次时长恢复；如果仍未达标，
 `reuse_unused_material` 仍可供人工查看但不再推荐，默认下一步是补材料或降低
 时长。读取这个 Plan 不会排队第二个 Revision。
+
+M3.9 的 Supplemental Interview Plan 也保持读取与执行分离。
+`GET /runs/{id}/supplemental-interview-plan` 只返回已提交、且仍绑定该 Run
+最新 Draft 和 Quality Report 的 Plan；Run 不存在时返回 404，Run 尚未完成、
+Plan 尚未就绪或 provenance 已过期时返回 409。重复 GET 不写 Artifact、
+不排队 Task，也不增加 ModelCall。真正的新模型工作只能由用户带 Plan、
+question IDs 和回答 Source IDs 显式提交下一次 Revision 后发生。
 
 写作样本不是事实 Source 通道。即便被选片段为了可恢复执行而持久化在受限
 Editor/Reviewer Task input 中，也不能进入 `allowed_source_refs`、最终引用
@@ -761,6 +853,15 @@ M3.8 不新增事件名。`workflow.draft_revision.requested` 复用现有 Event
 `length_recovery_missing_to_minimum` 和
 `length_recovery_priority_source_count` 等状态与计数字段；不记录 Source
 正文、Prompt 或 Draft 正文。
+
+M3.9 新增持久事件
+`workflow.draft_supplemental_interview.queued`、
+`workflow.draft_supplemental_interview.completed`、
+`workflow.draft_supplemental_interview.unavailable` 与
+`workflow.draft_supplemental_interview.limit_reached`。只读 API 另写操作日志
+`workflow.draft_supplemental_interview.plan_read`。这些记录只包含 Run、
+Task、Draft/Report/Plan Artifact ID、轮次、时长缺口、问题数量和 generation
+mode，不包含 Draft 原文、问题全文、回答正文或 Prompt。
 
 ## 13. 升级触发条件
 
