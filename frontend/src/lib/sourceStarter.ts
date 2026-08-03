@@ -69,7 +69,9 @@ export function sourceStarterSteps(
     (run?.model_calls?.length ?? 0) > 0 || saw(events, "model.call.started");
   const modelCompleted =
     (run?.model_calls?.some((call) => call.status === "succeeded") ?? false) ||
-    saw(events, "model.call.completed");
+    events.some((event) =>
+      event.type === "model.call.completed" && event.payload.status === "succeeded"
+    );
   const generationStarted =
     modelStarted ||
     task?.status === "running" ||
@@ -99,13 +101,13 @@ export function sourceStarterSteps(
       key: "generate",
       label: "模型生成",
       detail: "只生成起步草稿，不会直接保存为 Source",
-      status: taskFailed || (runFailed && generationStarted)
-        ? "failed"
-        : generationFinished
+      status: generationFinished
           ? "complete"
-          : generationStarted
-            ? "active"
-            : "pending",
+          : taskFailed || (runFailed && generationStarted)
+            ? "failed"
+            : generationStarted
+              ? "active"
+              : "pending",
     },
     {
       key: "validate",

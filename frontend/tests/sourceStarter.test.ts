@@ -73,6 +73,21 @@ describe("source starter helpers", () => {
     ]);
   });
 
+  it("separates a successful paid generation from failed strict validation", () => {
+    const run = {
+      status: "failed",
+      tasks: [{ kind: "build_source_starter", status: "failed" }],
+      artifacts: [],
+      model_calls: [{ status: "succeeded" }],
+    } as unknown as RunView;
+    expect(sourceStarterSteps(run, [], null).map((step) => step.status)).toEqual([
+      "complete",
+      "complete",
+      "failed",
+      "pending",
+    ]);
+  });
+
   it("completes the human-confirmation step only from persisted confirmation evidence", () => {
     const run = {
       status: "succeeded",

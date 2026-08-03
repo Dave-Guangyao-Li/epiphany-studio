@@ -309,16 +309,23 @@ async def test_source_starter_rejects_live_inferred_first_person_failure_without
         )
         run_id = created.json()["id"]
 
-        assert await app.state.worker.run_until_idle() == 1
+        assert await app.state.worker.run_until_idle() == 2
         failed = (await client.get(f"/runs/{run_id}")).json()
 
         assert failed["status"] == "failed"
-        assert failed["tasks"][0]["error_code"] == "task_output_invalid"
+        assert failed["tasks"][0]["error_code"] == ("source_starter_unsupported_first_person")
         assert failed["tasks"][0]["error_message"] == (
-            "model output failed strict validation (task_output_invalid)"
+            "model output failed strict validation (source_starter_unsupported_first_person)"
         )
         assert UnsupportedFirstPersonSourceStarterProvider.leaked_assertion not in str(failed)
         assert "耳压" not in str(failed)
+        assert [call["status"] for call in failed["model_calls"]] == [
+            "succeeded",
+            "succeeded",
+        ]
+        assert [
+            event["type"] for event in (await client.get(f"/runs/{run_id}/events")).json()
+        ].count("task.retry_scheduled") == 1
 
     await app.state.database.close()
 
@@ -509,11 +516,23 @@ def test_source_starter_prompt_preserves_unknowns_and_forbids_fabrication() -> N
     user = prompt.messages[1]["content"]
     assert "不得编造用户的第一人称经历" in system
     assert "每一个“我”" in system
-    assert "逐字复用" in system
+    assert "只把省略/第三人称主语换成“我”" in system
     assert "[待补充：……]" in system
     assert "[待核实：……]" in system
     assert "潜水学习" in user
     assert "想探索一个陌生领域" in user
+
+
+def test_source_starter_repair_prompt_prioritizes_grounding_over_prose() -> None:
+    prompt = build_source_starter_prompt(
+        task_input=_validation_task_input(),
+        repair_attempt=True,
+    )
+
+    user = prompt.messages[1]["content"]
+    assert "自动安全修复重试" in user
+    assert "不要追求文章的连贯、生动或完整" in user
+    assert "[待补充：……]" in user
 
 
 def _validation_task_input(**overrides: object) -> dict[str, object]:
@@ -586,6 +605,86 @@ def test_source_starter_guard_allows_only_grounded_questions_and_placeholders(
     )
 
     assert result["starter_text"] == starter_text
+
+
+@pytest.mark.parametrize(
+    ("description", "intent", "starter_text"),
+    [
+        (
+            "2025年从成都调到上海工作。",
+            "2025年9月从成都搬到上海。",
+            "2025年9月，我从成都搬到上海。",
+        ),
+        (
+            "她最初住在临时公寓。",
+            "临时公寓只有一张折叠桌。",
+            "我最初住在临时公寓。",
+        ),
+        (
+            "她下班后常绕远路走回家。",
+            "下班后故意多走二十分钟。",
+            "下班后我故意多走二十分钟。",
+        ),
+    ],
+)
+def test_source_starter_guard_allows_grounded_subject_projection(
+    description: str,
+    intent: str,
+    starter_text: str,
+) -> None:
+    task_input = _validation_task_input()
+    task_input["project"] = {
+        "project_id": "proj_guard",
+        "title": "搬到上海的前三个月",
+        "description": description,
+    }
+    task_input["intent"] = intent
+    candidate = _validation_candidate(starter_text)
+    candidate["source_title"] = "我为什么总绕远路回家"
+    task_input["source_title"] = candidate["source_title"]
+
+    result = validate_source_starter_output(
+        task_input=task_input,
+        content=candidate,
+    )
+
+    assert result["starter_text"] == starter_text
+
+
+def test_source_starter_guard_rejects_new_detail_during_subject_projection() -> None:
+    task_input = _validation_task_input(intent="2025年9月从成都搬到上海。")
+    unsupported = "我从成都搬到上海后每天都很孤独。"
+
+    with pytest.raises(ValueError, match="unsupported first-person assertion"):
+        validate_source_starter_output(
+            task_input=task_input,
+            content=_validation_candidate(unsupported),
+        )
+
+
+def test_source_starter_guard_does_not_project_a_title_question_into_fact() -> None:
+    task_input = _validation_task_input(
+        project={
+            "project_id": "proj_guard",
+            "title": "我为什么会被潜水吸引？",
+            "description": "想探索一个陌生领域。",
+        },
+        source_title="我为什么会被潜水吸引？",
+        intent=None,
+    )
+    candidate = _validation_candidate("我会被潜水吸引。")
+    candidate["source_title"] = task_input["source_title"]
+
+    with pytest.raises(ValueError, match="unsupported first-person assertion"):
+        validate_source_starter_output(task_input=task_input, content=candidate)
+
+
+def test_source_starter_guard_rejects_invented_direct_quotation() -> None:
+    task_input = _validation_task_input(intent="便利店店员记住常买无糖乌龙茶。")
+    candidate = _validation_candidate("店员问：“还是这个？”")
+
+    with pytest.raises(ValueError, match="unsupported direct quotation"):
+        validate_source_starter_output(task_input=task_input, content=candidate)
 
 
 def test_source_starter_guard_allows_neutral_exploration_outline() -> None:

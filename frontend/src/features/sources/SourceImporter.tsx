@@ -51,8 +51,19 @@ function starterFailure(run: RunView): Error | null {
     task.kind === "build_source_starter" &&
     ["failed", "cancelled", "timed_out"].includes(task.status)
   );
+  const safeValidationMessages: Record<string, string> = {
+    source_starter_unsupported_first_person:
+      "模型把未明确提供的内容写成了第一人称事实。请补充真实锚点后重新生成，或改用“探索提纲”。",
+    source_starter_unsupported_direct_quote:
+      "模型补写了你没有提供的直接引语。安全校验已拦截，请重新生成。",
+    source_starter_unverified_external_fact:
+      "模型写入了没有标记“待核实”的外部事实。安全校验已拦截，请重新生成。",
+  };
+  const message = failedTask?.error_code
+    ? safeValidationMessages[failedTask.error_code]
+    : null;
   return new Error(
-    failedTask?.error_message ||
+    message || failedTask?.error_message ||
       (run.status === "cancelled"
         ? "这次 AI 起步 Run 已取消，正文和表单内容仍然保留。"
         : "这次 AI 起步 Run 没有完成，正文和表单内容仍然保留。"),

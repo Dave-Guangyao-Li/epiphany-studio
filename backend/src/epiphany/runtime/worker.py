@@ -21,7 +21,10 @@ from epiphany.runtime.providers import (
     RetryableProviderError,
     TaskInvocation,
 )
-from epiphany.source_starter_schemas import BUILD_SOURCE_STARTER
+from epiphany.source_starter_schemas import (
+    BUILD_SOURCE_STARTER,
+    SourceStarterOutputValidationError,
+)
 from epiphany.state_machine import (
     RunStatus,
     TaskStatus,
@@ -47,7 +50,19 @@ class SanitizedTaskOutputError(ValueError):
         super().__init__(f"model output failed strict validation ({code})")
 
 
-def _sanitized_task_output_error(error: Exception) -> SanitizedTaskOutputError:
+class RetryableSanitizedTaskOutputError(RetryableProviderError):
+    """A bounded model-output repair that preserves only a safe rule code."""
+
+    def __init__(self, *, code: str) -> None:
+        self.code = code
+        super().__init__(f"model output failed strict validation ({code})")
+
+
+def _sanitized_task_output_error(
+    error: Exception,
+    *,
+    retryable: bool = False,
+) -> SanitizedTaskOutputError | RetryableSanitizedTaskOutputError:
     raw_code = getattr(error, "code", "task_output_invalid")
     code = raw_code if isinstance(raw_code, str) else "task_output_invalid"
     if (
@@ -56,7 +71,8 @@ def _sanitized_task_output_error(error: Exception) -> SanitizedTaskOutputError:
         or any(character != "_" and not character.isalnum() for character in code)
     ):
         code = "task_output_invalid"
-    return SanitizedTaskOutputError(code=code)
+    error_type = RetryableSanitizedTaskOutputError if retryable else SanitizedTaskOutputError
+    return error_type(code=code)
 
 
 class Worker:
@@ -516,7 +532,16 @@ class Worker:
                 content=result.content,
             )
         except Exception as error:
-            await self.fail(invocation, _sanitized_task_output_error(error))
+            await self.fail(
+                invocation,
+                _sanitized_task_output_error(
+                    error,
+                    retryable=(
+                        invocation.kind == BUILD_SOURCE_STARTER
+                        and isinstance(error, SourceStarterOutputValidationError)
+                    ),
+                ),
+            )
             return
 
         try:

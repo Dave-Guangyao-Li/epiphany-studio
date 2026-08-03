@@ -147,9 +147,12 @@ class DeepSeekProvider:
 
     async def generate(self, invocation: TaskInvocation) -> ProviderResult:
         if invocation.kind == BUILD_SOURCE_STARTER:
-            prompt = build_source_starter_prompt(task_input=invocation.input_json)
+            prompt = build_source_starter_prompt(
+                task_input=invocation.input_json,
+                repair_attempt=invocation.attempt > 1,
+            )
             max_tokens = self.max_tokens
-            temperature = 0.3
+            temperature = 0.0 if invocation.attempt > 1 else 0.3
         elif invocation.kind == PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW:
             prompt = build_supplemental_interview_prompt(
                 task_input=invocation.input_json,

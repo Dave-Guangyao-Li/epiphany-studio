@@ -15,6 +15,14 @@ SourceStarterMode = Literal["exploration_outline", "starter_draft"]
 SourceStarterSourceType = Literal["journal", "podcast_draft", "other"]
 
 
+class SourceStarterOutputValidationError(ValueError):
+    """A safe validation failure category that never embeds generated text."""
+
+    def __init__(self, *, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
 class CreateSourceStarterRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -148,6 +156,9 @@ _EXTERNAL_FACT_PATTERN = re.compile(
     r"[^。！？!?\n]{0,36}(?:表明|显示|规定|要求|建议|证明|必须|通常|一般|会导致))|"
     r"(?:一定会|必然会|绝对安全|最安全|成功率|风险率)"
 )
+_DIRECT_QUOTE_PATTERN = re.compile(
+    r"(?:“([^”\n]{1,120})”|「([^」\n]{1,120})」|『([^』\n]{1,120})』)"
+)
 _QUESTION_TOKENS = (
     "为什么",
     "是否",
@@ -235,6 +246,35 @@ def _is_verbatim_supported(*, clause: str, inputs: tuple[str, ...]) -> bool:
     return len(normalized) > 1 and any(normalized in input_text for input_text in inputs)
 
 
+def _is_subject_projection_supported(*, clause: str, inputs: tuple[str, ...]) -> bool:
+    """Allow an explicitly supplied fact to be written in the user's voice.
+
+    Project descriptions and intents often omit the subject (for example,
+    ``2025年9月从成都搬到上海``) or describe a synthetic/user persona in
+    third person. A starter draft should be able to turn that exact predicate
+    into ``我从成都搬到上海`` without treating the pronoun change as a new
+    autobiographical fact. The predicate itself must still occur verbatim in a
+    server-snapshotted input, so this does not permit invented details or
+    paraphrased claims.
+    """
+
+    normalized = clause.strip("《》〈〉「」『』“”'\"() ")
+    if not normalized.startswith("我"):
+        return False
+    predicate = normalized.removeprefix("我").strip()
+    return len(predicate) > 1 and any(predicate in input_text for input_text in inputs)
+
+
+def _subject_projection_inputs(parsed_input: SourceStarterTaskInput) -> tuple[str, ...]:
+    """Facts may be projected from prose context, never from a title alone."""
+
+    return tuple(
+        value
+        for value in (parsed_input.project.description, parsed_input.intent)
+        if value and "?" not in value and "？" not in value
+    )
+
+
 def _sentences(value: str) -> list[str]:
     return [
         sentence.strip()
@@ -247,6 +287,7 @@ def _reject_unsupported_first_person_assertions(
     *, value: str, parsed_input: SourceStarterTaskInput, field: str
 ) -> None:
     inputs = _server_snapshotted_text(parsed_input)
+    projection_inputs = _subject_projection_inputs(parsed_input)
     sentences = _sentences(_strip_placeholders(value))
     checked_fragment_index = 0
     for sentence in sentences:
@@ -257,9 +298,17 @@ def _reject_unsupported_first_person_assertions(
                 continue
             if _is_verbatim_supported(clause=clause, inputs=inputs):
                 continue
-            raise ValueError(
-                "source starter output contained an unsupported first-person assertion "
-                f"({field} fragment {checked_fragment_index})"
+            if _is_subject_projection_supported(
+                clause=clause,
+                inputs=projection_inputs,
+            ):
+                continue
+            raise SourceStarterOutputValidationError(
+                code="source_starter_unsupported_first_person",
+                message=(
+                    "source starter output contained an unsupported first-person assertion "
+                    f"({field} fragment {checked_fragment_index})"
+                ),
             )
 
 
@@ -271,40 +320,62 @@ def _reject_bounded_inventions(
     exploration_outline: bool,
 ) -> None:
     inputs = _server_snapshotted_text(parsed_input)
+    for quote_index, quote_match in enumerate(_DIRECT_QUOTE_PATTERN.finditer(value), start=1):
+        quote = next(group for group in quote_match.groups() if group is not None)
+        if not any(quote in input_text for input_text in inputs):
+            raise SourceStarterOutputValidationError(
+                code="source_starter_unsupported_direct_quote",
+                message=(
+                    "source starter output contained an unsupported direct quotation "
+                    f"({field} quotation {quote_index})"
+                ),
+            )
     for index, sentence in enumerate(_sentences(value), start=1):
         visible = _strip_placeholders(sentence).strip()
         if not visible:
             continue
         if _USER_HISTORY_PATTERN.search(visible):
-            raise ValueError(
-                "source starter output contained an unsupported user-history assertion "
-                f"({field} fragment {index})"
+            raise SourceStarterOutputValidationError(
+                code="source_starter_unsupported_user_history",
+                message=(
+                    "source starter output contained an unsupported user-history assertion "
+                    f"({field} fragment {index})"
+                ),
             )
         concrete_first = _SECOND_PERSON_CONCRETE_FIRST_PATTERN.search(visible)
         if concrete_first and not _is_verbatim_supported(
             clause=concrete_first.group(0), inputs=inputs
         ):
-            raise ValueError(
-                "source starter output contained an unsupported personal-history "
-                f"presupposition ({field} fragment {index})"
+            raise SourceStarterOutputValidationError(
+                code="source_starter_history_presupposition",
+                message=(
+                    "source starter output contained an unsupported personal-history "
+                    f"presupposition ({field} fragment {index})"
+                ),
             )
         if (
             exploration_outline
             and _OMITTED_HISTORY_PATTERN.search(visible)
             and not _is_verbatim_supported(clause=visible, inputs=inputs)
         ):
-            raise ValueError(
-                "source starter exploration outline contained an unsupported "
-                f"personal-history assertion ({field} fragment {index})"
+            raise SourceStarterOutputValidationError(
+                code="source_starter_omitted_history",
+                message=(
+                    "source starter exploration outline contained an unsupported "
+                    f"personal-history assertion ({field} fragment {index})"
+                ),
             )
         if (
             _EXTERNAL_FACT_PATTERN.search(visible)
             and "[待核实：" not in sentence
             and "[待核实:" not in sentence
         ):
-            raise ValueError(
-                "source starter output contained an unverified external factual "
-                f"assertion ({field} fragment {index})"
+            raise SourceStarterOutputValidationError(
+                code="source_starter_unverified_external_fact",
+                message=(
+                    "source starter output contained an unverified external factual "
+                    f"assertion ({field} fragment {index})"
+                ),
             )
 
 
@@ -334,14 +405,21 @@ def _validate_user_visible_safety(
 
     for index, question in enumerate(parsed.questions, start=1):
         if not question.rstrip().endswith(("?", "？")):
-            raise ValueError(
-                f"source starter question was not phrased as a question (questions item {index})"
+            raise SourceStarterOutputValidationError(
+                code="source_starter_question_invalid",
+                message=(
+                    "source starter question was not phrased as a question "
+                    f"(questions item {index})"
+                ),
             )
     for index, uncertainty in enumerate(parsed.uncertainties, start=1):
         if not any(marker in uncertainty for marker in _UNCERTAINTY_MARKERS):
-            raise ValueError(
-                "source starter uncertainty did not identify an unknown "
-                f"(uncertainties item {index})"
+            raise SourceStarterOutputValidationError(
+                code="source_starter_uncertainty_invalid",
+                message=(
+                    "source starter uncertainty did not identify an unknown "
+                    f"(uncertainties item {index})"
+                ),
             )
 
 
@@ -353,10 +431,19 @@ def validate_source_starter_output(
     parsed_input = SourceStarterTaskInput.model_validate(task_input)
     parsed = SourceStarterCandidate.model_validate(content)
     if parsed.mode != parsed_input.mode:
-        raise ValueError("source starter output mode did not match the task")
+        raise SourceStarterOutputValidationError(
+            code="source_starter_mode_mismatch",
+            message="source starter output mode did not match the task",
+        )
     if parsed.source_type != parsed_input.source_type:
-        raise ValueError("source starter output source_type did not match the task")
+        raise SourceStarterOutputValidationError(
+            code="source_starter_type_mismatch",
+            message="source starter output source_type did not match the task",
+        )
     if parsed.source_title != parsed_input.source_title:
-        raise ValueError("source starter output source_title did not match the task")
+        raise SourceStarterOutputValidationError(
+            code="source_starter_title_mismatch",
+            message="source starter output source_title did not match the task",
+        )
     _validate_user_visible_safety(parsed=parsed, parsed_input=parsed_input)
     return parsed.model_dump(mode="json")
