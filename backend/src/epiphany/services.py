@@ -66,8 +66,10 @@ from epiphany.revision_schemas import (
     DraftRevisionComparisonRecord,
     DraftRevisionRequestRecord,
     PodcastRevisionTaskInput,
+    build_draft_length_recovery_plan,
     build_draft_revision_candidate_summary,
     build_draft_revision_comparison,
+    duration_character_bounds,
 )
 from epiphany.runtime.orchestrator import (
     EDITOR_RESEARCH_WORKFLOW_VERSION,
@@ -687,6 +689,11 @@ class RunService:
                             writing_style_context_available=(
                                 _writing_style_context_is_ready(editor_task.input_json)
                             ),
+                            prior_length_recovery_attempted=(
+                                draft.kind == f"{REVISE_PODCAST_DRAFT}_result"
+                                and "reuse_unused_material"
+                                in editor_task.input_json.get("selected_actions", [])
+                            ),
                         )
                     except (DraftImprovementPlanInputError, KeyError) as error:
                         raise DraftImprovementPlanNotReady(
@@ -701,6 +708,9 @@ class RunService:
                     )
                     session.add(artifact)
                     await session.flush()
+                    minimum_characters, _maximum_characters = duration_character_bounds(
+                        plan.duration.target_script_character_count
+                    )
                     await append_event(
                         session,
                         run_id=run.id,
@@ -714,12 +724,19 @@ class RunService:
                             "missing_script_character_count": (
                                 plan.duration.missing_script_character_count
                             ),
+                            "missing_to_minimum_character_count": max(
+                                0,
+                                minimum_characters - plan.duration.actual_script_character_count,
+                            ),
                             "unused_factual_segment_count": (
                                 plan.material.unused_factual_segment_count
                             ),
                             "targeted_question_count": len(plan.targeted_questions),
                             "writing_style_context_available": (
                                 plan.writing_style_context_available
+                            ),
+                            "prior_length_recovery_attempted": (
+                                plan.prior_length_recovery_attempted
                             ),
                         },
                     )
@@ -731,6 +748,9 @@ class RunService:
                     ) from error
                 artifact_view = ArtifactView.model_validate(artifact)
 
+        minimum_characters, _maximum_characters = duration_character_bounds(
+            plan.duration.target_script_character_count
+        )
         logger.info(
             "Draft improvement plan ready",
             extra={
@@ -739,7 +759,12 @@ class RunService:
                 "artifact_id": artifact_view.id,
                 "duration_resolution": plan.duration_resolution,
                 "missing_script_character_count": (plan.duration.missing_script_character_count),
+                "missing_to_minimum_character_count": max(
+                    0,
+                    minimum_characters - plan.duration.actual_script_character_count,
+                ),
                 "unused_factual_segment_count": (plan.material.unused_factual_segment_count),
+                "prior_length_recovery_attempted": (plan.prior_length_recovery_attempted),
             },
         )
         return DraftImprovementPlanRecord(plan=plan, artifact=artifact_view)
@@ -842,12 +867,23 @@ class RunService:
                         raise DraftRevisionNotAllowed(
                             f"selected improvement gap is unavailable: {missing_gap_codes[0]}"
                         )
-                    if (
-                        "reuse_unused_material" in request.selected_actions
-                        and plan_record.plan.material.unused_factual_segment_count == 0
+                    reuse_requested = "reuse_unused_material" in request.selected_actions
+                    reuse_option_available = any(
+                        option.kind == "reuse_unused_material"
+                        for option in plan_record.plan.options
+                    )
+                    minimum_characters, _maximum_characters = duration_character_bounds(
+                        plan_record.plan.duration.target_script_character_count
+                    )
+                    parent_is_below_duration_minimum = (
+                        plan_record.plan.duration.actual_script_character_count < minimum_characters
+                    )
+                    if reuse_requested and (
+                        not reuse_option_available or not parent_is_below_duration_minimum
                     ):
                         raise DraftRevisionNotAllowed(
-                            "improvement plan has no unused factual material to reuse"
+                            "improvement plan does not offer unused factual material "
+                            "for length recovery"
                         )
 
                     feedback_artifacts = (
@@ -1033,6 +1069,14 @@ class RunService:
                     await session.flush()
                     request_artifact_id = request_artifact.id
 
+                    length_recovery_plan = (
+                        build_draft_length_recovery_plan(
+                            improvement_plan=plan_record.plan,
+                            target_duration_minutes=int(parent_brief["target_duration_minutes"]),
+                        )
+                        if "reuse_unused_material" in request.selected_actions
+                        else None
+                    )
                     revision_input = {
                         "task_kind": REVISE_PODCAST_DRAFT,
                         "topic": parent.input_json["topic"],
@@ -1064,6 +1108,11 @@ class RunService:
                         ],
                         "revision_instruction": request.revision_instruction,
                         **(
+                            {"length_recovery_plan": (length_recovery_plan.model_dump(mode="json"))}
+                            if length_recovery_plan is not None
+                            else {}
+                        ),
+                        **(
                             {
                                 "writing_style_profile": base_editor_input["writing_style_profile"],
                                 "writing_style_segments": base_editor_input[
@@ -1075,9 +1124,12 @@ class RunService:
                         ),
                     }
                     try:
-                        revision_input = PodcastRevisionTaskInput.model_validate(
+                        parsed_revision_input = PodcastRevisionTaskInput.model_validate(
                             revision_input
-                        ).model_dump(mode="json")
+                        )
+                        revision_input = parsed_revision_input.model_dump(mode="json")
+                        if parsed_revision_input.length_recovery_plan is None:
+                            revision_input.pop("length_recovery_plan", None)
                     except (ValidationError, ValueError, TypeError) as error:
                         raise DraftRevisionNotAllowed(
                             "revision choices cannot build a valid Editor task"
@@ -1093,6 +1145,19 @@ class RunService:
                             "selected_feedback_count": len(selected_feedback),
                             "selected_gap_count": len(request.selected_gap_codes),
                             "supplemental_source_count": len(request.source_ids),
+                            **(
+                                {
+                                    "length_recovery_readiness": (length_recovery_plan.readiness),
+                                    "length_recovery_missing_to_minimum": (
+                                        length_recovery_plan.missing_to_minimum_character_count
+                                    ),
+                                    "length_recovery_priority_source_count": len(
+                                        length_recovery_plan.priority_unused_source_refs
+                                    ),
+                                }
+                                if length_recovery_plan is not None
+                                else {}
+                            ),
                         },
                     )
                     await append_event(

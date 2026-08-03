@@ -96,6 +96,8 @@ Subagent 对话。
 11. 用户审核、提交独立质量反馈，并查看系统根据现有证据生成的改进计划。
 12. 用户可以直接导出 Markdown，也可以明确选择改进动作，创建一个不覆盖
     旧稿的 Revision 子 Run，再人工比较两个候选。
+13. 如果候选稿明显偏短，系统先展示尚未进入口播正文的事实片段和长度缺口；
+    用户可以显式尝试一次有来源的时长恢复，也可以补充材料或降低目标时长。
 
 ## 5. MVP 范围
 
@@ -113,6 +115,7 @@ Subagent 对话。
 - Draft Quality Report 与独立用户反馈；
 - 经明确授权、与事实素材分离的可选写作样本；
 - 确定性 Improvement Plan 与用户显式触发的 Revision 子 Run；
+- 只盘点口播正文完全未引用事实的、单次显式时长恢复 Revision；
 - 可替换的托管模型 Provider（首个为 DeepSeek）与测试用 Fake Provider。
 
 ### 暂不包含
@@ -389,8 +392,9 @@ current deterministic facts，则恢复时以 Task 合同为准继续 v2 报告�
 避免丢失 score cap 与 conflict。新版本解决“模型给高分，却把明显时长缺口
 平均掉”的问题。
 
-Reviewer Task 新增一份由应用代码生成的
-`deterministic_quality_facts_v1`。它只包含当前持久 Draft 的目标分钟数、
+Reviewer Task 新增一份由应用代码生成的可信确定性事实。M3.5 初始版本是
+`deterministic_quality_facts_v1`；M3.8 当前新产物使用
+`deterministic_quality_facts_v2_editorial_instruction`。它只包含当前持久 Draft 的目标分钟数、
 口播正文字符数、估算分钟数、时长覆盖率/状态、引用覆盖、blocker/warning
 数量和版本化中文风格计数。Task 输入 validator 会从同一份结构化 Draft
 重新计算字数、时长与引用覆盖并逐项核对；事实不一致时，在调用模型前拒绝。
@@ -414,9 +418,11 @@ cap、cap reason、capped score 和显式冲突，便于看清“模型意见”
 为 80”这样的 JSON 即使字段类型全部合法，也必须被 API、导出和 E2E 拒绝。
 历史 v1 Artifact 继续按旧合同读取。
 
-v6 的确定性规则冻结为 `draft_quality_rules_v1`；v7 使用
-`draft_quality_rules_v2_chinese_calibration`。中文启发式规则使用版本
-`zh_podcast_style_v1`，观察成组反差、层层递进、
+v6 的确定性规则冻结为 `draft_quality_rules_v1`；M3.5 最初使用
+`draft_quality_rules_v2_chinese_calibration` 和 `zh_podcast_style_v1`。
+M3.8 当前新产物使用 `draft_quality_rules_v3_editorial_instruction` 和
+`zh_podcast_style_v2_enumeration_precision`，同时继续兼容旧 v1/v2。
+中文启发式观察成组反差、层层递进、
 枚举、通用转场/顿悟/收束和过度礼貌，以及句长/段长变异。这些只是可重复的
 **表达风险信号**，不是作者身份判断，也不产生“AI 写作概率”。规则使用保守
 重复阈值；一次自然出现不应直接扣分。为兼容历史报告，
@@ -549,8 +555,57 @@ M3.7 实验产物不写回原 Run，不进入生产 `model_calls` 表，也不�
 表或 workflow 版本。它们只保存在 `.gitignore` 覆盖的本地私有目录。完成一个
 首个真实单 pair 的揭盲结果为用户低置信度偏好有 Sample 的 A，但 10 个口播
 单元中 9 个逐字相同，字符相似度为 0.9638，因此结论是不确定而非 Sample
-获胜。这也完成了 M3 的实验退出条件。M3 停止扩展，转入可靠性 Trace 与最小
-Web UI。
+获胜。这也完成了写作样本实验的退出条件。除下面这个由真实量级复验直接暴露的
+有界时长恢复修正外，M3 不再扩展通用 benchmark、自动 winner 或盲评产品能力，
+后续转入可靠性 Trace 与最小 Web UI。
+
+### M3.8 有来源的时长恢复
+
+M3.7d 暴露出一个具体问题：整个素材集在数量上足以支持目标时长，Editor 仍可能
+只选择其中一部分。系统不能立即要求用户重复讲述，也不能只给模型一句“写长点”
+让它用套话凑字数。
+
+当父稿低于 Creative Brief 的 85% 最低边界时，Improvement Plan 只根据口播
+opening、正文 Paragraph 和 closing 的引用，盘点完全没有进入这些口播单元的
+事实 Segment。Show Notes 或 Section 元数据引用不算正文使用。由此产生的
+`length_recovery_plan` 保存：
+
+- 当前、最低、目标和最高口播字符数；
+- 距离最低与目标还差多少；
+- 完全未进入口播正文的事实引用及其原始字符总量；
+- 当前材料为足够、部分足够或必须补充的确定性 readiness。
+
+用户只有显式选择 `reuse_unused_material`，才会创建一次 Revision 子 Run。
+Editor 把优先引用当作候选，不把“全部使用”当成 KPI；每处新增事实仍必须来自
+允许的 Source。完成后重新执行确定性质量指标、模型 Reviewer、非补偿上限和
+父子稿比较。系统不会根据评分自动循环改稿。
+
+完整 unused inventory 保留用于审计；交给 Revision 的
+`priority_unused_source_refs` 最多 12 条。普通代码先过滤完全重复和已经复制
+进口播的文本，再根据缺失 must-include、Scaffold gap、补充素材、数字/标点/
+长度等可追踪信号排序，Source 顺序只提供稳定 tie-break。它不是语义相关性模型，
+也不要求 Editor 全部使用。
+
+这项能力有三个必须对用户公开的限制：
+
+1. 当前 `unused` 是 ref-level 判断。某个 Segment 只要被任一口播单元引用，
+   就整体视为 used，系统尚不能识别“已引用但只展开了一小部分”；
+2. `available_unused_character_count` 只是候选容量，不扣除语义重复，也不
+   判断相关性、隐私风险或可录性，不能承诺 Revision 必然达到目标时长；
+3. Source Segment 还没有结构化 `material_kind`，无法可靠区分事实、反思、
+   编辑指令与隐私边界。当前在成稿侧用
+   `style.editorial_instruction_leakage` 报告明显泄漏，但不使用脆弱的中文
+   关键词提前删除 Source。
+
+Improvement Plan v2 保存 `prior_length_recovery_attempted`。一次 Revision 后
+仍短时，即使还有 unused 片段，也不再推荐连续复用；系统说明剩余缺口，并把
+“回答有锚点的补充问题”和“降低时长预设”设为推荐选项。它不会自动创建第二个
+子 Run。
+
+最终 Fake v8 从 456 增至 2,083 字符，工作流通过但内容验收失败，并检测到编辑
+指令泄漏。真实 DeepSeek v2 从 1,310 增至 2,371 字符，7 次调用本地估算
+¥0.201153；同样证明机制可运行、质量刹车会生效，但没有达到 15 分钟内容标准。
+真人是否愿意录仍需单独验收。
 
 ## 7. 成功标准
 
@@ -571,6 +626,8 @@ Web UI。
     冒充已经判断“像本人”。
 11. 用户能够从质量证据创建一个可追溯的 Revision 子 Run，比较新旧候选，
     同时确认父 Draft/Report 没有被覆盖。
+12. 初稿偏短且仍有完全未引用事实时，用户能够执行一次有依据的长度恢复；
+    系统能区分工程上的字符达标与真人认为内容有价值、愿意录制。
 
 ## 8. 衡量指标
 
@@ -587,4 +644,6 @@ Web UI。
 - 用户对 voice match、recordability、usefulness 与 tone fit 的独立评分；
 - 写作样本 readiness、是否启用第七维，以及样本泄漏/错误引用数量；
 - Revision 的字符、时长、确定性分数与实验分数变化，以及用户最终选择；
+- 长度恢复前后的 spoken-only 字符、完全未引用事实数量、新增引用、重复/套话
+  变化，以及恢复后是否仍需补材料或降时长；
 - `synthetic_test` 与 human feedback 必须分开统计。

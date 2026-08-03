@@ -5,16 +5,21 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from epiphany.db import Database
-from epiphany.draft_quality import build_deterministic_quality_facts
+from epiphany.draft_quality import (
+    analyze_podcast_draft,
+    build_deterministic_quality_facts,
+)
 from epiphany.draft_quality_schemas import (
     DRAFT_QUALITY_FORMULA_VERSION,
     DRAFT_QUALITY_RULES_VERSION,
     LEGACY_DRAFT_QUALITY_FORMULA_VERSION,
     LEGACY_DRAFT_QUALITY_RULES_VERSION,
+    PREVIOUS_DRAFT_QUALITY_RULES_VERSION,
     REVIEW_PODCAST_DRAFT,
     STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
     STYLE_AWARE_MODEL_REVIEW_TASK_VERSION,
     DeterministicDraftQualityResult,
+    ModelSelfReviewTaskInput,
 )
 from epiphany.editor_schemas import BUILD_PODCAST_DRAFT
 from epiphany.models import Artifact, Run, Task
@@ -392,10 +397,10 @@ async def test_persisted_v6_reviewer_task_resumes_with_legacy_contract_after_res
         await restarted_database.close()
 
 
-async def test_prerelease_v6_current_reviewer_task_keeps_v2_caps_after_restart(
+async def test_persisted_v2_reviewer_task_keeps_v2_caps_after_restart(
     runtime: tuple[Database, RunService, Worker],
 ) -> None:
-    """A v6 Run with persisted M3.5 facts must not be downgraded on recovery."""
+    """A queued Reviewer with persisted v2 facts must survive a rules-v3 deploy."""
 
     database, service, worker = runtime
     run_id = await _resume_with_enough_material(database, service, worker)
@@ -418,16 +423,30 @@ async def test_prerelease_v6_current_reviewer_task_keeps_v2_caps_after_restart(
         prerelease_input.pop("review_contract_version")
         prerelease_input.pop("writing_style_profile", None)
         prerelease_input.pop("writing_style_segments", None)
-        reviewer_task.input_json = prerelease_input
         metrics_artifact = await session.get(
             Artifact,
             prerelease_input["deterministic_metrics_artifact_id"],
         )
         assert metrics_artifact is not None
-        assert metrics_artifact.idempotency_key.endswith(":v2")
-        metrics_artifact.idempotency_key = (
-            f"draft-metrics:{run_id}:{prerelease_input['draft_artifact_id']}:v1"
+        assert metrics_artifact.idempotency_key.endswith(f":{DRAFT_QUALITY_RULES_VERSION}")
+        previous_deterministic = analyze_podcast_draft(
+            draft=prerelease_input["podcast_draft"],
+            creative_brief=prerelease_input["creative_brief"],
+            config=prerelease_input["quality_config"],
+            rules_version=PREVIOUS_DRAFT_QUALITY_RULES_VERSION,
         )
+        metrics_artifact.content_json = previous_deterministic.model_dump(mode="json")
+        metrics_artifact.idempotency_key = (
+            f"draft-metrics:{run_id}:{prerelease_input['draft_artifact_id']}:v2"
+        )
+        prerelease_input["deterministic_quality_facts"] = build_deterministic_quality_facts(
+            previous_deterministic
+        ).model_dump(mode="json")
+        parsed_prerelease_input = ModelSelfReviewTaskInput.model_validate(prerelease_input)
+        assert parsed_prerelease_input.deterministic_quality_facts == (
+            build_deterministic_quality_facts(previous_deterministic)
+        )
+        reviewer_task.input_json = prerelease_input
 
     restarted_database = Database(str(database.engine.url))
     restarted_orchestrator = Orchestrator(task_max_attempts=2)

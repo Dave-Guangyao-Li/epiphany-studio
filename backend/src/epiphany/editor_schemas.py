@@ -237,6 +237,23 @@ def _iter_script_references(output: PodcastDraftOutput) -> Iterator[SourceRefere
     yield from output.podcast_script.closing.source_refs
 
 
+def _iter_spoken_script_references(
+    output: PodcastDraftOutput,
+) -> Iterator[SourceReference]:
+    """Yield only references attached to words the listener will hear.
+
+    Section-level references are structural metadata, and Show Notes are a
+    separate deliverable. Neither proves that a SourceSegment was actually
+    developed in the spoken draft.
+    """
+
+    yield from output.podcast_script.opening.source_refs
+    for section in output.podcast_script.sections:
+        for paragraph in section.paragraphs:
+            yield from paragraph.source_refs
+    yield from output.podcast_script.closing.source_refs
+
+
 def _iter_show_notes_references(
     output: PodcastDraftOutput,
 ) -> Iterator[SourceReference]:
@@ -271,6 +288,27 @@ def editor_output_reference_keys(
     ordered: list[SourceReferenceKey] = []
     seen: set[SourceReferenceKey] = set()
     for reference in _iter_output_references(output):
+        key = _reference_key(reference)
+        if key not in seen:
+            ordered.append(key)
+            seen.add(key)
+    return tuple(ordered)
+
+
+def editor_spoken_script_reference_keys(
+    content: dict[str, Any],
+) -> tuple[SourceReferenceKey, ...]:
+    """Return references used by spoken paragraphs, excluding metadata.
+
+    The stable order is useful when measuring factual-material utilization.
+    It intentionally excludes section-level references and Show Notes so a
+    citation outside the words to be recorded cannot hide unused material.
+    """
+
+    output = PodcastDraftOutput.model_validate(content)
+    ordered: list[SourceReferenceKey] = []
+    seen: set[SourceReferenceKey] = set()
+    for reference in _iter_spoken_script_references(output):
         key = _reference_key(reference)
         if key not in seen:
             ordered.append(key)

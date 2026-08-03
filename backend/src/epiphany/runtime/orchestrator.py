@@ -19,6 +19,7 @@ from epiphany.draft_quality_schemas import (
     LEGACY_DRAFT_QUALITY_RULES_VERSION,
     LEGACY_MODEL_REVIEW_TASK_VERSION,
     MODEL_REVIEW_TASK_VERSION,
+    PREVIOUS_DRAFT_QUALITY_RULES_VERSION,
     REVIEW_PODCAST_DRAFT,
     STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
     STYLE_AWARE_MODEL_REVIEW_TASK_VERSION,
@@ -809,7 +810,11 @@ class Orchestrator:
             ),
         )
         metrics_key_suffix = (
-            "v1" if run.workflow_version == LEGACY_QUALITY_REVIEW_WORKFLOW_VERSION else "v2"
+            "v1"
+            if deterministic.metrics.rules_version == LEGACY_DRAFT_QUALITY_RULES_VERSION
+            else "v2"
+            if deterministic.metrics.rules_version == PREVIOUS_DRAFT_QUALITY_RULES_VERSION
+            else deterministic.metrics.rules_version
         )
         metrics_key = f"draft-metrics:{run.id}:{draft_artifact.id}:{metrics_key_suffix}"
         metrics_artifact = (
@@ -1181,7 +1186,11 @@ class Orchestrator:
             STYLE_AWARE_MODEL_REVIEW_TASK_VERSION,
         }:
             if (
-                deterministic.metrics.rules_version != DRAFT_QUALITY_RULES_VERSION
+                deterministic.metrics.rules_version
+                not in {
+                    PREVIOUS_DRAFT_QUALITY_RULES_VERSION,
+                    DRAFT_QUALITY_RULES_VERSION,
+                }
                 or build_deterministic_quality_facts(deterministic)
                 != review_input.deterministic_quality_facts
             ):
@@ -1221,6 +1230,8 @@ class Orchestrator:
             STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION: "v3",
         }[scoring_formula_version]
         report_key = f"draft-quality:{run.id}:{draft_artifact.id}:{report_key_suffix}"
+        if deterministic.metrics.rules_version == DRAFT_QUALITY_RULES_VERSION:
+            report_key = f"{report_key}:{deterministic.metrics.rules_version}"
         existing = (
             await session.execute(select(Artifact).where(Artifact.idempotency_key == report_key))
         ).scalar_one_or_none()

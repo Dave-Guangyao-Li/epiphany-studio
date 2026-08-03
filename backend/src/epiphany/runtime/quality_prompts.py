@@ -15,8 +15,10 @@ from epiphany.draft_quality_schemas import (
 from epiphany.runtime.providers.base import ProviderInputTooLargeError
 
 LEGACY_QUALITY_REVIEW_PROMPT_VERSION = "quality_review_prompt_v1"
-QUALITY_REVIEW_PROMPT_VERSION = "quality_review_prompt_v2_deterministic_facts"
-STYLE_AWARE_QUALITY_REVIEW_PROMPT_VERSION = "quality_review_prompt_v3_writing_style"
+QUALITY_REVIEW_PROMPT_VERSION = "quality_review_prompt_v3_editorial_instruction"
+STYLE_AWARE_QUALITY_REVIEW_PROMPT_VERSION = (
+    "quality_review_prompt_v4_writing_style_editorial_instruction"
+)
 
 
 class QualityReviewPromptError(ValueError):
@@ -158,8 +160,9 @@ _CURRENT_REVIEW_INSTRUCTIONS = """
 2. 若 duration_status=blocker 或 duration_coverage_ratio<0.60，
    brief_adherence 不得高于 2 分；若 duration_status=warning，则不得高于 3 分。
 3. conciseness_and_non_redundancy 必须结合 filler_phrase_count、
-   template_phrase_count、not_but_pattern_count 和 chinese_style_pattern_counts
-   解释。篇幅不足本身不等于精炼；仍需区分“缺少内容”和“没有重复”。
+   template_phrase_count、not_but_pattern_count、editorial_instruction_phrase_count
+   和 chinese_style_pattern_counts 解释。疑似编辑说明进入 spoken text 时必须指出；
+   篇幅不足本身不等于精炼，仍需区分“缺少内容”和“没有重复”。
 4. paragraph_citation_coverage、blocker_count 和 warning_count 是代码事实。
    可以解释其编辑意义，不得重新计数或声称事实不存在。
 5. must_include 表示必须覆盖的内容，不默认要求逐字复述。要根据初稿与来源判断
@@ -231,7 +234,9 @@ advisory 固定为 true。
    duration_status=blocker 或 duration_coverage_ratio<0.60 时不得高于 2 分；
    duration_status=warning 时不得高于 3 分。
 2. conciseness_and_non_redundancy 必须结合 filler_phrase_count、
-   template_phrase_count、not_but_pattern_count 和 chinese_style_pattern_counts。
+   template_phrase_count、not_but_pattern_count、
+   editorial_instruction_phrase_count 和 chinese_style_pattern_counts；疑似编辑说明
+   进入 spoken text 时必须指出。
 3. must_include 可按语义判断；avoid_patterns 的抽象偏好不得伪装成字面检测。
 
 personal_style_match 的强制证据规则：

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import math
+import unicodedata
 from collections.abc import Sequence
+from decimal import Decimal
 from typing import Any
 
 from pydantic import ValidationError
@@ -9,11 +12,14 @@ from epiphany.draft_quality_schemas import DraftQualityReport
 from epiphany.editor_schemas import (
     PodcastDraftOutput,
     PodcastDraftTaskInput,
-    editor_output_reference_keys,
+    editor_spoken_script_reference_keys,
     validate_podcast_draft_output,
 )
 from epiphany.interview_schemas import InterviewScaffoldOutput
+from epiphany.quality_contract_schemas import DURATION_TOLERANCE_RATIO
+from epiphany.research_schemas import ResearchSourceSegment
 from epiphany.revision_schemas import (
+    MAX_LENGTH_RECOVERY_PRIORITY_REFS,
     DraftDurationGap,
     DraftImprovementGap,
     DraftImprovementOption,
@@ -43,6 +49,98 @@ def _script_character_count(draft: PodcastDraftOutput) -> int:
         draft.podcast_script.closing.text,
     ]
     return sum(_non_whitespace_character_count(text) for text in texts)
+
+
+def _spoken_script_texts(draft: PodcastDraftOutput) -> list[str]:
+    return [
+        draft.podcast_script.opening.text,
+        *[
+            paragraph.text
+            for section in draft.podcast_script.sections
+            for paragraph in section.paragraphs
+        ],
+        draft.podcast_script.closing.text,
+    ]
+
+
+def _normalize_overlap_text(value: str) -> str:
+    """Normalize conservatively for exact/containment coverage checks."""
+
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(character for character in normalized if character.isalnum())
+
+
+def _select_priority_candidate_segments(
+    *,
+    unused_segments: Sequence[ResearchSourceSegment],
+    draft: PodcastDraftOutput,
+    must_include: Sequence[str],
+    material_gap_refs: Sequence[SourceReference],
+    supplemental_segments: Sequence[ResearchSourceSegment],
+) -> list[ResearchSourceSegment]:
+    """Return a bounded, deterministic shortlist for one Revision attempt.
+
+    The factual Source contract does not currently carry a ``material_kind`` or
+    an editorial/factual classifier, so this function deliberately does not use
+    brittle Chinese instruction keywords. It can safely remove exact duplicate
+    text and text already copied into the audible draft, then rank the remaining
+    factual candidates using traceable signals already present in the contract.
+    Post-Revision quality gates still decide whether the attempt was useful.
+    """
+
+    spoken_texts = _spoken_script_texts(draft)
+    normalized_spoken_units = {
+        normalized for text in spoken_texts if (normalized := _normalize_overlap_text(text))
+    }
+    normalized_spoken_body = _normalize_overlap_text("".join(spoken_texts))
+    missing_must_include = [
+        normalized
+        for item in must_include
+        if (normalized := _normalize_overlap_text(item))
+        and normalized not in normalized_spoken_body
+    ]
+    gap_keys = {_reference_key(reference) for reference in material_gap_refs}
+    supplemental_keys = {
+        (segment.source_id, segment.source_segment_id) for segment in supplemental_segments
+    }
+
+    scored: list[tuple[tuple[int, ...], ResearchSourceSegment]] = []
+    seen_normalized_texts: set[str] = set()
+    for source_order, segment in enumerate(unused_segments):
+        normalized = _normalize_overlap_text(segment.text)
+        if not normalized or normalized in seen_normalized_texts:
+            continue
+        seen_normalized_texts.add(normalized)
+
+        # Exact unit reuse is always safe to identify. The longer containment
+        # check catches copied source passages while avoiding tiny common
+        # fragments that would create false positives.
+        if normalized in normalized_spoken_units or (
+            len(normalized) >= 16 and normalized in normalized_spoken_body
+        ):
+            continue
+
+        key = (segment.source_id, segment.source_segment_id)
+        must_include_matches = sum(required in normalized for required in missing_must_include)
+        numeric_detail_count = sum(
+            unicodedata.category(character).startswith("N") for character in segment.text
+        )
+        punctuation_count = sum(
+            unicodedata.category(character).startswith("P") for character in segment.text
+        )
+        score = (
+            must_include_matches,
+            int(key in gap_keys),
+            int(key in supplemental_keys),
+            min(numeric_detail_count, 20),
+            min(punctuation_count, 20),
+            min(len(normalized), 600),
+            -source_order,
+        )
+        scored.append((score, segment))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [segment for _score, segment in scored[:MAX_LENGTH_RECOVERY_PRIORITY_REFS]]
 
 
 def _reference_key(reference: SourceReference) -> tuple[str, str]:
@@ -195,6 +293,7 @@ def build_draft_improvement_plan(
     quality_report: DraftQualityReport | dict[str, Any],
     interview_scaffold: InterviewScaffoldOutput | dict[str, Any],
     writing_style_context_available: bool,
+    prior_length_recovery_attempted: bool = False,
     selected_feedback_codes: Sequence[str] = (),
 ) -> DraftImprovementPlan:
     """Build a deterministic revision plan without calling a model.
@@ -242,6 +341,13 @@ def build_draft_improvement_plan(
 
     target_characters = brief.target_duration_minutes * brief.speaking_rate_chars_per_minute
     missing_characters = max(0, target_characters - actual_characters)
+    minimum_characters = math.ceil(
+        Decimal(target_characters) * (Decimal(1) - Decimal(str(DURATION_TOLERANCE_RATIO)))
+    )
+    missing_to_minimum_characters = max(
+        0,
+        minimum_characters - actual_characters,
+    )
     estimated_minutes = round(
         actual_characters / brief.speaking_rate_chars_per_minute,
         2,
@@ -267,7 +373,7 @@ def build_draft_improvement_plan(
         *parsed_input.initial_source_segments,
         *parsed_input.supplemental_source_segments,
     ]
-    cited_keys = set(editor_output_reference_keys(parsed_draft.model_dump(mode="json")))
+    cited_keys = set(editor_spoken_script_reference_keys(parsed_draft.model_dump(mode="json")))
     unused_segments = [
         segment
         for segment in factual_segments
@@ -283,6 +389,25 @@ def build_draft_improvement_plan(
     unused_characters = sum(
         _non_whitespace_character_count(segment.text) for segment in unused_segments
     )
+    priority_segments = _select_priority_candidate_segments(
+        unused_segments=unused_segments,
+        draft=parsed_draft,
+        must_include=brief.must_include,
+        material_gap_refs=[
+            reference for gap in parsed_scaffold.material_gaps for reference in gap.source_refs
+        ],
+        supplemental_segments=parsed_input.supplemental_source_segments,
+    )
+    priority_refs = [
+        SourceReference(
+            source_id=segment.source_id,
+            source_segment_id=segment.source_segment_id,
+        )
+        for segment in priority_segments
+    ]
+    priority_characters = sum(
+        _non_whitespace_character_count(segment.text) for segment in priority_segments
+    )
     total_keys = {(segment.source_id, segment.source_segment_id) for segment in factual_segments}
     cited_factual_count = len(total_keys & cited_keys)
     material = UnusedFactualMaterial(
@@ -291,13 +416,18 @@ def build_draft_improvement_plan(
         unused_factual_segment_count=len(unused_segments),
         unused_factual_character_count=unused_characters,
         unused_source_refs=unused_refs,
+        priority_candidates_assessed=True,
+        priority_candidate_character_count=priority_characters,
+        priority_candidate_source_refs=priority_refs,
     )
 
-    if not missing_characters:
+    if not missing_to_minimum_characters:
         resolution = "not_needed"
-    elif unused_characters >= missing_characters:
+    elif prior_length_recovery_attempted:
+        resolution = "add_supplemental_material"
+    elif priority_characters >= missing_to_minimum_characters:
         resolution = "reuse_unused_material"
-    elif unused_characters:
+    elif priority_characters:
         resolution = "reuse_then_supplement"
     else:
         resolution = "add_supplemental_material"
@@ -327,23 +457,57 @@ def build_draft_improvement_plan(
         )
 
     options: list[DraftImprovementOption] = []
-    if missing_characters and unused_segments:
+    if missing_to_minimum_characters and priority_segments:
+        candidate_volume_supports_attempt = (
+            priority_characters >= missing_to_minimum_characters
+            and not prior_length_recovery_attempted
+        )
         options.append(
             DraftImprovementOption(
                 kind="reuse_unused_material",
-                recommended=unused_characters >= missing_characters,
+                recommended=candidate_volume_supports_attempt,
                 explanation=(
-                    "优先使用当前草稿尚未引用的事实片段补足正文，不要求用户重复提供已经存在的材料。"
+                    (
+                        "本稿已经完成一次有来源的时长恢复；剩余片段仍可供人工挑选，"
+                        "但系统不再推荐连续扩写，以免用重复或低价值内容强行凑时长。"
+                    )
+                    if prior_length_recovery_attempted
+                    else (
+                        "已筛选的候选事实片段，其原始字数足以支持一次受控扩写尝试；"
+                        "这不保证修改后一定达到时长，仍需检查信息增量、重复与口播质量。"
+                    )
+                    if candidate_volume_supports_attempt
+                    else (
+                        "可以先复用已筛选的候选事实片段增加具体内容，但其原始字数"
+                        "仍低于当前时长缺口；扩写后预计还需要补充材料或降低目标时长。"
+                    )
                 ),
-                source_refs=unused_refs,
+                source_refs=priority_refs,
             )
         )
-    if missing_characters > unused_characters or bool(parsed_scaffold.material_gaps):
+    if (
+        prior_length_recovery_attempted
+        or missing_to_minimum_characters > priority_characters
+        or bool(parsed_scaffold.material_gaps)
+    ):
         options.append(
             DraftImprovementOption(
                 kind="add_supplemental_material",
-                recommended=missing_characters > unused_characters,
-                explanation=("现有未使用材料不足以补齐目标时长，或采访脚手架仍有明确材料缺口。"),
+                recommended=(
+                    prior_length_recovery_attempted
+                    or missing_to_minimum_characters > priority_characters
+                ),
+                explanation=(
+                    (
+                        "一次有来源的恢复后仍未达到最低时长；下一步应回答有锚点的"
+                        "补充问题，引入新的具体事实、场景或感受，而不是连续扩写同一批素材。"
+                    )
+                    if prior_length_recovery_attempted
+                    else (
+                        "筛选后的候选材料原始字数不足以支持一次完整扩写，或采访"
+                        "脚手架仍有明确材料缺口。"
+                    )
+                ),
                 source_refs=_unique_source_references(
                     [
                         reference
@@ -354,12 +518,19 @@ def build_draft_improvement_plan(
             )
         )
     lower_preset = _lower_duration_preset(brief.target_duration_minutes)
-    if missing_characters and lower_preset is not None:
+    if missing_to_minimum_characters and lower_preset is not None:
         options.append(
             DraftImprovementOption(
                 kind="lower_target_duration",
-                recommended=False,
-                explanation="如果不想补充材料，可以选择更低的预设口播时长。",
+                recommended=prior_length_recovery_attempted,
+                explanation=(
+                    (
+                        "本稿已尝试一次有来源的恢复；如果不想继续补充具体材料，"
+                        "可以把目标调整到更接近当前可支持内容的预设时长。"
+                    )
+                    if prior_length_recovery_attempted
+                    else "如果不想补充材料，可以选择更低的预设口播时长。"
+                ),
                 suggested_target_duration_minutes=lower_preset,
             )
         )
@@ -378,6 +549,7 @@ def build_draft_improvement_plan(
             parent_draft_artifact_id=parent_draft_artifact_id,
             quality_report_artifact_id=quality_report_artifact_id,
             writing_style_context_available=writing_style_context_available,
+            prior_length_recovery_attempted=prior_length_recovery_attempted,
             selected_feedback_codes=normalized_feedback_codes,
             duration=duration,
             material=material,

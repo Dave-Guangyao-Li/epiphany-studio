@@ -2,6 +2,72 @@
 
 ## 2026-07-31
 
+### M3.8 source-grounded spoken-length recovery
+
+- Corrected the Improvement Plan's material inventory to use only references
+  attached to spoken opening, section paragraphs, and closing. A reference in
+  Section metadata or Show Notes no longer makes a factual Segment look used
+  by the script.
+- Added a deterministic `length_recovery_plan` for an explicitly requested
+  `reuse_unused_material` Revision. It binds the parent Draft's actual spoken
+  characters, the 85% minimum, target, 115% maximum, remaining gaps, candidate
+  unused characters, readiness, and priority factual references.
+- Kept the boundary human-led: reading the Plan makes no Provider call; only an
+  idempotent Revision request creates a child Run; Reviewer feedback never
+  starts another Editor loop automatically.
+- Tightened the Revision prompt and schema so priority references must resolve
+  to allowed factual Segments that are absent from the parent spoken units.
+  The Editor is told to add specific sourced information, not cover every
+  reference, repeat the parent, or invent detail to reach a number.
+- Reused the existing post-Revision metrics, Reviewer, non-compensatory score
+  caps, ModelCall ledger, parent immutability, cancellation, recovery, and
+  comparison behavior. No workflow version, API, database table, or migration
+  was added.
+- Kept the full unused inventory auditable but limited the Revision shortlist
+  to 12 deterministic candidates. Exact duplicate/copied text is removed;
+  Brief gaps, supplemental material, and concrete-detail signals rank the
+  rest. The Source contract still has no structured `material_kind`, so it
+  cannot reliably classify editorial instructions before generation.
+- Added `style.editorial_instruction_leakage` for obvious meta-editing text in
+  spoken prose and fixed the Chinese enumeration rule so ordinary uses such as
+  “最后一个空行李箱” do not count without an enumeration marker.
+- Versioned that semantic change as
+  `draft_quality_rules_v3_editorial_instruction`,
+  `zh_podcast_style_v2_enumeration_precision`, and
+  `deterministic_quality_facts_v2_editorial_instruction`; idempotency keys now
+  include the effective rules version while old v1/v2 Artifacts remain
+  readable.
+- Versioned the Improvement Plan with `prior_length_recovery_attempted`. After
+  one grounded recovery still leaves a short Draft, the Plan no longer
+  recommends another consecutive reuse pass; it recommends targeted
+  supplemental material and a lower duration preset.
+- Added the guarded `epiphany.length_recovery_e2e` driver with a read-only
+  preflight, zero-cost Fake execution, exactly one explicit child Revision,
+  post-Revision deterministic/model quality gates, redacted JSONL logs, and
+  parent/child token, latency, and currency-grouped cost summaries. Warning
+  regression compares non-duration warnings so moving from a duration blocker
+  to a duration warning is not falsely treated as an unrelated regression.
+- Final Fake v8 passed all workflow checks but failed content acceptance:
+  456 → 2,083 spoken characters, 12/12 priority references used, still below
+  the 3,570 lower bound, and editorial-instruction leakage detected. Its
+  post-Revision action is `add_supplemental_material`; all seven calls are
+  deterministic and zero-cost.
+- The first live attempt preserved a `podcast_revision_no_change` failure
+  after Flash returned the parent Draft unchanged; its earlier harness had
+  masked that root cause as an Artifact error. The corrected live DeepSeek v2
+  completed 7/7 calls and grew 1,310 → 2,371 spoken characters
+  (4.68 → 8.47 minutes), using 86,497 input and 17,496 output tokens in
+  159,228 ms for locally estimated CNY 0.201153. Workflow passed; content
+  acceptance remained false because the Draft was still short.
+- No new paid call was made after the deterministic stopping, warning, and
+  editorial-leakage fixes. Human recordability remains pending; full evidence
+  is recorded in
+  `docs/experiments/m3-8-grounded-length-recovery-e2e.zh-CN.md`.
+- Final local validation passed all 341 backend tests, Ruff lint, the
+  102-file format check, `git diff --check`, and the zero-cost Fake v8
+  end-to-end workflow. Fake exits non-zero only because its content acceptance
+  intentionally remains failed.
+
 ### M3.7d realistic synthetic-persona E2E
 
 - Froze one fictional but realistic corpus with three factual Sources, one
@@ -38,8 +104,9 @@
   Passed all 315 backend tests, Ruff lint, the 99-file format check, and Fake
   v8 E2E. Corpus design, commands, failures, costs, metrics, and privacy
   boundaries are recorded in
-  `docs/experiments/m3-7d-realistic-persona-e2e.zh-CN.md`. M3 remains frozen;
-  the next product slice is M4.1 replayable SSE.
+  `docs/experiments/m3-7d-realistic-persona-e2e.zh-CN.md`. The writing-style
+  experiment scope remained frozen; its one bounded length-recovery finding
+  was addressed in M3.8 before moving to M4.1.
 
 ## 2026-07-30
 

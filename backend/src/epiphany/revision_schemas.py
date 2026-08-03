@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -9,14 +11,18 @@ from epiphany.draft_quality_schemas import DraftQualityReport
 from epiphany.editor_schemas import (
     PodcastDraftOutput,
     PodcastDraftTaskInput,
+    editor_spoken_script_reference_keys,
     validate_podcast_draft_output,
 )
+from epiphany.quality_contract_schemas import DURATION_TOLERANCE_RATIO
 from epiphany.schemas import ArtifactView, RunView, SourceReference
 
-DRAFT_IMPROVEMENT_PLAN_VERSION = "draft_improvement_plan_v1"
+LEGACY_DRAFT_IMPROVEMENT_PLAN_VERSION = "draft_improvement_plan_v1"
+DRAFT_IMPROVEMENT_PLAN_VERSION = "draft_improvement_plan_v2_recovery_history"
 DRAFT_REVISION_REQUEST_VERSION = "draft_revision_request_v1"
 DRAFT_REVISION_COMPARISON_VERSION = "draft_revision_comparison_v1"
 REVISE_PODCAST_DRAFT = "revise_podcast_draft"
+MAX_LENGTH_RECOVERY_PRIORITY_REFS = 12
 
 DurationResolution = Literal[
     "not_needed",
@@ -45,6 +51,16 @@ RevisionAction = Literal[
     "lower_target_duration",
     "apply_selected_feedback",
 ]
+LengthRecoveryReadiness = Literal[
+    "not_needed",
+    # Wire value retained for persisted v1 compatibility. It means only that
+    # the selected candidate segments contain enough raw characters to justify
+    # one bounded Revision attempt; it does not promise that a grounded,
+    # non-repetitive draft can reach the duration bound.
+    "existing_material_sufficient",
+    "existing_material_partial",
+    "additional_material_required",
+]
 
 
 def _normalize_required_text(value: str) -> str:
@@ -70,6 +86,34 @@ def _unique_references(value: list[SourceReference]) -> list[SourceReference]:
     if len(keys) != len(set(keys)):
         raise ValueError("source_refs must be unique")
     return value
+
+
+def _non_whitespace_character_count(value: str) -> int:
+    return len("".join(value.split()))
+
+
+def _spoken_script_character_count(draft: PodcastDraftOutput) -> int:
+    texts = [
+        draft.podcast_script.opening.text,
+        *[
+            paragraph.text
+            for section in draft.podcast_script.sections
+            for paragraph in section.paragraphs
+        ],
+        draft.podcast_script.closing.text,
+    ]
+    return sum(_non_whitespace_character_count(text) for text in texts)
+
+
+def duration_character_bounds(target_character_count: int) -> tuple[int, int]:
+    """Return the code-owned spoken-character acceptance interval."""
+
+    tolerance = Decimal(str(DURATION_TOLERANCE_RATIO))
+    target = Decimal(target_character_count)
+    return (
+        math.ceil(target * (Decimal(1) - tolerance)),
+        math.floor(target * (Decimal(1) + tolerance)),
+    )
 
 
 class DraftDurationGap(BaseModel):
@@ -119,7 +163,17 @@ class DraftDurationGap(BaseModel):
 
 
 class UnusedFactualMaterial(BaseModel):
-    """Source inventory without copying any SourceSegment text into the plan."""
+    """Source inventory without copying any SourceSegment text into the plan.
+
+    ``unused_*`` is the complete uncited inventory. The separately assessed
+    ``priority_candidate_*`` fields are the small, deterministic shortlist that
+    may justify one length-recovery attempt. Raw unused volume is therefore not
+    presented as a promise that all of it belongs in the spoken draft.
+
+    ``priority_candidates_assessed=False`` keeps already-persisted v1 plans
+    readable. Plans built by current code always assess and persist the
+    shortlist, including an explicitly empty shortlist.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -128,8 +182,17 @@ class UnusedFactualMaterial(BaseModel):
     unused_factual_segment_count: int = Field(ge=0)
     unused_factual_character_count: int = Field(ge=0)
     unused_source_refs: list[SourceReference] = Field(default_factory=list, max_length=1_000)
+    priority_candidates_assessed: bool = False
+    priority_candidate_character_count: int = Field(default=0, ge=0)
+    priority_candidate_source_refs: list[SourceReference] = Field(
+        default_factory=list,
+        max_length=MAX_LENGTH_RECOVERY_PRIORITY_REFS,
+    )
 
-    _source_refs_are_unique = field_validator("unused_source_refs")(_unique_references)
+    _source_refs_are_unique = field_validator(
+        "unused_source_refs",
+        "priority_candidate_source_refs",
+    )(_unique_references)
 
     @model_validator(mode="after")
     def counts_must_match_references(self) -> UnusedFactualMaterial:
@@ -140,6 +203,21 @@ class UnusedFactualMaterial(BaseModel):
             raise ValueError("factual segment counts must add up")
         if self.unused_factual_segment_count != len(self.unused_source_refs):
             raise ValueError("unused count must match unused_source_refs")
+        if not self.priority_candidates_assessed:
+            if self.priority_candidate_character_count or self.priority_candidate_source_refs:
+                raise ValueError("unassessed material cannot contain priority candidate evidence")
+            return self
+
+        unused_keys = {_reference_key(reference) for reference in self.unused_source_refs}
+        priority_keys = {
+            _reference_key(reference) for reference in self.priority_candidate_source_refs
+        }
+        if not priority_keys <= unused_keys:
+            raise ValueError("priority candidates must be a subset of unused references")
+        if bool(priority_keys) != bool(self.priority_candidate_character_count):
+            raise ValueError("priority candidate references must match candidate characters")
+        if self.priority_candidate_character_count > self.unused_factual_character_count:
+            raise ValueError("priority candidate characters cannot exceed unused characters")
         return self
 
 
@@ -206,11 +284,15 @@ class DraftImprovementPlan(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["draft_improvement_plan_v1"] = DRAFT_IMPROVEMENT_PLAN_VERSION
+    schema_version: Literal[
+        "draft_improvement_plan_v1",
+        "draft_improvement_plan_v2_recovery_history",
+    ] = DRAFT_IMPROVEMENT_PLAN_VERSION
     parent_run_id: str = Field(min_length=1, max_length=200)
     parent_draft_artifact_id: str = Field(min_length=1, max_length=200)
     quality_report_artifact_id: str = Field(min_length=1, max_length=200)
     writing_style_context_available: bool
+    prior_length_recovery_attempted: bool = False
     selected_feedback_codes: list[str] = Field(default_factory=list, max_length=50)
     duration: DraftDurationGap
     material: UnusedFactualMaterial
@@ -233,6 +315,11 @@ class DraftImprovementPlan(BaseModel):
 
     @model_validator(mode="after")
     def option_and_resolution_state_must_be_consistent(self) -> DraftImprovementPlan:
+        if (
+            self.schema_version == LEGACY_DRAFT_IMPROVEMENT_PLAN_VERSION
+            and self.prior_length_recovery_attempted
+        ):
+            raise ValueError("legacy improvement plans cannot record recovery history")
         option_kinds = [option.kind for option in self.options]
         if len(option_kinds) != len(set(option_kinds)):
             raise ValueError("improvement option kinds must be unique")
@@ -243,11 +330,25 @@ class DraftImprovementPlan(BaseModel):
             raise ValueError("targeted questions must be unique")
         if ("apply_selected_feedback" in option_kinds) != bool(self.selected_feedback_codes):
             raise ValueError("apply_selected_feedback must match selected_feedback_codes")
+        minimum_characters, _maximum_characters = duration_character_bounds(
+            self.duration.target_script_character_count
+        )
+        below_minimum = self.duration.actual_script_character_count < minimum_characters
         if self.duration_resolution == "not_needed":
-            if self.duration.missing_script_character_count:
-                raise ValueError("not_needed cannot have a duration shortfall")
-        elif not self.duration.missing_script_character_count:
-            raise ValueError("a duration resolution requires a duration shortfall")
+            if below_minimum:
+                raise ValueError(
+                    "not_needed requires the spoken script to reach the duration lower bound"
+                )
+        elif (
+            not below_minimum
+            and self.duration.actual_script_character_count
+            >= self.duration.target_script_character_count
+        ):
+            raise ValueError("a duration resolution requires a spoken-script shortfall")
+        # Compatibility: pre-M3.8 v1 plans used the center target, not the 85%
+        # lower bound, when deciding whether a duration resolution was needed.
+        # Such persisted plans remain readable, while the current builder below
+        # always emits ``not_needed`` once the lower bound has been reached.
         return self
 
 
@@ -306,6 +407,10 @@ class CreateDraftRevisionRequest(BaseModel):
             raise ValueError("add_supplemental_material must match source_ids")
         if ("lower_target_duration" in actions) != (self.target_duration_minutes is not None):
             raise ValueError("lower_target_duration must match target_duration_minutes")
+        if {"reuse_unused_material", "lower_target_duration"} <= actions:
+            raise ValueError(
+                "reuse_unused_material and lower_target_duration are alternative actions"
+            )
         return self
 
 
@@ -372,6 +477,116 @@ class SelectedRevisionFeedback(BaseModel):
         return None if value is None else _normalize_required_text(value)
 
 
+class DraftLengthRecoveryPlan(BaseModel):
+    """Deterministic evidence plan for one bounded length-recovery attempt.
+
+    Counts describe only the words in ``podcast_script`` that will be spoken.
+    Source references identify existing factual segments to consider; they are
+    candidates, not a requirement to force every Source into the new draft.
+    ``existing_material_sufficient`` is a compatibility wire value meaning
+    *candidate raw volume is sufficient to try once*. It is not a prediction
+    that the Revision will reach the bound after relevance, compression,
+    repetition, and quality checks.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    actual_script_character_count: int = Field(ge=0)
+    minimum_script_character_count: int = Field(ge=1)
+    target_script_character_count: int = Field(ge=1)
+    maximum_script_character_count: int = Field(ge=1)
+    missing_to_minimum_character_count: int = Field(ge=0)
+    missing_to_target_character_count: int = Field(ge=0)
+    available_unused_character_count: int = Field(ge=0)
+    readiness: LengthRecoveryReadiness
+    priority_unused_source_refs: list[SourceReference] = Field(
+        default_factory=list,
+        max_length=1_000,
+    )
+
+    _priority_source_refs_are_unique = field_validator("priority_unused_source_refs")(
+        _unique_references
+    )
+
+    @model_validator(mode="after")
+    def counts_and_readiness_must_be_consistent(self) -> DraftLengthRecoveryPlan:
+        expected_minimum, expected_maximum = duration_character_bounds(
+            self.target_script_character_count
+        )
+        if self.minimum_script_character_count != expected_minimum:
+            raise ValueError("minimum character count must use the configured duration tolerance")
+        if self.maximum_script_character_count != expected_maximum:
+            raise ValueError("maximum character count must use the configured duration tolerance")
+        if self.missing_to_minimum_character_count != max(
+            0,
+            self.minimum_script_character_count - self.actual_script_character_count,
+        ):
+            raise ValueError("missing-to-minimum count is inconsistent with the script")
+        if self.missing_to_target_character_count != max(
+            0,
+            self.target_script_character_count - self.actual_script_character_count,
+        ):
+            raise ValueError("missing-to-target count is inconsistent with the script")
+
+        if not self.missing_to_minimum_character_count:
+            expected_readiness: LengthRecoveryReadiness = "not_needed"
+        elif self.available_unused_character_count >= self.missing_to_minimum_character_count:
+            expected_readiness = "existing_material_sufficient"
+        elif self.available_unused_character_count:
+            expected_readiness = "existing_material_partial"
+        else:
+            expected_readiness = "additional_material_required"
+        if self.readiness != expected_readiness:
+            raise ValueError(
+                "length-recovery readiness is inconsistent with candidate material volume"
+            )
+        if bool(self.priority_unused_source_refs) != bool(self.available_unused_character_count):
+            raise ValueError("priority unused references must match available unused characters")
+        return self
+
+
+def build_draft_length_recovery_plan(
+    *,
+    improvement_plan: DraftImprovementPlan,
+    target_duration_minutes: int,
+) -> DraftLengthRecoveryPlan:
+    """Project an Improvement Plan into exact instructions for a child Revision."""
+
+    rate = improvement_plan.duration.speaking_rate_chars_per_minute
+    actual = improvement_plan.duration.actual_script_character_count
+    target = target_duration_minutes * rate
+    minimum, maximum = duration_character_bounds(target)
+    missing_to_minimum = max(0, minimum - actual)
+    material = improvement_plan.material
+    if material.priority_candidates_assessed:
+        priority_refs = material.priority_candidate_source_refs
+        available = material.priority_candidate_character_count
+    else:
+        # Compatibility for Improvement Plans persisted before candidate
+        # shortlisting existed. New plans never use this branch.
+        priority_refs = material.unused_source_refs
+        available = material.unused_factual_character_count
+    if not missing_to_minimum:
+        readiness: LengthRecoveryReadiness = "not_needed"
+    elif available >= missing_to_minimum:
+        readiness = "existing_material_sufficient"
+    elif available:
+        readiness = "existing_material_partial"
+    else:
+        readiness = "additional_material_required"
+    return DraftLengthRecoveryPlan(
+        actual_script_character_count=actual,
+        minimum_script_character_count=minimum,
+        target_script_character_count=target,
+        maximum_script_character_count=maximum,
+        missing_to_minimum_character_count=missing_to_minimum,
+        missing_to_target_character_count=max(0, target - actual),
+        available_unused_character_count=available,
+        readiness=readiness,
+        priority_unused_source_refs=priority_refs,
+    )
+
+
 class PodcastRevisionTaskInput(PodcastDraftTaskInput):
     """Strict Editor input for one explicit child Revision Run."""
 
@@ -391,6 +606,7 @@ class PodcastRevisionTaskInput(PodcastDraftTaskInput):
         default_factory=list,
         max_length=50,
     )
+    length_recovery_plan: DraftLengthRecoveryPlan | None = None
     revision_instruction: str | None = Field(default=None, min_length=1, max_length=2_000)
 
     _normalize_revision_ids = field_validator(
@@ -429,6 +645,59 @@ class PodcastRevisionTaskInput(PodcastDraftTaskInput):
             raise ValueError("selected feedback artifacts must be unique")
         if len({gap.code for gap in self.selected_quality_gaps}) != len(self.selected_quality_gaps):
             raise ValueError("selected quality gaps must be unique")
+        if self.length_recovery_plan is not None and "reuse_unused_material" not in actions:
+            raise ValueError("a length_recovery_plan requires reuse_unused_material")
+        # Compatibility: already-persisted v8 Revision Tasks created before
+        # M3.8 may select reuse_unused_material without the new deterministic
+        # length_recovery_plan. Internal creation now always adds the plan, but
+        # the parser keeps those queued Tasks resumable.
+
+        if self.length_recovery_plan is not None:
+            recovery = self.length_recovery_plan
+            if self.creative_brief is None:
+                raise ValueError("length recovery requires a Creative Brief")
+            expected_target = (
+                self.creative_brief.target_duration_minutes
+                * self.creative_brief.speaking_rate_chars_per_minute
+            )
+            if recovery.target_script_character_count != expected_target:
+                raise ValueError("length-recovery target must match the Creative Brief")
+            if recovery.actual_script_character_count != _spoken_script_character_count(
+                self.parent_podcast_draft
+            ):
+                raise ValueError("length-recovery actual count must match the parent Draft")
+
+            factual_segments = [
+                *self.initial_source_segments,
+                *self.supplemental_source_segments,
+            ]
+            factual_by_key = {
+                (segment.source_id, segment.source_segment_id): segment
+                for segment in factual_segments
+            }
+            priority_keys = {
+                _reference_key(reference) for reference in recovery.priority_unused_source_refs
+            }
+            if not priority_keys <= set(factual_by_key):
+                raise ValueError(
+                    "length-recovery references must resolve to factual source segments"
+                )
+            spoken_keys = set(
+                editor_spoken_script_reference_keys(
+                    self.parent_podcast_draft.model_dump(mode="json")
+                )
+            )
+            if priority_keys & spoken_keys:
+                raise ValueError(
+                    "length-recovery priority references must be unused by the spoken parent Draft"
+                )
+            available_characters = sum(
+                _non_whitespace_character_count(factual_by_key[key].text) for key in priority_keys
+            )
+            if available_characters != recovery.available_unused_character_count:
+                raise ValueError(
+                    "available unused characters must match the priority source segments"
+                )
 
         validate_podcast_draft_output(
             task_input=revision_base_editor_input(self.model_dump(mode="json")),

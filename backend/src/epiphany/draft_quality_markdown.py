@@ -66,6 +66,7 @@ def render_draft_quality_markdown(content: dict[str, Any]) -> str:
         f"{metrics.filler_phrase_density_per_1000_chars:.2f} 次 / 1000 字符",
         f"- 模板化短语命中：{metrics.template_phrase_count}",
         f"- “不是……而是……”句式命中：{metrics.not_but_pattern_count}",
+        f"- 疑似编辑说明泄漏：{metrics.editorial_instruction_phrase_count}",
         "- `must_include` 逐字未命中："
         f"{metrics.must_include_missing_count}（仅表示字符串未出现，不代表语义缺失）",
         "",

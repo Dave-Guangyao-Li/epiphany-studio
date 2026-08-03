@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
+from collections import Counter
 from copy import deepcopy
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from epiphany.db import Database
@@ -14,17 +17,20 @@ from epiphany.draft_quality_schemas import (
 )
 from epiphany.editor_schemas import (
     BUILD_PODCAST_DRAFT,
+    PodcastDraftOutput,
     editor_output_reference_keys,
 )
-from epiphany.models import Run, Task
+from epiphany.models import ModelCall, Run, Task
 from epiphany.revision_schemas import (
     REVISE_PODCAST_DRAFT,
     CreateDraftRevisionRequest,
+    PodcastRevisionTaskInput,
 )
 from epiphany.runtime.orchestrator import GUIDED_REVISION_WORKFLOW_VERSION
 from epiphany.runtime.worker import Worker
 from epiphany.services import (
     DraftRevisionConflict,
+    DraftRevisionNotAllowed,
     RunService,
 )
 from epiphany.source_service import SourceService
@@ -86,10 +92,45 @@ def _draft_reference_keys(content_json: dict[str, object]) -> set[tuple[str, str
     return set(editor_output_reference_keys(content))
 
 
+def _spoken_units(
+    content_json: dict[str, object],
+) -> list[tuple[str, set[tuple[str, str]]]]:
+    content = {key: value for key, value in content_json.items() if key != "_execution"}
+    draft = PodcastDraftOutput.model_validate(content)
+    grounded_units = [
+        draft.podcast_script.opening,
+        *[
+            paragraph
+            for section in draft.podcast_script.sections
+            for paragraph in section.paragraphs
+        ],
+        draft.podcast_script.closing,
+    ]
+    return [
+        (
+            "".join(unit.text.split()),
+            {(reference.source_id, reference.source_segment_id) for reference in unit.source_refs},
+        )
+        for unit in grounded_units
+    ]
+
+
+def _spoken_character_count(content_json: dict[str, object]) -> int:
+    return sum(len(text) for text, _references in _spoken_units(content_json))
+
+
+def _spoken_reference_keys(content_json: dict[str, object]) -> set[tuple[str, str]]:
+    return {
+        reference for _text, references in _spoken_units(content_json) for reference in references
+    }
+
+
 async def _create_completed_parent_with_style(
     database: Database,
     service: RunService,
     worker: Worker,
+    *,
+    supplemental_paragraph_count: int = 10,
 ) -> tuple[str, str, str]:
     initial_source_id = await _import_source(
         database,
@@ -161,7 +202,11 @@ async def _create_completed_parent_with_style(
         database,
         title="M3.6 补充口述",
         source_type="voice_note_transcript",
-        text=_factual_material("补充口述", paragraph_count=10, detail_count=10),
+        text=_factual_material(
+            "补充口述",
+            paragraph_count=supplemental_paragraph_count,
+            detail_count=10,
+        ),
     )
     resumed = await service.resume_run(
         created.id,
@@ -178,6 +223,241 @@ async def _create_completed_parent_with_style(
     assert completed.status == "succeeded"
     assert completed.model_call_count == 5
     return created.id, style_source_id, supplemental_source_id
+
+
+async def test_reuse_unused_material_revision_receives_exact_length_recovery_plan(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    (
+        parent_run_id,
+        _style_source_id,
+        _supplemental_source_id,
+    ) = await _create_completed_parent_with_style(
+        database,
+        service,
+        worker,
+        supplemental_paragraph_count=15,
+    )
+    plan_record = await service.get_draft_improvement_plan(parent_run_id)
+    plan = plan_record.plan
+    assert plan.duration_resolution == "reuse_unused_material", (
+        plan.duration.model_dump(),
+        plan.material.model_dump(exclude={"unused_source_refs"}),
+    )
+
+    created = await service.create_draft_revision(
+        parent_run_id,
+        request=CreateDraftRevisionRequest(
+            submission_id="m3.8-reuse-existing-material",
+            selected_actions=["reuse_unused_material"],
+            revision_instruction="只展开已有的具体事实，不重复、不虚构，也不要求用完全部素材。",
+        ),
+    )
+    async with database.sessions() as session:
+        revision_task = (
+            await session.execute(
+                select(Task).where(
+                    Task.run_id == created.run.id,
+                    Task.kind == REVISE_PODCAST_DRAFT,
+                )
+            )
+        ).scalar_one()
+
+    recovery = revision_task.input_json["length_recovery_plan"]
+    duration = plan.duration
+    minimum_characters = math.ceil(duration.target_script_character_count * 0.85)
+    maximum_characters = math.floor(duration.target_script_character_count * 1.15)
+    assert recovery["actual_script_character_count"] == (duration.actual_script_character_count)
+    assert recovery["minimum_script_character_count"] == minimum_characters
+    assert recovery["target_script_character_count"] == (duration.target_script_character_count)
+    assert recovery["maximum_script_character_count"] == maximum_characters
+    assert recovery["missing_to_minimum_character_count"] == max(
+        0,
+        minimum_characters - duration.actual_script_character_count,
+    )
+    assert recovery["missing_to_target_character_count"] == (
+        duration.missing_script_character_count
+    )
+
+    priority_refs = {
+        (reference["source_id"], reference["source_segment_id"])
+        for reference in recovery["priority_unused_source_refs"]
+    }
+    unused_refs = {
+        (reference.source_id, reference.source_segment_id)
+        for reference in plan.material.unused_source_refs
+    }
+    factual_refs = {
+        (segment["source_id"], segment["source_segment_id"])
+        for segment in [
+            *revision_task.input_json["initial_source_segments"],
+            *revision_task.input_json["supplemental_source_segments"],
+        ]
+    }
+    assert priority_refs
+    assert priority_refs <= unused_refs
+    assert priority_refs <= factual_refs
+
+    without_recovery = deepcopy(revision_task.input_json)
+    without_recovery.pop("length_recovery_plan")
+    legacy_task = PodcastRevisionTaskInput.model_validate(without_recovery)
+    assert legacy_task.length_recovery_plan is None
+
+    recovery_without_action = deepcopy(revision_task.input_json)
+    recovery_without_action["selected_actions"] = ["add_supplemental_material"]
+    with pytest.raises(
+        ValidationError,
+        match="a length_recovery_plan requires reuse_unused_material",
+    ):
+        PodcastRevisionTaskInput.model_validate(recovery_without_action)
+
+
+async def test_reuse_unused_material_revision_expands_spoken_script_with_new_evidence(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    (
+        parent_run_id,
+        _style_source_id,
+        _supplemental_source_id,
+    ) = await _create_completed_parent_with_style(
+        database,
+        service,
+        worker,
+        supplemental_paragraph_count=15,
+    )
+    parent = await service.get_run(parent_run_id)
+    parent_draft = next(
+        artifact for artifact in parent.artifacts if artifact.id == parent.output_artifact_id
+    )
+    plan = (await service.get_draft_improvement_plan(parent_run_id)).plan
+    assert plan.duration_resolution == "reuse_unused_material", (
+        plan.duration.model_dump(),
+        plan.material.model_dump(exclude={"unused_source_refs"}),
+    )
+
+    created = await service.create_draft_revision(
+        parent_run_id,
+        request=CreateDraftRevisionRequest(
+            submission_id="m3.8-length-recovery-result",
+            selected_actions=["reuse_unused_material"],
+            revision_instruction="优先展开未充分使用的具体场景，禁止重复段落和抽象凑字。",
+        ),
+    )
+    worker.max_model_calls_per_run = 2
+    assert await worker.run_until_idle() == 2
+    child = await service.get_run(created.run.id)
+    assert child.status == "succeeded"
+    child_draft = next(
+        artifact for artifact in child.artifacts if artifact.id == child.output_artifact_id
+    )
+
+    parent_characters = _spoken_character_count(parent_draft.content_json)
+    child_characters = _spoken_character_count(child_draft.content_json)
+    missing_to_minimum = max(
+        0,
+        math.ceil(plan.duration.target_script_character_count * 0.85) - parent_characters,
+    )
+    significant_gain = min(
+        missing_to_minimum,
+        max(280, math.ceil(parent_characters * 0.25)),
+    )
+    assert child_characters >= parent_characters + significant_gain
+
+    parent_refs = _spoken_reference_keys(parent_draft.content_json)
+    child_refs = _spoken_reference_keys(child_draft.content_json)
+    assert child_refs - parent_refs
+    async with database.sessions() as session:
+        revision_task = (
+            await session.execute(
+                select(Task).where(
+                    Task.run_id == child.id,
+                    Task.kind == REVISE_PODCAST_DRAFT,
+                )
+            )
+        ).scalar_one()
+    allowed_factual_refs = {
+        (segment["source_id"], segment["source_segment_id"])
+        for segment in [
+            *revision_task.input_json["initial_source_segments"],
+            *revision_task.input_json["supplemental_source_segments"],
+        ]
+    }
+    assert child_refs <= allowed_factual_refs
+
+    parent_spoken_texts = [text for text, _references in _spoken_units(parent_draft.content_json)]
+    child_spoken_texts = [text for text, _references in _spoken_units(child_draft.content_json)]
+    parent_exact_repeat_count = sum(
+        count - 1 for count in Counter(parent_spoken_texts).values() if count > 1
+    )
+    child_exact_repeat_count = sum(
+        count - 1 for count in Counter(child_spoken_texts).values() if count > 1
+    )
+    assert child_exact_repeat_count <= parent_exact_repeat_count
+
+
+async def test_reuse_unused_material_is_rejected_when_plan_does_not_offer_it(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    database, service, worker = runtime
+    (
+        parent_run_id,
+        _style_source_id,
+        _supplemental_source_id,
+    ) = await _create_completed_parent_with_style(
+        database,
+        service,
+        worker,
+        supplemental_paragraph_count=15,
+    )
+    parent_plan = (await service.get_draft_improvement_plan(parent_run_id)).plan
+    assert parent_plan.duration_resolution == "reuse_unused_material"
+
+    recovered = await service.create_draft_revision(
+        parent_run_id,
+        request=CreateDraftRevisionRequest(
+            submission_id="m3.8-create-recovered-parent",
+            selected_actions=["reuse_unused_material"],
+            revision_instruction="只展开已有的具体事实，不重复、不虚构。",
+        ),
+    )
+    worker.max_model_calls_per_run = 2
+    assert await worker.run_until_idle() == 2
+    recovered_run = await service.get_run(recovered.run.id)
+    assert recovered_run.status == "succeeded"
+
+    recovered_plan = (await service.get_draft_improvement_plan(recovered_run.id)).plan
+    assert recovered_plan.duration_resolution == "not_needed"
+    assert "reuse_unused_material" not in {option.kind for option in recovered_plan.options}
+
+    async with database.sessions() as session:
+        before_counts = {
+            "runs": len((await session.execute(select(Run.id))).scalars().all()),
+            "tasks": len((await session.execute(select(Task.id))).scalars().all()),
+            "model_calls": len((await session.execute(select(ModelCall.id))).scalars().all()),
+        }
+
+    with pytest.raises(
+        DraftRevisionNotAllowed,
+        match="improvement plan does not offer unused factual material",
+    ):
+        await service.create_draft_revision(
+            recovered_run.id,
+            request=CreateDraftRevisionRequest(
+                submission_id="m3.8-reject-unavailable-reuse",
+                selected_actions=["reuse_unused_material"],
+                revision_instruction="继续展开现有素材。",
+            ),
+        )
+
+    async with database.sessions() as session:
+        after_counts = {
+            "runs": len((await session.execute(select(Run.id))).scalars().all()),
+            "tasks": len((await session.execute(select(Task.id))).scalars().all()),
+            "model_calls": len((await session.execute(select(ModelCall.id))).scalars().all()),
+        }
+    assert after_counts == before_counts
 
 
 async def test_guided_revision_is_explicit_idempotent_scored_and_style_only(
@@ -392,6 +672,7 @@ async def test_guided_revision_is_explicit_idempotent_scored_and_style_only(
             (await session.execute(select(Task).where(Task.run_id == child.id))).scalars().all()
         )
     revision_task = next(task for task in child_tasks if task.kind == REVISE_PODCAST_DRAFT)
+    assert "length_recovery_plan" not in revision_task.input_json
     assert revision_task.input_json["selected_feedback"] == [
         {
             "artifact_id": feedback.artifact.id,

@@ -9,10 +9,14 @@ from typing import Any
 
 from epiphany.draft_quality_schemas import (
     CHINESE_STYLE_HEURISTIC_VERSION,
+    DETERMINISTIC_QUALITY_FACTS_VERSION,
     DRAFT_QUALITY_FORMULA_VERSION,
     DRAFT_QUALITY_RULES_VERSION,
+    LEGACY_DETERMINISTIC_QUALITY_FACTS_VERSION,
     LEGACY_DRAFT_QUALITY_FORMULA_VERSION,
     LEGACY_DRAFT_QUALITY_RULES_VERSION,
+    PREVIOUS_CHINESE_STYLE_HEURISTIC_VERSION,
+    PREVIOUS_DRAFT_QUALITY_RULES_VERSION,
     STYLE_AWARE_DRAFT_QUALITY_FORMULA_VERSION,
     ChineseStylePatternCounts,
     DeterministicDraftMetrics,
@@ -67,6 +71,17 @@ _TEMPLATE_PATTERNS: tuple[str, ...] = (
     "不可否认",
 )
 _NOT_BUT_PATTERN = re.compile(r"不是[^。！？\n]{0,40}而是")
+_EDITORIAL_INSTRUCTION_PATTERN = re.compile(
+    r"(?:需要|应该|最好)在(?:口播|正文|稿子|节目)(?:里|中)?"
+    r"(?:解释|交代|补充|加入|放)"
+    r"|(?:这句话|这一段|这段|这个表达)[^。！？!?\n]{0,48}"
+    r"(?:如果要用|要改|需要改|不适合直接说)"
+    r"|(?:前面|后面)[^。！？!?\n]{0,24}(?:一定要|需要|最好)"
+    r"(?:先|再)?(?:放|写|补)"
+)
+_PREVIOUS_ENUMERATION_PATTERN = re.compile(
+    r"首先|其次|再次|最后|第[一二三四五六七八九十][，、,:：]"
+)
 
 # These patterns describe observable Chinese podcast-writing habits. They are
 # deliberately versioned and conservative: a hit is not proof that AI wrote
@@ -80,7 +95,9 @@ _CHINESE_STYLE_PATTERNS: dict[str, re.Pattern[str]] = {
         r"(?:(?:不只|不只是|不仅)[^。！？!?\n]{0,40}(?:还|也|更|而且|更是))"
         r"|(?:从[^。！？!?\n]{0,20}到[^。！？!?\n]{0,20}(?:再到|最后到))"
     ),
-    "enumeration": re.compile(r"首先|其次|再次|最后|第[一二三四五六七八九十][，、,:：]"),
+    "enumeration": re.compile(
+        r"(?:首先|其次|再次|最后)[，、,:：]|第[一二三四五六七八九十][，、,:：]"
+    ),
     "generic_transition": re.compile(
         r"值得注意的是|总而言之|归根结底|换句话说|与此同时|"
         r"除此之外|此外|由此可见|不可否认|毋庸置疑"
@@ -225,10 +242,12 @@ def _repeated_window_ratio(paragraph_texts: Iterable[str]) -> tuple[float, str]:
 
 def _chinese_style_observations(
     paragraphs: Iterable[tuple[str, str, list[Mapping[str, Any]]]],
+    *,
+    patterns: Mapping[str, re.Pattern[str]] = _CHINESE_STYLE_PATTERNS,
 ) -> dict[str, tuple[int, str, str]]:
     observations: dict[str, tuple[int, str, str]] = {}
     paragraph_list = list(paragraphs)
-    for category, pattern in _CHINESE_STYLE_PATTERNS.items():
+    for category, pattern in patterns.items():
         count = 0
         first_location = "podcast_script"
         first_quote = ""
@@ -279,10 +298,12 @@ def analyze_podcast_draft(
         raise ValueError("draft quality analysis is disabled")
     if rules_version not in {
         LEGACY_DRAFT_QUALITY_RULES_VERSION,
+        PREVIOUS_DRAFT_QUALITY_RULES_VERSION,
         DRAFT_QUALITY_RULES_VERSION,
     }:
         raise ValueError("unsupported Draft quality rules version")
     use_legacy_rules = rules_version == LEGACY_DRAFT_QUALITY_RULES_VERSION
+    use_editorial_instruction_rule = rules_version == DRAFT_QUALITY_RULES_VERSION
     brief = CreativeBrief.model_validate(creative_brief)
     paragraphs = _script_paragraphs(draft)
     paragraph_texts = [text for _, text, _ in paragraphs]
@@ -532,13 +553,41 @@ def analyze_podcast_draft(
         )
     )
 
+    editorial_instruction_count = 0
+    if use_editorial_instruction_rule:
+        editorial_instruction_matches = list(_EDITORIAL_INSTRUCTION_PATTERN.finditer(script_text))
+        editorial_instruction_count = len(editorial_instruction_matches)
+        editorial_instruction_status = "warning" if editorial_instruction_count else "pass"
+        if editorial_instruction_status == "warning":
+            penalties += min(12, 6 + editorial_instruction_count * 2)
+        findings.append(
+            _finding(
+                "style.editorial_instruction_leakage",
+                editorial_instruction_status,
+                location="podcast_script",
+                exact_quote=(
+                    editorial_instruction_matches[0].group(0)
+                    if editorial_instruction_matches
+                    else ""
+                ),
+                observed=editorial_instruction_count,
+                threshold="0 meta-editing instructions in spoken text",
+            )
+        )
+
     style_pattern_counts = ChineseStylePatternCounts()
     sentence_lengths: list[int] = []
     paragraph_lengths: list[int] = []
     sentence_length_cv: float | None = None
     paragraph_length_cv: float | None = None
     if not use_legacy_rules:
-        style_observations = _chinese_style_observations(paragraphs)
+        style_patterns = dict(_CHINESE_STYLE_PATTERNS)
+        if rules_version == PREVIOUS_DRAFT_QUALITY_RULES_VERSION:
+            style_patterns["enumeration"] = _PREVIOUS_ENUMERATION_PATTERN
+        style_observations = _chinese_style_observations(
+            paragraphs,
+            patterns=style_patterns,
+        )
         for category, (count, location, exact_quote) in style_observations.items():
             warning_minimum = _CHINESE_STYLE_WARNING_MINIMUMS[category]
             status = "warning" if count >= warning_minimum else "pass"
@@ -619,9 +668,14 @@ def analyze_podcast_draft(
         filler_phrase_density_per_1000_chars=round(filler_density, 2),
         template_phrase_count=template_count,
         not_but_pattern_count=not_but_count,
+        editorial_instruction_phrase_count=editorial_instruction_count,
         rules_version=rules_version,
         chinese_style_heuristic_version=(
-            None if use_legacy_rules else CHINESE_STYLE_HEURISTIC_VERSION
+            None
+            if use_legacy_rules
+            else PREVIOUS_CHINESE_STYLE_HEURISTIC_VERSION
+            if rules_version == PREVIOUS_DRAFT_QUALITY_RULES_VERSION
+            else CHINESE_STYLE_HEURISTIC_VERSION
         ),
         chinese_style_pattern_counts=style_pattern_counts,
         spoken_sentence_count=len(sentence_lengths),
@@ -680,10 +734,14 @@ def build_deterministic_quality_facts(
 ) -> DeterministicQualityFacts:
     """Project the persisted deterministic Artifact into a bounded Reviewer bundle."""
 
-    if deterministic.metrics.rules_version != DRAFT_QUALITY_RULES_VERSION:
-        raise ValueError("current Reviewer facts require current deterministic rules")
+    rules_version = deterministic.metrics.rules_version
+    if rules_version not in {
+        PREVIOUS_DRAFT_QUALITY_RULES_VERSION,
+        DRAFT_QUALITY_RULES_VERSION,
+    }:
+        raise ValueError("Reviewer facts require a supported deterministic ruleset")
     if deterministic.metrics.chinese_style_heuristic_version is None:
-        raise ValueError("current Reviewer facts require the Chinese style heuristic")
+        raise ValueError("Reviewer facts require the Chinese style heuristic")
     duration_finding = next(
         (
             finding
@@ -698,6 +756,13 @@ def build_deterministic_quality_facts(
     target = metrics.target_duration_minutes
     coverage_ratio = metrics.estimated_duration_minutes / target if target else 0.0
     return DeterministicQualityFacts(
+        facts_version=(
+            LEGACY_DETERMINISTIC_QUALITY_FACTS_VERSION
+            if rules_version == PREVIOUS_DRAFT_QUALITY_RULES_VERSION
+            else DETERMINISTIC_QUALITY_FACTS_VERSION
+        ),
+        rules_version=rules_version,
+        chinese_style_heuristic_version=(deterministic.metrics.chinese_style_heuristic_version),
         quality_profile=deterministic.profile,
         deterministic_score=deterministic.deterministic_score,
         target_duration_minutes=target,
@@ -709,11 +774,11 @@ def build_deterministic_quality_facts(
         paragraph_citation_coverage=metrics.paragraph_citation_coverage,
         blocker_count=sum(finding.status == "blocker" for finding in deterministic.findings),
         warning_count=sum(finding.status == "warning" for finding in deterministic.findings),
-        chinese_style_heuristic_version=metrics.chinese_style_heuristic_version,
         chinese_style_pattern_counts=metrics.chinese_style_pattern_counts,
         filler_phrase_count=metrics.filler_phrase_count,
         template_phrase_count=metrics.template_phrase_count,
         not_but_pattern_count=metrics.not_but_pattern_count,
+        editorial_instruction_phrase_count=(metrics.editorial_instruction_phrase_count),
     )
 
 

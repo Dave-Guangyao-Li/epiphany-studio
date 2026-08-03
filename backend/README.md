@@ -1,11 +1,13 @@
 # Epiphany Studio Backend
 
 The backend currently implements a single-user, single-process durable task
-runner through the M3.2 Editor, including parallel research, model-call traces,
-a serial Interviewer, durable `waiting_for_user`, source-ID based Resume, a
-serial Editor, and deterministic Scaffold / Podcast Draft / Show Notes
-Markdown export. It also includes an opt-in DeepSeek V4 adapter. The default
-remains the deterministic
+runner through the M3.8 grounded length-recovery slice, including parallel
+research, model-call traces, a serial Interviewer, durable
+`waiting_for_user`, source-ID based Resume, a serial Editor, Draft Quality,
+explicit Revision child Runs, and deterministic Markdown exports. The
+milestone walkthroughs below retain their historical workflow versions so old
+Runs remain understandable. The backend also includes an opt-in DeepSeek V4
+adapter. The default remains the deterministic
 `FakeProvider`, which reports zero tokens and zero cost, so setup, Swagger, and
 the default test suite need no API key, network request, or paid model call.
 
@@ -15,7 +17,7 @@ The first workflow is deliberately small:
 prepare_sources -> fake_research -> assemble_artifact
 ```
 
-The current `episode-research` workflow is:
+The historical workflow-v4 path introduced in M3.2 is:
 
 ```text
 research_manager
@@ -761,6 +763,109 @@ See the beginner-oriented
 [`M3.4 learning chapter`](../docs/learning/m3-4-draft-quality-report.zh-CN.md)
 for the scoring boundary, Swagger walkthrough, event names, and SQLite
 queries.
+
+## M3.8 grounded spoken-length recovery
+
+When a completed quality Run is shorter than the Creative Brief, reading
+
+```text
+GET /runs/{run_id}/improvement-plan
+```
+
+now inventories factual Source Segments that are wholly absent from the spoken
+opening, section paragraphs, and closing. Section-level metadata and Show
+Notes do not count as spoken use. The current inventory is reference-level:
+once a Segment is cited by any spoken unit, it is considered used even when
+only a small part of its content was developed. M3.8 does not yet detect
+“cited but underused” facts.
+
+An explicit
+
+```text
+POST /runs/{run_id}/revisions
+```
+
+with `selected_actions=["reuse_unused_material"]` receives an exact
+`length_recovery_plan`: current, 85% minimum, target, and 115% maximum spoken
+character counts; the remaining gaps; and priority references that still
+resolve to allowed factual Sources. `available_unused_character_count` is only
+the raw candidate capacity. It does not score relevance, duplication,
+sensitivity, or likely prose quality, and therefore cannot guarantee that the
+Revision will reach the requested duration.
+
+The user creates one idempotent child Run. The Revision Editor must add
+source-grounded information rather than filler or invented detail, after which
+the normal metrics, Reviewer, non-compensatory caps, and parent/child
+comparison run again. There is no automatic retry-until-long-enough loop. If
+the child remains short, this recovery attempt stops. The caller may accept
+the shorter Draft, add targeted material, or lower the target duration; the
+system never chains another Revision automatically.
+
+Focused zero-cost validation:
+
+```bash
+pytest tests/test_draft_improvement.py \
+       tests/test_revision_schemas.py \
+       tests/test_revision_workflow.py \
+       tests/test_length_recovery_e2e.py -vv
+```
+
+The final deterministic Fake v8 grows from 456 to 2,083 spoken characters and
+uses all 12 priority references, but remains below the 3,570 lower bound for a
+15-minute, 280-character-per-minute Brief. It also reports
+`style.editorial_instruction_leakage` when a Source's editing note is copied
+into spoken prose. The workflow passes while content acceptance fails. This
+validates orchestration, contracts, quality re-entry, and the stopping rule;
+it is not evidence of publishable prose.
+
+The guarded E2E driver is read-only unless `--execute` is present:
+
+```bash
+# Read-only preflight: no database, artifacts, network request, or paid call.
+python -m epiphany.length_recovery_e2e
+
+# Complete zero-cost parent + one explicit child Revision.
+python -m epiphany.length_recovery_e2e --provider fake --execute
+```
+
+The opt-in paid form is:
+
+```bash
+python -m epiphany.length_recovery_e2e \
+  --provider deepseek \
+  --editor-model deepseek-v4-flash \
+  --reviewer-model deepseek-v4-pro \
+  --execute
+```
+
+It is capped at five parent calls plus two child calls, has no hidden retry,
+stores its dedicated database and reports under ignored local paths, and
+summarizes parent/child tokens, duration, and currency-grouped estimated cost.
+The controlled DeepSeek v2 completed all seven calls with no retry. It grew the
+Draft from 1,310 spoken characters (4.68 minutes) to 2,371 (8.47 minutes),
+using 86,497 input and 17,496 output tokens in 159,228 ms for a locally
+estimated CNY 0.201153. The workflow passed, but content acceptance correctly
+failed because the Draft remained short. Current deterministic rules exclude
+duration findings when comparing whether other warnings worsened, require an
+enumeration marker after words such as “最后”, and detect leaked editorial
+instructions. These checks reused the persisted Draft and made no new paid
+request. New quality Artifacts identify these semantics as
+`draft_quality_rules_v3_editorial_instruction`,
+`zh_podcast_style_v2_enumeration_precision`, and
+`deterministic_quality_facts_v2_editorial_instruction`; older v1/v2 Artifacts
+remain readable.
+
+After a Run has already performed one grounded length recovery,
+`prior_length_recovery_attempted=true` is persisted in its Improvement Plan.
+If the Draft is still short, the Plan no longer recommends another consecutive
+reuse attempt. It recommends targeted supplemental material and a lower
+duration preset; reading these options does not create a Run or call a model.
+Human recordability review remains pending.
+
+See the
+[`M3.8 learning chapter`](../docs/learning/m3-8-grounded-length-recovery.zh-CN.md)
+for the beginner explanation, manual API path, event trace, cost boundary, and
+stopping rules.
 
 ## Debugging and logs
 

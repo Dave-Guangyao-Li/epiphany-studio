@@ -57,7 +57,11 @@ The first vertical slice will:
    without treating them as factual evidence or citations.
 10. Turn quality evidence into a deterministic Improvement Plan, then create a
     separate child Revision Run only after the user explicitly requests it.
-11. Expose a replayable run/task event trace.
+11. When a Draft is too short, first inventory factual segments that are wholly
+    absent from the spoken script and offer one explicit, source-grounded
+    length-recovery Revision before asking for more material or lowering the
+    target.
+12. Expose a replayable run/task event trace.
 
 Every extracted claim must point back to a source segment. Generated memories
 remain candidates until the user confirms them.
@@ -557,8 +561,47 @@ evidence, not human proof. Both arms still produced only about 6.4--6.7 minutes
 against a 15-minute target and remained hard-capped at 39, so Reviewer scores
 could not hide the length failure.
 
-M3 is complete and frozen; the next slice is M4.1 replayable SSE, followed by
-the M5.1 minimal Run Trace UI.
+M3.8 is a bounded correction for that length failure, not a reopening of the
+writing-style benchmark. The Improvement Plan now treats a factual segment as
+unused only when its reference is wholly absent from the spoken opening,
+paragraphs, and closing; references that appear only in section metadata or
+Show Notes do not consume the segment. It then passes one exact recovery plan
+to an explicitly requested Revision child Run: current, 85% minimum, target,
+and 115% maximum spoken-character counts plus the still-unused factual
+references.
+The candidate is rechecked by deterministic metrics and the bounded Reviewer;
+there is no automatic Editor/Reviewer loop.
+
+This inventory has deliberate limits. A segment referenced once is considered
+used even when the Draft barely develops it. The full unused inventory remains
+auditable, while the Revision receives at most 12 deterministic candidates
+ranked by Brief gaps, supplemental-material status, concrete-detail signals,
+and stable source order. Exact duplicates and text already copied into spoken
+units are filtered. Because Sources do not yet have a structured
+`material_kind`, the shortlist cannot reliably distinguish a lived fact from
+an editorial instruction; brittle Chinese keyword filtering is deliberately
+not used.
+
+The final zero-cost Fake v8 grows from 456 to 2,083 spoken characters, uses all
+12 priority references, and still stops below the 3,570 lower bound. It also
+detects editorial instructions that leaked into spoken prose. That is a useful
+brake test: the workflow, trace, post-Revision plan, and quality re-entry pass
+without pretending the content is long enough or good enough.
+
+The bounded DeepSeek v2 grows a realistic synthetic Draft from 1,310
+characters (4.68 minutes) to 2,371 (8.47 minutes), adding 6 of 12 priority
+references without worsening repetition, filler, template, or citation
+checks. It also stops below the 15-minute range. Seven calls used 86,497 input
+and 17,496 output tokens in 159,228 ms for an estimated CNY 0.201153. Current
+rules compare non-duration warnings separately, do not count ordinary uses of
+“最后” as an enumeration, and flag the meta-editing sentence in this persisted
+Draft. After one recovery attempt the Plan recommends targeted supplemental
+material or a lower duration, not another automatic reuse pass. No new paid
+call was made for these deterministic corrections. This validates the
+mechanism under a live Provider, not human recordability.
+
+After this corrective slice, the next product stage remains M4.1 replayable
+SSE, followed by the M5.1 minimal Run Trace UI.
 
 See the
 [M3.6 learning chapter](docs/learning/m3-6-guided-revision-writing-style.zh-CN.md)
@@ -574,6 +617,11 @@ exit criteria are in the
 The larger synthetic corpus, failure audit, costs, commands, and evidence
 boundaries are in the
 [M3.7d realistic-persona experiment](docs/experiments/m3-7d-realistic-persona-e2e.zh-CN.md).
+The spoken-only inventory, single grounded Revision, stopping rules, Fake and
+DeepSeek evidence, and remaining human-validation boundary are in the
+[M3.8 learning chapter](docs/learning/m3-8-grounded-length-recovery.zh-CN.md).
+The full frozen-corpus experiment is recorded in the
+[M3.8 E2E report](docs/experiments/m3-8-grounded-length-recovery-e2e.zh-CN.md).
 
 ## License
 
