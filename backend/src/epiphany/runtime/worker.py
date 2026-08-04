@@ -168,6 +168,7 @@ class Worker:
         timeout_seconds: float,
         poll_interval_seconds: float,
         max_concurrency: int = 2,
+        batch_cooldown_seconds: float = 0,
         max_model_calls_per_run: int = 6,
     ) -> None:
         self.database = database
@@ -178,6 +179,7 @@ class Worker:
         self.timeout_seconds = timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
         self.max_concurrency = max_concurrency
+        self.batch_cooldown_seconds = batch_cooldown_seconds
         self._finalization_lock = asyncio.Lock()
         self.model_call_ledger = ModelCallLedger(
             database,
@@ -781,6 +783,21 @@ class Worker:
                 # leave the durable Task stuck in ``running`` forever.
                 await self.recover_expired()
                 if await self.run_batch():
+                    if self.batch_cooldown_seconds > 0:
+                        logger.info(
+                            "Worker cooling down between task batches",
+                            extra={
+                                "event": "worker.batch.cooldown",
+                                "duration_seconds": self.batch_cooldown_seconds,
+                            },
+                        )
+                        try:
+                            await asyncio.wait_for(
+                                stop_event.wait(),
+                                timeout=self.batch_cooldown_seconds,
+                            )
+                        except TimeoutError:
+                            pass
                     continue
                 try:
                     await asyncio.wait_for(

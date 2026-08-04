@@ -192,6 +192,29 @@ async def test_run_forever_recovers_a_lease_that_expires_after_startup(
     assert any(event.type == "task.recovered" for event in await service.list_events(created.id))
 
 
+async def test_run_forever_honors_configured_batch_cooldown(
+    runtime: tuple[Database, RunService, Worker],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, worker = runtime
+    worker.batch_cooldown_seconds = 0.04
+    stop_event = asyncio.Event()
+    batch_times: list[float] = []
+
+    async def controlled_batch() -> int:
+        batch_times.append(asyncio.get_running_loop().time())
+        if len(batch_times) == 1:
+            return 1
+        stop_event.set()
+        return 0
+
+    monkeypatch.setattr(worker, "run_batch", controlled_batch)
+    await asyncio.wait_for(worker.run_forever(stop_event), timeout=0.5)
+
+    assert len(batch_times) == 2
+    assert batch_times[1] - batch_times[0] >= 0.035
+
+
 async def test_cancel_fences_a_provider_result_that_finishes_in_flight(
     runtime: tuple[Database, RunService, Worker],
 ) -> None:

@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     worker_enabled: bool = True
     worker_poll_interval_seconds: float = Field(default=0.25, gt=0)
     worker_max_concurrency: int = Field(default=2, ge=1, le=2)
+    # Optional operator throttle between Worker batches. Keep the default at
+    # zero for Fake runs and normal deployments. Constrained hosted-model
+    # accounts can opt into a gap so a large successful request is not followed
+    # immediately by another request or an instant 503 retry.
+    worker_batch_cooldown_seconds: float = Field(default=0, ge=0, le=300)
     worker_lease_seconds: int = Field(default=30, gt=0)
     # Long-form Editor and Revision outputs can legitimately take longer than
     # short research calls. Keep one bounded deadline, but do not make a

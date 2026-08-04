@@ -111,6 +111,7 @@ def create_app(
         timeout_seconds=resolved_settings.task_timeout_seconds,
         poll_interval_seconds=resolved_settings.worker_poll_interval_seconds,
         max_concurrency=resolved_settings.worker_max_concurrency,
+        batch_cooldown_seconds=resolved_settings.worker_batch_cooldown_seconds,
         max_model_calls_per_run=resolved_settings.model_max_calls_per_run,
     )
 
