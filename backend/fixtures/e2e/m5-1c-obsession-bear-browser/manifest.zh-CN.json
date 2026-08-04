@@ -1,0 +1,65 @@
+{
+  "schema_version": "m5_1c_obsession_bear_browser_fixture_v1",
+  "fixture_kind": "transformative_synthetic_fiction",
+  "locale": "zh-CN",
+  "project": {
+    "title": "愿望之后｜Bear 的恐惧日记｜真实浏览器 E2E 2026-08-04",
+    "description": "基于电影《Obsession》(2026) 公开简介、主创采访、媒体报道与评论/结局解析构造的转换性合成写作测试。公开报道剧情、主创解释与虚构内心独白分层保存；这不是电影正史或剧本复述。"
+  },
+  "persona": {
+    "name": "Baron “Bear” Bailey",
+    "role": "电影角色的合成第一人称写作者",
+    "voice": ["迟疑", "自我辩护会露出裂缝", "具体", "不请求原谅"],
+    "epistemic_boundary": "只把已核对的公开资料作为剧情锚点，并保留来源之间的歧义；Bear 的感官、回忆和内心语言均为测试者的转换性虚构。"
+  },
+  "creative_brief": {
+    "topic": "我得到 Nikki 以后，才第一次看见她的拒绝有多重要",
+    "target_duration_minutes": 15,
+    "speaking_rate_chars_per_minute": 280,
+    "scenario": "conversational_diary",
+    "target_audience": "看过《Obsession》并愿意思考欲望、同意、依赖与自我欺骗的成年观众；包含完整剧透",
+    "communication_goal": "用 Bear 的不可靠第一人称复盘许愿前、愿望初见效、明知 Nikki 失去选择仍继续接受、补救失败和死亡前的心理变化；让控制与爱的差别从场景和自我辩护中显现，而不是把主题写成说教。",
+    "tone": ["迟疑克制", "有罪感但不自我洗白", "恐惧逐步加深"],
+    "must_include": [
+      "没能真正告白与 One Wish Willow",
+      "Nikki 突然亲近又短暂清醒",
+      "Bear 已看见她失去选择却仍享受结果",
+      "客服电话与被理解为 Nikki 原有意识的求救",
+      "寻找第二次许愿和 Ian 的死亡",
+      "吞药、后悔与镜像式最后愿望",
+      "愿望前 Nikki 是否喜欢 Bear 必须保持未知"
+    ],
+    "avoid_patterns": [
+      "复制电影台词或长篇逐场复述",
+      "把合成内心戏宣称为电影正史",
+      "替 Nikki 断言愿望前的真实感情",
+      "把强迫与失去主体性浪漫化",
+      "把 Bear 写成完成救赎的英雄",
+      "让 Bear 以第一人称知道自己死亡后 Nikki 看见的现场",
+      "大量排比和不是……而是……模板句",
+      "脱离场景直接讲道德课"
+    ]
+  },
+  "sources": [
+    {"path": "source-01-public-canon.md", "source_type": "other", "role": "public_reporting_research"},
+    {"path": "source-02-character-theme.md", "source_type": "other", "role": "creator_and_cast_interpretation"},
+    {"path": "source-03-diary-before-wish.md", "source_type": "journal", "role": "synthetic_noncanonical_diary"},
+    {"path": "source-04-diary-after-wish.md", "source_type": "journal", "role": "synthetic_noncanonical_diary"},
+    {"path": "source-05-diary-last-night.md", "source_type": "journal", "role": "synthetic_noncanonical_diary"},
+    {"path": "writing-sample-quiet-confession.md", "source_type": "writing_sample", "role": "style_only"},
+    {"path": "supplemental-01-first-crack.md", "source_type": "voice_note_transcript", "role": "supplemental"},
+    {"path": "supplemental-02-choice-and-fear.md", "source_type": "voice_note_transcript", "role": "supplemental"}
+  ],
+  "expected_boundaries": {
+    "content_warning": "完整剧透；强迫关系；谋杀；动物伤害；药物过量与自杀相关情节",
+    "copyright_and_research_boundary": "基于公开简介、采访、媒体报道与评论/结局解析的转换性合成测试；不复制剧本或长段对白；相关权利归各自权利人所有；不构成官方认可或法律意义上的 fair-use 结论。",
+    "real_model_provider": "deepseek",
+    "all_model_calls_must_be_persisted": true,
+    "all_visible_draft_paragraphs_must_have_source_citations": true,
+    "writing_sample_must_not_be_used_as_factual_evidence": true,
+    "invented_inner_life_must_remain_labeled_noncanonical_in_sources_and_show_notes": true,
+    "bear_first_person_must_stop_before_post_death_events": true,
+    "public_alignment_is_assessed_against_linked_reporting_not_direct_screenplay_access": true,
+    "duration_pass_does_not_imply_publishable": true
+  }
+}

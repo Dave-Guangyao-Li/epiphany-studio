@@ -1,0 +1,148 @@
+{
+  "schema_version": "m5_1c_obsession_bear_browser_result_v1",
+  "executed_at": "2026-08-04",
+  "project_id": "proj_7c2ce1ae62ad4507823baf633a30ba85",
+  "database_revision": "0005_project_workspace",
+  "provider": "deepseek",
+  "primary_model": "deepseek-v4-pro",
+  "project_totals": {
+    "source_count": 9,
+    "segment_count": 82,
+    "run_count": 10,
+    "task_count": 27,
+    "artifact_count": 47,
+    "event_count": 257,
+    "model_call_count": 31,
+    "input_tokens": 329041,
+    "output_tokens": 43979,
+    "total_tokens": 373020,
+    "estimated_cost_cny": 1.067259
+  },
+  "runs": [
+    {
+      "id": "run_6a95b4ca5f3f43e29c60aa95cda7b540",
+      "parent_run_id": null,
+      "status": "failed",
+      "model_call_count": 4,
+      "total_tokens": 7665,
+      "estimated_cost_cny": 0.008834,
+      "note": "V4 Flash overload; one cancelled Task had a late successful model completion"
+    },
+    {
+      "id": "run_6c2c9583d1db4d79955fd10fb5e33346",
+      "parent_run_id": null,
+      "status": "failed",
+      "model_call_count": 3,
+      "total_tokens": 8394,
+      "estimated_cost_cny": 0.010445,
+      "note": "V4 Flash overload and fan-out child failure"
+    },
+    {
+      "id": "run_0ef9bbbea5e14e588fb1e51559179159",
+      "parent_run_id": null,
+      "status": "failed",
+      "model_call_count": 3,
+      "total_tokens": 8752,
+      "estimated_cost_cny": 0.011161,
+      "note": "V4 Flash overload and fan-out child failure"
+    },
+    {
+      "id": "run_2ff8fa47a5174253ab7384e2e1688305",
+      "parent_run_id": null,
+      "status": "succeeded",
+      "model_call_count": 6,
+      "total_tokens": 50815,
+      "estimated_cost_cny": 0.061429,
+      "estimated_duration_minutes": 9.71,
+      "quality_decision": "automated_review_incomplete"
+    },
+    {
+      "id": "run_6880153b7aa44306bbc6964ba38bd7c4",
+      "parent_run_id": "run_2ff8fa47a5174253ab7384e2e1688305",
+      "status": "failed",
+      "model_call_count": 1,
+      "total_tokens": 0,
+      "estimated_cost_cny": 0,
+      "note": "provider_input_too_large before an external request"
+    },
+    {
+      "id": "run_2359b5dd3c2b482f83d6b3dd98d50011",
+      "parent_run_id": "run_2ff8fa47a5174253ab7384e2e1688305",
+      "status": "failed",
+      "model_call_count": 2,
+      "total_tokens": 0,
+      "estimated_cost_cny": 0,
+      "note": "DeepSeek V4 Flash returned 503 twice"
+    },
+    {
+      "id": "run_750a86c32ddb47eaac90940ad198bdf2",
+      "parent_run_id": "run_2ff8fa47a5174253ab7384e2e1688305",
+      "status": "succeeded",
+      "model_call_count": 3,
+      "total_tokens": 57551,
+      "estimated_cost_cny": 0.180699,
+      "estimated_duration_minutes": 11.39,
+      "quality_decision": "revision_recommended"
+    },
+    {
+      "id": "run_bf0dd8f80caf4eeaa20b05a3d627adf8",
+      "parent_run_id": "run_750a86c32ddb47eaac90940ad198bdf2",
+      "status": "succeeded",
+      "model_call_count": 4,
+      "total_tokens": 87731,
+      "estimated_cost_cny": 0.290685,
+      "estimated_duration_minutes": 12.7,
+      "quality_decision": "automated_review_incomplete"
+    },
+    {
+      "id": "run_ea4e7b7835d1455c947d03257c781140",
+      "parent_run_id": "run_bf0dd8f80caf4eeaa20b05a3d627adf8",
+      "status": "succeeded",
+      "model_call_count": 3,
+      "total_tokens": 88428,
+      "estimated_cost_cny": 0.290868,
+      "estimated_duration_minutes": 14.51,
+      "quality_decision": "revision_recommended",
+      "note": "Human review found a post-death Bear POV violation missed by the Reviewer"
+    },
+    {
+      "id": "run_76ce45e7d4634830b66f6259b19c2d49",
+      "parent_run_id": "run_ea4e7b7835d1455c947d03257c781140",
+      "status": "succeeded",
+      "model_call_count": 2,
+      "input_tokens": 56322,
+      "output_tokens": 7362,
+      "total_tokens": 63684,
+      "estimated_cost_cny": 0.213138,
+      "script_character_count": 4055,
+      "estimated_duration_minutes": 14.48,
+      "cited_paragraph_count": 24,
+      "paragraph_count": 24,
+      "source_count": 6,
+      "segment_count": 31,
+      "exact_duplicate_paragraph_count": 0,
+      "deterministic_score": 98,
+      "model_score": 80,
+      "capped_overall_score": 79,
+      "quality_decision": "revision_recommended",
+      "output_artifact_id": "art_e7800da8421e4c82a7eac287c843d272",
+      "quality_artifact_id": "art_25f489edce034506864029e18c20cd76",
+      "feedback_artifact_id": "art_e2a63aa629f1410f92e7059d9db0ec68"
+    }
+  ],
+  "final_human_feedback": {
+    "overall_rating": 4,
+    "voice_match_rating": 3,
+    "recordability_rating": 3,
+    "usefulness_rating": 5,
+    "tone_fit_rating": 4,
+    "would_record": false,
+    "summary": "The post-death omniscient POV was fixed, but one meta-editorial sentence still breaks Bear's voice and three template-like contrast constructions remain."
+  },
+  "browser_evidence": {
+    "trace": ".playwright-cli/traces/trace-1785809974991.trace",
+    "network_log": ".playwright-cli/traces/trace-1785809974991.network",
+    "final_snapshot": ".playwright-cli/page-2026-08-04T03-32-37-601Z.yml",
+    "final_screenshot": ".playwright-cli/page-2026-08-04T03-33-32-836Z.png"
+  }
+}

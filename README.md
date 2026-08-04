@@ -754,6 +754,14 @@ and remaining debts are recorded in the
 [M5.1b real-browser E2E report](docs/experiments/m5-1b-real-browser-e2e.zh-CN.md),
 with reproducible inputs under
 [`backend/fixtures/e2e/m5-1b-real-browser/`](backend/fixtures/e2e/m5-1b-real-browser/).
+The longer Bear-perspective test adds two draft-aware interview rounds, human
+feedback Revision, first-person knowledge-boundary review, complete SQLite
+cost/lineage auditing, and an explicit not-ready-to-record verdict. Its
+transformative synthetic fixture, readable final candidate, machine-readable
+ledger, and user/operator findings are in the
+[M5.1c Obsession/Bear real-browser E2E report](docs/experiments/m5-1c-obsession-bear-browser-e2e.zh-CN.md)
+and
+[`backend/fixtures/e2e/m5-1c-obsession-bear-browser/`](backend/fixtures/e2e/m5-1c-obsession-bear-browser/).
 
 ## License
 

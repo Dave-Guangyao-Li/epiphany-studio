@@ -61,7 +61,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 25. [M4/M5：Project 工作区与可重放 Run Trace](m4-m5-local-console.zh-CN.md)
 26. [M5.1：AI 起步助手与可见的四步进度](m5-1-source-starter.zh-CN.md)
 27. [M5.1b：真实浏览器全流程 E2E](../experiments/m5-1b-real-browser-e2e.zh-CN.md)
-28. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+28. [M5.1c：《Obsession》Bear 视角真实浏览器与内容质量 E2E](../experiments/m5-1c-obsession-bear-browser-e2e.zh-CN.md)
+29. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
@@ -94,6 +95,7 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 | M4 | timeout、retry、lease、fencing、恢复、取消与 Event Trace 可通过 replayable SSE 观察 | 363 backend tests；replay/heartbeat/disconnect/terminal 已验证 | 本次 focused commit |
 | M5（本地 UI） | 在浏览器管理 Project/Source，并查看 Run Trace 与人工检查点 | 15 frontend tests + production build；Scaffold editor/部署仍未完成 | 本次 focused commit |
 | M5.1 | 空 Project 可生成可编辑起步候选，持久等待确认；确认后原子导入 Source 并让 Run 成功 | backend 442 tests + Ruff；frontend 43 tests + build；Fake 与 Playwright/DeepSeek E2E 通过 | Completed；当前 PR 加固 |
+| M5.1c | 用 Bear 转换性合成人设验证真实浏览器、两轮定向采访、反馈 Revision、质量刹车与管理员审计 | backend 443 tests + Ruff；frontend 43 tests + build；10 Runs / 31 calls 可追踪，最终 14.48m 但人工仍不直接录 | 本次 focused commit |
 
 ## 当前系统已经能做什么
 

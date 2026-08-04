@@ -1,5 +1,52 @@
 # Development Log
 
+## 2026-08-04
+
+### M5.1c Obsession/Bear realistic browser E2E
+
+- Ran a complete Playwright + React UI + real DeepSeek V4 Pro content journey
+  using a copyright-bounded, transformative synthetic Bear persona based on
+  public reporting about the 2026 film *Obsession*. Public plot anchors,
+  creator interpretation, non-canonical diary material, supplemental answers,
+  and a style-only Writing Sample remain separate Sources.
+- Persisted one Project with 9 Sources / 82 Segments and 10 Runs. The successful
+  lineage moved from a 9.71-minute parent draft through grounded material reuse,
+  two draft-aware interview rounds, and one feedback-driven Revision. The final
+  candidate contains 4,055 non-whitespace spoken characters, estimates 14.48
+  minutes, cites 24/24 paragraphs across 6 Sources / 31 Segments, and has no
+  exact or repeated-window duplication.
+- Exercised bounded failures rather than deleting them: three overloaded
+  preflight Runs, one locally rejected oversized Provider bundle, one two-503
+  Revision, one Reviewer budget exhaustion, and strict Reviewer evidence
+  failures. The Project ledger contains 31 calls, 373,020 tokens, and estimated
+  CNY 1.067259 including failures and retries.
+- Added an optional Worker batch cooldown, defaulting to zero, so constrained
+  live accounts can space model batches without slowing Fake tests or normal
+  deployments. The live experiment used one Worker and a 30-second cooldown;
+  the setting and behavior have regression coverage.
+- The first full-suite rerun exposed that the untracked live `.env` could leak
+  the 30-second cooldown and 80,000-character Editor limit into deterministic
+  tests. The test harness now pins Fake Provider, zero cooldown, and the default
+  48,000-character boundary per test. A plain `.venv/bin/pytest -q` from the
+  backend directory is again deterministic and cannot make a paid call.
+- Human review caught a high-severity Bear POV violation that the same-model
+  Reviewer missed: an otherwise cited draft narrated Nikki's reaction after
+  Bear's death. A selected-feedback Revision removed that omniscient passage.
+  Final human review then found a smaller meta-editorial voice leak and three
+  remaining parallel-contrast templates, so the system correctly remains at
+  `79 / revision_recommended` and `would_record_as_is=false`.
+- Recorded two product gaps discovered only through the real journey: the UI
+  does not expose `apply_selected_feedback` even after saving feedback, and a
+  cancelled Task can still receive a late successful Provider completion and
+  incur cost. Both remain explicit follow-up work rather than being hidden by
+  the successful final Run.
+- Added the reproducible fixture, final readable candidate, machine-readable
+  run summary, and the full user/admin experiment report at
+  `docs/experiments/m5-1c-obsession-bear-browser-e2e.zh-CN.md`. Local SQLite and
+  Playwright traces remain uncommitted debug evidence.
+- Validation: 443 backend tests, Ruff lint/format, 43 frontend tests, production
+  frontend build, and `git diff --check` all pass.
+
 ## 2026-08-03
 
 ### M5.1b real-browser DeepSeek E2E and Source Starter hardening

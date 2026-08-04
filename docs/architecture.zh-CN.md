@@ -565,6 +565,11 @@ Worker 循环：
 6. 使用当前 lease/fencing token 提交终态并追加 Event。
 7. 触发 Orchestrator 判断是否仍需等待，或执行确定性 fan-in。
 
+Worker 还支持可选的 `batch_cooldown_seconds`。默认值为 0；受限的真实 Provider
+账户可以在每个非空 batch 后等待一段时间，减少一个长调用刚结束就立即发起下一批
+调用的压力。它只是单进程运营节流，不替代 Provider rate limit、任务 retry、Token
+预算或分布式队列。Fake Provider 与普通开发测试始终使用 0。
+
 同一进程内并发上限固定为二。M2.2 的单 Worker 在一个短的 finalization
 临界区中串行提交 Child 终态，避免两个同时完成的 Child 都看见过期的
 兄弟状态；耗时的 Provider 调用仍然真实并发。未来多 Worker 需要借助
@@ -594,6 +599,8 @@ MVP 必须实现：
 - 有界 retry，默认只重试瞬时读取或模型网络错误；
 - parent cancel 标记；
 - Child 提交结果时验证 cancel 状态和 lease token；
+- 已取消 Task 的迟到 Provider 结果不得提交业务 Artifact，但底层调用仍可能已发生并
+  产生费用，因此 ModelCall ledger 必须保留真实结果；
 - 已完成只读 Artifact 可保留；
 - 模型输出经过 Pydantic 严格校验；
 - 单 Run 调用和并发上限；
