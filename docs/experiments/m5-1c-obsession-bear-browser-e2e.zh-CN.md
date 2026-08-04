@@ -415,6 +415,27 @@ Provider 侧瞬时不可用的观测，精确根因未知；降低请求压力�
 必须固定模型、输入、重试和 cooldown，随机交错运行多次 concurrency 1/2 对照，且仍
 只能得到相关性证据，不能代替 Provider 内部诊断。
 
+#### 恢复默认并发后的最小真实复测
+
+2026-08-04 又使用一个 421 字、4 Segment 的合成日记运行到 Interview Scaffold
+人工检查点，配置恢复为 `deepseek-v4-pro`、concurrency 2、cooldown 0：
+
+| 项目 | 结果 |
+| --- | --- |
+| Project | `proj_8b88…c464` |
+| Run | `run_6c53…974d`，`v4 / waiting_for_user / awaiting_interview_response` |
+| Timeline / Theme 启动间隔 | 约 35ms |
+| 两次 Provider 调用重叠 | 约 9.57 秒 |
+| 模型调用 | 3 次全部 attempt 1 成功；0 retry；0 个失败或 503 Event |
+| Token | 4,389 input / 4,028 output |
+| Provider 耗时合计 | 44,993ms；两条 Researcher 耗时因并发不能直接相加为墙钟时间 |
+| 本地估算费用 | CNY 0.037335 |
+| 产物 | Timeline、Theme、fan-in Bundle、Interview Scaffold |
+
+这次复测证明恢复默认并发后，当前配置至少成功完成了一次真实并发工作流；它也再次
+否定了“并发 2 必然导致 503”。但单次成功不能证明 Provider 以后不会再返回 503，
+更不能反向证明之前的 503 是由某个已经修复的确定原因造成的。
+
 ### 11.2 Editor bundle 超过 33,930 字
 
 现象：第一条 Revision child 在模型调用前被 `provider_input_too_large` 拦截。
