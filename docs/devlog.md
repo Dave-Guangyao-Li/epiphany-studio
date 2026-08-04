@@ -1,5 +1,184 @@
 # Development Log
 
+## 2026-08-04
+
+### M5.1c Obsession/Bear realistic browser E2E
+
+- Ran a complete Playwright + React UI + real DeepSeek V4 Pro content journey
+  using a copyright-bounded, transformative synthetic Bear persona based on
+  public reporting about the 2026 film *Obsession*. Public plot anchors,
+  creator interpretation, non-canonical diary material, supplemental answers,
+  and a style-only Writing Sample remain separate Sources.
+- Persisted one Project with 9 Sources / 82 Segments and 10 Runs. The successful
+  lineage moved from a 9.71-minute parent draft through grounded material reuse,
+  two draft-aware interview rounds, and one feedback-driven Revision. The final
+  candidate contains 4,055 non-whitespace spoken characters, estimates 14.48
+  minutes, cites 24/24 paragraphs across 6 Sources / 31 Segments, and has no
+  exact or repeated-window duplication.
+- Exercised bounded failures rather than deleting them: three overloaded
+  preflight Runs, one locally rejected oversized Provider bundle, one two-503
+  Revision, one Reviewer budget exhaustion, and strict Reviewer evidence
+  failures. The Project ledger contains 31 calls, 373,020 tokens, and estimated
+  CNY 1.067259 including failures and retries.
+- Added an optional Worker batch cooldown, defaulting to zero, so constrained
+  live accounts can space model batches without slowing Fake tests or normal
+  deployments. The live experiment used one Worker and a 30-second cooldown;
+  the setting and behavior have regression coverage.
+- The first full-suite rerun exposed that the untracked live `.env` could leak
+  the 30-second cooldown and 80,000-character Editor limit into deterministic
+  tests. The test harness now pins Fake Provider, zero cooldown, and the default
+  48,000-character boundary per test. A plain `.venv/bin/pytest -q` from the
+  backend directory is again deterministic and cannot make a paid call.
+- Human review caught a high-severity Bear POV violation that the same-model
+  Reviewer missed: an otherwise cited draft narrated Nikki's reaction after
+  Bear's death. A selected-feedback Revision removed that omniscient passage.
+  Final human review then found a smaller meta-editorial voice leak and three
+  remaining parallel-contrast templates, so the system correctly remains at
+  `79 / revision_recommended` and `would_record_as_is=false`.
+- Recorded two product gaps discovered only through the real journey: the UI
+  does not expose `apply_selected_feedback` even after saving feedback, and a
+  cancelled Task can still receive a late successful Provider completion and
+  incur cost. Both remain explicit follow-up work rather than being hidden by
+  the successful final Run.
+- Added the reproducible fixture, final readable candidate, machine-readable
+  run summary, and the full user/admin experiment report at
+  `docs/experiments/m5-1c-obsession-bear-browser-e2e.zh-CN.md`. Local SQLite and
+  Playwright traces remain uncommitted debug evidence.
+- Validation: 443 backend tests, Ruff lint/format, 43 frontend tests, production
+  frontend build, and `git diff --check` all pass.
+
+## 2026-08-03
+
+### M5.1b real-browser DeepSeek E2E and Source Starter hardening
+
+- Used Playwright to exercise the local React Console as a real user instead of
+  calling the workflow only through Swagger. The committed data is a fully
+  synthetic persona and is reproducible from
+  `backend/fixtures/e2e/m5-1b-real-browser/`; API keys, local databases, model
+  response bodies, and private material remain uncommitted.
+- Hardened Source Starter invalid-output handling into a bounded chain: one
+  model repair retry, deterministic `server_line_grounding`, then the
+  server-owned safe template only if line grounding cannot pass the same full
+  contract. Line grounding retains useful topic-specific lines and replaces
+  only unsupported user history, dialogue, or unverified facts with visible
+  completion/verification regions. It cannot confirm a Source, and Provider
+  failures are not converted into apparent success.
+- Restored the original Source Starter `mode` and `intent` from persisted Run
+  input after refresh. The browser can now recover the exact pending settings,
+  while still warning that unconfirmed local textarea edits are not durable.
+- Real `exploration_outline` Run `run_3c637233a17843119f546c1521ec0024`
+  passed strict validation in one DeepSeek call and was intentionally abandoned
+  without importing evidence. Real `starter_draft` Run
+  `run_8eda93938e4b4a1881eb47453bd5073f` reached the confirmation checkpoint via
+  line grounding; a simulated user edited it into a 516-character factual
+  Source and explicitly confirmed the import.
+- Completed a separate three-Run podcast chain through the browser:
+  `run_c41c726fdcca4136bd1e317dbcbce21a` (10.11 minutes),
+  `run_c344c19e9cb844c29c4daac81434cb00` (12.61 minutes), and
+  `run_2fec917404234405b9ec7c2c9ab16802` (14.59 minutes). The final draft had
+  26/26 cited paragraphs across 5 Sources / 31 Segments and no exact duplicate
+  paragraph. Duration passed the 85% floor, but seven parallel-contrast warnings
+  capped the score at 79 and preserved `revision_recommended`.
+- Fixed the Run Trace UI so Markdown/export actions are derived from actual
+  Artifacts rather than workflow version alone. A final Revision no longer
+  requests an unavailable supplemental plan or advertises a missing Scaffold,
+  eliminating the observed 409 without hiding real errors.
+- The current validation baseline is 442 passing backend tests, Ruff checks,
+  43 passing frontend tests, and a production frontend build. Full actions,
+  costs, quality evidence, trace files, and residual debts are recorded in
+  `docs/experiments/m5-1b-real-browser-e2e.zh-CN.md`.
+
+### M5.1 AI-assisted Source Starter and visible progress
+
+- Added a Project-scoped `source-starter` workflow v1 for the blank-page
+  problem. It snapshots the server-owned Project title/description plus the
+  source title/type, starter mode, and optional intent, then queues exactly one
+  `build_source_starter` Task through the existing durable Worker.
+- Reused Run, Task, ModelCall, Artifact, Event, lease, retry, fencing,
+  cancellation, recovery, budget, and idempotency infrastructure. No new table,
+  queue, orchestration framework, or Alembic migration was added.
+- Added a strict `source-starter-candidate.v1` contract with editable starter
+  text, 2--8 grounded brainstorming questions, explicit uncertainties, and
+  mandatory confirmation/verification safety flags.
+- Tightened the model boundary: it cannot invent first-person experiences,
+  dates, dialogue, external facts, professional conclusions, or completed
+  outcomes. Unknown facts and missing personal detail remain visibly marked
+  for verification or user completion; all Project/form context is untrusted
+  input.
+- Kept candidate and evidence separate. A successful model call persists a
+  `source_starter_candidate` Artifact, then durably pauses the Run at
+  `waiting_for_user / awaiting_source_confirmation`; it does not create a
+  Source. Only an explicit confirmation endpoint imports the edited text.
+- Made confirmation one atomic mutation: Source/Segments, ProjectSource,
+  server-owned `source_starter_confirmation` Artifact, confirmation/success
+  Events, and the Run's `waiting -> succeeded` transition commit together.
+  Injected failure before the Event proves the entire mutation rolls back and
+  can be retried from the same waiting checkpoint.
+- Added semantic confirmation idempotency and lineage. The fingerprint covers
+  final title/type/text but excludes transport `submission_id`; replaying the
+  same content with a new ID returns the original Source and appends the ID to
+  the Artifact's audited `submission_ids`. Changed content after commit returns
+  409. The resulting Source records `origin=ai_assisted`,
+  `user_confirmed=true`, starter Run/Artifact IDs, and bounded execution
+  metadata.
+- Limited AI starters to `journal`, `podcast_draft`, and `other`. Both UI and
+  backend reject `writing_sample` and `voice_note_transcript`, because generated
+  text cannot impersonate a user-owned style sample or an actual voice capture.
+- Extended that identity boundary beyond initial Source type. Any confirmed
+  `origin=ai_assisted` Source is filtered/rejected as a Writing Sample by the
+  Run form, Project Run creation, Editor/Reviewer style hydration, and Revision
+  inheritance/addition paths.
+- Added a Source-import UI with two starter modes, optional intent, safe append
+  and regeneration behavior, follow-up prompts, explicit confirmation, and a
+  link to the complete Run Trace. Existing text is never silently overwritten;
+  a modified candidate is preserved rather than auto-removed or stacked with a
+  regenerated candidate.
+- Added GET-only network recovery. Poll/retry reads the same Run and Events and
+  cannot create a second paid call. Refresh recovers an unconfirmed Candidate
+  Artifact, but explicitly warns that unsaved browser edits are not durable;
+  a slow recovery response previews rather than overwrites newly typed text.
+- Translated persisted execution into four visible steps: prepare Project
+  context, generate, validate/persist candidate, and wait for user edit and
+  confirmation. The last step is a real durable Run checkpoint, not a fake
+  running Task or timer animation, and it completes only from persisted
+  confirmation Artifact/Event evidence.
+- Kept the ordinary textarea as the first editing surface. Source text needs no
+  visual Scaffold/Draft editor to complete this loop; the richer editor remains
+  a separate M5 item.
+- Added backend and frontend tests for generation/confirmation boundaries,
+  durable waiting, retry/cancel, semantic replay/conflict, atomic rollback,
+  forbidden types, AI-assisted style-sample rejection, invalid-output error
+  redaction, GET-only recovery, refresh/no-overwrite behavior, edited-candidate
+  regeneration blocking, persisted progress evidence, and confirmation gating.
+  The later M5.1b regression baseline supersedes this snapshot with 442 passing
+  backend tests and 43 passing frontend tests, plus Ruff and the production
+  build.
+- Completed a Fake real-browser E2E covering refresh recovery, three completed
+  automatic steps plus one active confirmation step, atomic Source confirmation,
+  all-four-steps completion, and the durable waiting/confirmed/succeeded Event
+  chain.
+- The first live DeepSeek attempt revealed a speculative first-person claim not
+  grounded in input. It was never confirmed or imported. Prompt rules, a
+  deterministic post-provider first-person guard, redacted failure behavior,
+  and positive/negative regression tests were added.
+- Re-ran a bounded live `exploration_outline` with
+  `run_2dcf880f20ff4983b7d2eda643d766c5`. One `deepseek-v4-flash` call reached
+  `waiting_for_user / awaiting_source_confirmation` with 713 input and 570
+  output tokens, 7,009 ms duration, and CNY 0.001853 estimated cost. The DOM
+  showed the first three steps complete and confirmation active; logs contained
+  no candidate body. The synthetic Run was cancelled without importing a
+  Source. M5.1 is complete; visual Scaffold/Draft editing remains separate.
+- Final review rejects hash collisions with an existing Writing Sample/plain
+  Source instead of overwriting provenance; validates starter text, questions,
+  and uncertainties for bounded obvious invention/fact patterns; reconciles
+  cancel response loss through GET under the mutation guard; and marks context
+  complete as soon as a Run exists.
+- Strict live Run `run_dcaeeadc20964a2dbc15568112d87c28` reached the waiting
+  checkpoint in one call (886/590 tokens, 7,695 ms, estimated CNY 0.002066).
+  Browser stale-cancel simulation reconciled POST conflict through GET, cleared
+  the candidate without error, and created no duplicate call. No Source was
+  imported and no candidate body or key is recorded.
+
 ## 2026-07-31
 
 ### M4/M5 local Project workspace and Run Trace Console

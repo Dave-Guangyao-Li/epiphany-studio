@@ -33,7 +33,7 @@ from epiphany.runtime.providers import (
     TaskInvocation,
 )
 from epiphany.runtime.providers.fake import _clip
-from epiphany.runtime.research_prompts import ResearchPromptError
+from epiphany.runtime.research_prompts import ResearchPromptError, build_research_prompt
 
 API_KEY = "deepseek-test-secret"
 SOURCE_TEXT = "2019年第一次记录项目，2024年重新整理旧笔记。"
@@ -362,7 +362,11 @@ async def test_timeline_request_and_success_response_are_mapped() -> None:
         captured.append(body)
         return httpx.Response(200, json=_success_response(_timeline_content()))
 
-    provider, client = await _provider_with_handler(handler, max_tokens=1_200)
+    provider, client = await _provider_with_handler(
+        handler,
+        max_tokens=700,
+        research_max_tokens=1_200,
+    )
     try:
         result = await provider.generate(_invocation())
     finally:
@@ -389,6 +393,8 @@ async def test_timeline_request_and_success_response_are_mapped() -> None:
     assert result.output_tokens == 20
     assert result.estimated_cost_micros == 14
     assert result.cost_currency == "USD"
+    assert provider.max_tokens == 700
+    assert provider.research_max_tokens == 1_200
 
 
 async def test_research_prompt_treats_an_adversarial_topic_as_untrusted_data() -> None:
@@ -517,6 +523,36 @@ async def test_theme_prompt_requires_exact_quotes() -> None:
     assert "必须逐字复制" in captured_prompt
     assert "不得改写、拼接或补字" in captured_prompt.replace("\n", "")
     assert result.content == _theme_content()
+
+
+def test_theme_repair_prompt_drops_optional_quotes() -> None:
+    prompt = build_research_prompt(
+        task_kind="theme_research",
+        task_input=_invocation("theme_research").input_json,
+        max_source_chars=24_000,
+        repair_attempt=True,
+    )
+
+    user = prompt.messages[1]["content"]
+    assert "受限的自动修复重试" in user
+    assert '必须返回 "quotes": []' in user
+    assert "优先返回完整合法的 JSON" in user
+    assert "只保留最有价值的候选" in user
+
+
+def test_timeline_repair_prompt_requests_a_compact_complete_result() -> None:
+    prompt = build_research_prompt(
+        task_kind="timeline_research",
+        task_input=_invocation("timeline_research").input_json,
+        max_source_chars=24_000,
+        repair_attempt=True,
+    )
+
+    user = prompt.messages[1]["content"]
+    assert "受限的自动修复重试" in user
+    assert "优先返回完整合法的 JSON" in user
+    assert "只保留最有价值的候选" in user
+    assert '必须返回 "quotes": []' not in user
 
 
 async def test_fake_provider_builds_a_valid_grounded_interview_scaffold() -> None:
@@ -721,14 +757,20 @@ async def test_fake_provider_considers_topic_relevance_beyond_first_three_source
 
 async def test_interview_scaffold_uses_the_interview_prompt() -> None:
     captured_prompt = ""
+    captured_max_tokens = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal captured_prompt
+        nonlocal captured_max_tokens, captured_prompt
         body = json.loads(request.content)
         captured_prompt = "\n".join(message["content"] for message in body["messages"])
+        captured_max_tokens = body["max_tokens"]
         return httpx.Response(200, json=_success_response(_interview_content()))
 
-    provider, client = await _provider_with_handler(handler)
+    provider, client = await _provider_with_handler(
+        handler,
+        max_tokens=1_200,
+        interview_max_tokens=4_000,
+    )
     try:
         result = await provider.generate(_interview_invocation())
     finally:
@@ -739,6 +781,9 @@ async def test_interview_scaffold_uses_the_interview_prompt() -> None:
     assert "恰好 3 个" in captured_prompt
     assert "能在 3000 tokens 内完整返回" in captured_prompt
     assert "五年后，我重新打开了这个播客" in captured_prompt
+    assert captured_max_tokens == 4_000
+    assert provider.max_tokens == 1_200
+    assert provider.interview_max_tokens == 4_000
     assert result.content == _interview_content()
 
 
@@ -1098,7 +1143,7 @@ async def test_failure_logs_do_not_contain_key_source_or_response_body(
 
 
 def test_provider_selection_defaults_to_fake_and_requires_a_deepseek_key() -> None:
-    assert isinstance(build_provider(Settings()), FakeProvider)
+    assert isinstance(build_provider(Settings(_env_file=None)), FakeProvider)
     with pytest.raises(ValueError, match="requires EPIPHANY_DEEPSEEK_API_KEY"):
         build_provider(Settings(model_provider="deepseek", deepseek_api_key=None))
 
@@ -1108,6 +1153,8 @@ def test_provider_selection_defaults_to_fake_and_requires_a_deepseek_key() -> No
             deepseek_api_key=API_KEY,
             deepseek_model="deepseek-v4-flash",
             deepseek_billing_currency="CNY",
+            deepseek_research_max_tokens=4_567,
+            deepseek_interview_max_tokens=4_321,
             deepseek_editor_max_tokens=5_500,
             deepseek_max_source_chars=8_000,
             deepseek_max_interview_bundle_chars=24_000,
@@ -1116,6 +1163,8 @@ def test_provider_selection_defaults_to_fake_and_requires_a_deepseek_key() -> No
     )
     assert isinstance(provider, DeepSeekProvider)
     assert provider.billing_currency == "CNY"
+    assert provider.research_max_tokens == 4_567
+    assert provider.interview_max_tokens == 4_321
     assert provider.editor_max_tokens == 5_500
     assert provider.max_source_chars == 8_000
     assert provider.max_interview_bundle_chars == 24_000
@@ -1172,6 +1221,29 @@ def test_default_editor_output_limit_can_cover_a_thirty_minute_brief() -> None:
 
     assert settings.deepseek_editor_max_tokens == 20_000
     assert provider.editor_max_tokens == 20_000
+
+
+def test_default_interview_output_limit_can_cover_the_bounded_scaffold() -> None:
+    settings = Settings(_env_file=None)
+    provider = DeepSeekProvider(api_key=API_KEY)
+
+    assert settings.deepseek_interview_max_tokens == 4_000
+    assert provider.interview_max_tokens == 4_000
+
+
+def test_default_research_output_limit_is_independent_from_short_generations() -> None:
+    settings = Settings(_env_file=None)
+    provider = DeepSeekProvider(api_key=API_KEY)
+
+    assert settings.deepseek_max_tokens == 2_000
+    assert settings.deepseek_research_max_tokens == 4_000
+    assert provider.max_tokens == 2_000
+    assert provider.research_max_tokens == 4_000
+
+
+def test_research_output_limit_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="research_max_tokens"):
+        DeepSeekProvider(api_key=API_KEY, research_max_tokens=0)
 
 
 @pytest.mark.parametrize(

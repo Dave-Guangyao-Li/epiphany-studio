@@ -32,6 +32,8 @@ function eventLabel(type: string) {
     "workflow.editor.completed": "口播稿已生成",
     "workflow.draft_quality.completed": "质量评估完成",
     "workflow.draft_supplemental_interview.completed": "生成针对性补充问题",
+    "workflow.source_starter.completed": "AI 起步候选已生成",
+    "workflow.source_starter.confirmed": "AI 起步候选已确认导入",
   };
   return labels[type] ?? type.replaceAll(".", " · ");
 }

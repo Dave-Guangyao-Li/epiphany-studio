@@ -21,6 +21,10 @@ from epiphany.runtime.providers.base import (
     RetryableProviderError,
     TaskInvocation,
 )
+from epiphany.source_starter_schemas import (
+    BUILD_SOURCE_STARTER,
+    build_safe_source_starter_candidate,
+)
 from epiphany.supplemental_interview_schemas import (
     PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW,
     DraftSupplementalInterviewTaskInput,
@@ -288,6 +292,7 @@ class FakeProvider:
             REVISE_PODCAST_DRAFT: self._revise_podcast_draft,
             REVIEW_PODCAST_DRAFT: self._review_podcast_draft,
             PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW: self._plan_draft_supplemental_interview,
+            BUILD_SOURCE_STARTER: self._build_source_starter,
         }
         try:
             content = handlers[invocation.kind](invocation.input_json)
@@ -295,6 +300,10 @@ class FakeProvider:
             raise ValueError(f"unsupported fake task kind: {invocation.kind}") from error
 
         return ProviderResult(content=content, provider=self.name, model=self.model)
+
+    @staticmethod
+    def _build_source_starter(input_json: dict[str, Any]) -> dict[str, Any]:
+        return build_safe_source_starter_candidate(task_input=input_json)
 
     @staticmethod
     def _plan_draft_supplemental_interview(

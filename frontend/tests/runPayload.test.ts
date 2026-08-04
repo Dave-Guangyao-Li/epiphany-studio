@@ -77,7 +77,13 @@ describe("episode Run payload", () => {
     expect(request.payload).not.toHaveProperty("writing_style_reference");
   });
 
-  it("normalizes comma/newline lists and removes duplicates", () => {
-    expect(splitList("真诚，克制, 真诚\n自然口语")).toEqual(["真诚", "克制", "自然口语"]);
+  it("normalizes Chinese and English list separators and removes duplicates", () => {
+    expect(splitList("真诚，克制, 真诚\n自然口语；具体; 不虚构")).toEqual([
+      "真诚",
+      "克制",
+      "自然口语",
+      "具体",
+      "不虚构",
+    ]);
   });
 });

@@ -1,10 +1,13 @@
 # Epiphany Studio Backend
 
 The backend currently implements a single-user, single-process durable task
-runner through the M3.8 grounded length-recovery slice, including parallel
+runner through the M3.9 draft-aware supplemental-interview slice, including parallel
 research, model-call traces, a serial Interviewer, durable
 `waiting_for_user`, source-ID based Resume, a serial Editor, Draft Quality,
 explicit Revision child Runs, and deterministic Markdown exports. The
+M5.1 Source Starter reuses the same Run, Task, ModelCall, Artifact and Event
+runtime for one bounded blank-page helper; its generated candidate is not
+imported as evidence until the user explicitly confirms the edited text. The
 milestone walkthroughs below retain their historical workflow versions so old
 Runs remain understandable. The backend also includes an opt-in DeepSeek V4
 adapter. The default remains the deterministic
@@ -71,7 +74,9 @@ Run tests:
 pytest
 ```
 
-The current full suite passes with 151 tests.
+The current full backend suite collects and passes 442 tests. Historical milestone-specific test
+counts are kept in the learning chapters and development log instead of being
+presented here as a permanently current total.
 
 The default SQLite database is written to `./data/epiphany.db`, which is ignored
 by Git.
@@ -131,6 +136,104 @@ Re-importing the same normalized text returns HTTP 200 with `created: false`
 and the existing stable IDs. A new Source returns HTTP 201. The whole normalized
 text stays in local SQLite and is not returned by the API; callers receive the
 ordered segments needed for future citations.
+
+## M5.1 Project Source Starter API
+
+The browser uses this API when a user clicks **帮我起个头**. It is independent
+of visual Scaffold/Draft editing because its result is ordinary editable Source
+text.
+
+Create or reuse a Project, then create one idempotent starter Run:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/projects/proj_REPLACE_ME/source-starters \
+  -H 'content-type: application/json' \
+  -d '{
+    "submission_id": "starter-demo-1",
+    "source_title": "我为什么想了解潜水",
+    "source_type": "journal",
+    "mode": "exploration_outline",
+    "intent": "我为什么会被潜水吸引？"
+  }'
+```
+
+Poll the returned Run and its durable Events:
+
+```bash
+curl http://127.0.0.1:8000/runs/run_REPLACE_ME
+curl http://127.0.0.1:8000/runs/run_REPLACE_ME/events
+```
+
+After generation succeeds, a `source-starter` v1 Run has one succeeded
+`build_source_starter` Task, one ModelCall, and one
+`source_starter_candidate` Artifact, but the Run itself durably pauses at
+`waiting_for_user / awaiting_source_confirmation`. This checkpoint does
+**not** increase the Project's Source count. The candidate contains editable
+`starter_text`, questions, uncertainties, and safety flags.
+
+After the user has edited and checked the text, confirm it through the separate
+endpoint:
+
+```bash
+curl -i -X POST \
+  http://127.0.0.1:8000/projects/proj_REPLACE_ME/source-starters/run_REPLACE_ME/confirm \
+  -H 'content-type: application/json' \
+  -d '{
+    "submission_id": "starter-confirm-demo-1",
+    "title": "我为什么想了解潜水",
+    "source_type": "journal",
+    "text": "这里放用户已经核对并修改过的最终正文。"
+  }'
+```
+
+Confirmation atomically imports the text as a Source, links it to the Project,
+saves `origin=ai_assisted` and `user_confirmed=true` metadata, appends a
+server-owned `source_starter_confirmation` Artifact and confirmation Events,
+and transitions the Run to `succeeded / complete`. If any write fails, the
+whole transaction rolls back to the same waiting checkpoint.
+
+The semantic confirmation fingerprint contains title, source type, and text;
+it deliberately excludes `submission_id`. Replaying the same content with a
+new submission ID returns the original result and appends that ID to the
+Artifact's audited `submission_ids` list. Changing semantic content after
+confirmation returns 409.
+
+Only `journal`, `podcast_draft`, and `other` are accepted.
+`writing_sample` and `voice_note_transcript` are rejected because AI text
+cannot impersonate a user-owned style sample or an actual speech transcript.
+The confirmed AI-assisted Source is also rejected as a Writing Sample when a
+Project Run or Revision later builds writing-style context.
+
+Browser retry after a polling/network error only repeats `GET /runs/{id}` and
+`GET /runs/{id}/events`; it does not create another Run or ModelCall. Refresh
+can restore the server candidate Artifact and the Run's original `mode` and
+`intent`, but cannot recover edits that only existed in the browser and were
+never confirmed. Regeneration is blocked after the candidate text has been
+edited, so two generated candidates are not silently stacked into one Source.
+
+Live validation has a bounded failure chain. A first invalid hosted result may
+schedule one repair attempt, which is recorded as a second ModelCall. If the
+second response has a valid candidate shape but some lines still invent user
+history, dialogue, or unverified facts, `server_line_grounding` preserves only
+individually safe lines/items and converts the unsafe parts into explicit
+completion/verification regions. The complete candidate is then validated
+again. If that deterministic repair cannot pass, the Worker uses a
+server-owned safe template. Provider/network failures are not disguised as a
+successful template, and none of these paths confirms or imports a Source.
+
+Targeted zero-network tests:
+
+```bash
+pytest tests/test_source_starter.py -q
+```
+
+See the [M5.1 learning chapter](../docs/learning/m5-1-source-starter.zh-CN.md)
+for the four visible progress steps, Fake-browser walkthrough, grounding chain,
+and debugging path. The complete synthetic Playwright/DeepSeek evidence and its
+reproducible inputs are in the
+[M5.1b experiment report](../docs/experiments/m5-1b-real-browser-e2e.zh-CN.md)
+and [`fixtures/e2e/m5-1b-real-browser/`](fixtures/e2e/m5-1b-real-browser/). The
+public record never contains an API key or private user material.
 
 ## Current episode-research API (workflow v4)
 
@@ -301,9 +404,18 @@ EPIPHANY_DEEPSEEK_API_KEY=
 EPIPHANY_DEEPSEEK_MODEL=deepseek-v4-flash
 EPIPHANY_DEEPSEEK_BILLING_CURRENCY=USD
 EPIPHANY_DEEPSEEK_MAX_TOKENS=2000
+EPIPHANY_DEEPSEEK_RESEARCH_MAX_TOKENS=4000
+EPIPHANY_DEEPSEEK_INTERVIEW_MAX_TOKENS=4000
 EPIPHANY_DEEPSEEK_MAX_SOURCE_CHARS=24000
 EPIPHANY_DEEPSEEK_MAX_INTERVIEW_BUNDLE_CHARS=24000
 ```
+
+The output limits are task-specific: the generic 2,000-token limit remains for
+short utility generations, while Timeline/Theme Research and the Interview
+Scaffold each receive a bounded 4,000-token allowance. A Research response that
+ends with `finish_reason=length` receives at most one durable compact-repair
+attempt; both paid attempts remain visible in `model_calls`. Truncation in other
+task kinds is not blindly retried with the same instructions.
 
 The two character limits are independent. `MAX_SOURCE_CHARS` protects raw
 Researcher input; `MAX_INTERVIEW_BUNDLE_CHARS` protects the validated

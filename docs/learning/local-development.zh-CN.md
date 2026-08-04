@@ -314,8 +314,8 @@ pytest
 当前全量基线：
 
 ```text
-backend: 363 passed
-frontend: 15 passed
+backend: 443 passed
+frontend: 43 passed + production build
 ```
 
 后端和前端分别运行：
@@ -329,6 +329,12 @@ cd /Users/mac/Documents/wise_project/epiphany-studio/frontend
 npm test
 npm run build
 ```
+
+`backend/tests/conftest.py` 会把普通测试固定在 Fake Provider、零 Worker batch
+cooldown 和默认 48,000 字 Editor bundle。这样，即使本机忽略提交的 `.env` 正在为
+真实 E2E 使用 DeepSeek、30 秒节流和更大的 bundle，直接运行 `pytest` 也不会付费、
+不会每批等待 30 秒、不会改变 dry-run 预期。需要测试某个 live 配置的用例应在自身
+fixture 中显式覆盖，不要依赖开发者当前 `.env`。
 
 定向测试研究、采访脚手架、人工检查点、Editor 和导出：
 

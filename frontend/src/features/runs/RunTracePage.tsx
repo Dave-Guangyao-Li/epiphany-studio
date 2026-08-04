@@ -7,6 +7,7 @@ import type {
   QualityReportRecord,
   RunView,
   SupplementalInterviewPlanRecord,
+  TaskView,
 } from "../../api/types";
 import { Link, useParams } from "../../app/router";
 import { ErrorNotice } from "../../components/ErrorNotice";
@@ -15,20 +16,22 @@ import { DURABLE_EVENT_NAMES, lastEventSequence, mergeEvents } from "../../lib/e
 import {
   latestMaterialReadiness,
   isCurrentRunGeneration,
+  loadSupplementalInterviewForRun,
+  runMarkdownAvailability,
+  type RunMarkdownKind,
   type RunRouteGeneration,
   shouldLoadDerivedForRun,
-  supportsSupplementalInterview,
 } from "../../lib/runTrace";
 import {
   FeedbackPanel,
   HumanCheckpointPanel,
+  ImprovementAnswerPanel,
   RevisionPanel,
   SupplementalInterviewPanel,
 } from "./RunActions";
 import { ArtifactViewer, EventTimeline, ModelCallTable, TaskList } from "./TracePanels";
 
 type ConnectionState = "connecting" | "live" | "reconnecting" | "closed";
-type MarkdownKind = "scaffold" | "draft" | "show-notes" | "quality";
 
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled"]);
 
@@ -44,6 +47,67 @@ export function commitForCurrentRunRoute(
   if (!isCurrentRunGeneration(requested, current)) return false;
   commit();
   return true;
+}
+
+function isQualityReviewerTask(task: TaskView): boolean {
+  return task.kind === "review_podcast_draft" || task.agent_type === "quality_reviewer";
+}
+
+function qualityReviewIsUnavailable(quality: QualityReportRecord | null): boolean {
+  return quality?.report.model_review_status === "unavailable" ||
+    quality?.report.decision === "automated_review_incomplete";
+}
+
+export function partitionRunTaskErrors(
+  run: RunView,
+  quality: QualityReportRecord | null,
+): { blocking: TaskView[]; advisoryReview: TaskView[]; showReviewWarning: boolean } {
+  const errored = run.tasks.filter((task) => task.error_code);
+  if (run.status !== "succeeded") {
+    return { blocking: errored, advisoryReview: [], showReviewWarning: false };
+  }
+
+  const advisoryReview = errored.filter(isQualityReviewerTask);
+  return {
+    blocking: errored.filter((task) => !isQualityReviewerTask(task)),
+    advisoryReview,
+    // A succeeded Run has already preserved a valid Editor Draft. Recognize a
+    // failed advisory Reviewer immediately, before the derived report finishes
+    // loading, so the page never flashes a false fatal-error banner.
+    showReviewWarning: advisoryReview.length > 0 || qualityReviewIsUnavailable(quality),
+  };
+}
+
+export function RunTaskNotices({
+  run,
+  quality,
+}: {
+  run: RunView;
+  quality: QualityReportRecord | null;
+}) {
+  const { blocking, advisoryReview, showReviewWarning } = partitionRunTaskErrors(run, quality);
+  return (
+    <>
+      {blocking.length > 0 && (
+        <section className="run-failure" role="alert">
+          <strong>执行错误</strong>
+          {blocking.map((task) => <p key={task.id}><code>{task.error_code}</code> · {task.error_message} · Task <code>{task.id}</code></p>)}
+        </section>
+      )}
+      {showReviewWarning && (
+        <section className="run-warning" role="status">
+          <strong>自动质量审阅未完成</strong>
+          <p>口播稿已保留，Run 已正常完成。确定性质量检查仍然有效；发布前请人工检查稿件。</p>
+          {advisoryReview.length > 0 && (
+            <details>
+              <summary>查看审阅失败详情</summary>
+              {advisoryReview.map((task) => <p key={task.id}><code>{task.error_code}</code> · Task <code>{task.id}</code></p>)}
+            </details>
+          )}
+        </section>
+      )}
+    </>
+  );
 }
 
 export function RunTracePage() {
@@ -68,7 +132,7 @@ export function RunTracePage() {
   const [error, setError] = useState<unknown>(null);
   const [cancelling, setCancelling] = useState(false);
   const [activeView, setActiveView] = useState<"trace" | "tasks" | "artifacts">("trace");
-  const [markdown, setMarkdown] = useState<{ kind: MarkdownKind; text: string } | null>(null);
+  const [markdown, setMarkdown] = useState<{ kind: RunMarkdownKind; text: string } | null>(null);
   const [markdownError, setMarkdownError] = useState<unknown>(null);
   const [initialReplayComplete, setInitialReplayComplete] = useState(false);
 
@@ -84,13 +148,10 @@ export function RunTracePage() {
     if (!shouldLoadDerivedForRun(nextRun, derivedRequestedRunRef.current)) return;
     derivedRequestedRunRef.current = nextRun.id;
     try {
-      const supplementalRequest = supportsSupplementalInterview(nextRun.workflow_version)
-        ? runsApi.supplemental(nextRun.id)
-        : Promise.resolve(null);
       const [qualityResult, improvementResult, supplementalResult] = await Promise.all([
         runsApi.quality(nextRun.id),
         runsApi.improvement(nextRun.id),
-        supplementalRequest,
+        loadSupplementalInterviewForRun(nextRun, runsApi.supplemental),
       ]);
       if (!isCurrentRunGeneration(requestedRoute, currentRouteGeneration())) return;
       setQuality(qualityResult);
@@ -255,7 +316,8 @@ export function RunTracePage() {
     }
   }
 
-  async function openMarkdown(kind: MarkdownKind) {
+  async function openMarkdown(kind: RunMarkdownKind) {
+    if (!run || !runMarkdownAvailability(run)[kind]) return;
     const requestedRoute = currentRouteGeneration();
     setMarkdownError(null);
     try {
@@ -285,8 +347,8 @@ export function RunTracePage() {
   }
 
   const active = !terminalStatuses.has(run.status);
-  const failedTasks = run.tasks.filter((task) => task.error_code);
   const readiness = latestMaterialReadiness(run.artifacts);
+  const markdownAvailability = runMarkdownAvailability(run);
 
   return (
     <div className="page run-trace-page">
@@ -307,12 +369,7 @@ export function RunTracePage() {
       </header>
 
       <ErrorNotice error={error} onRetry={() => { void refresh(); }} />
-      {failedTasks.length > 0 && (
-        <section className="run-failure" role="alert">
-          <strong>执行错误</strong>
-          {failedTasks.map((task) => <p key={task.id}><code>{task.error_code}</code> · {task.error_message} · Task <code>{task.id}</code></p>)}
-        </section>
-      )}
+      <RunTaskNotices run={run} quality={quality} />
 
       <section className="run-overview-grid">
         <article><span>Tasks</span><strong>{run.tasks.length}</strong><small>{run.tasks.filter((task) => task.status === "succeeded").length} succeeded</small></article>
@@ -336,10 +393,10 @@ export function RunTracePage() {
       <section className="export-strip">
         <div><p className="eyebrow">READABLE OUTPUTS</p><h2>查看生成结果</h2></div>
         <div>
-          <button className="button ghost" onClick={() => { void openMarkdown("scaffold"); }}>采访脚手架</button>
-          <button className="button ghost" onClick={() => { void openMarkdown("draft"); }} disabled={run.status !== "succeeded"}>口播稿</button>
-          <button className="button ghost" onClick={() => { void openMarkdown("show-notes"); }} disabled={run.status !== "succeeded"}>Show Notes</button>
-          <button className="button ghost" onClick={() => { void openMarkdown("quality"); }} disabled={!quality}>质量报告</button>
+          {markdownAvailability.scaffold && <button className="button ghost" onClick={() => { void openMarkdown("scaffold"); }}>采访脚手架</button>}
+          {markdownAvailability.draft && <button className="button ghost" onClick={() => { void openMarkdown("draft"); }}>口播稿</button>}
+          {markdownAvailability["show-notes"] && <button className="button ghost" onClick={() => { void openMarkdown("show-notes"); }}>Show Notes</button>}
+          {markdownAvailability.quality && <button className="button ghost" onClick={() => { void openMarkdown("quality"); }} disabled={!quality}>质量报告</button>}
         </div>
       </section>
       <ErrorNotice error={markdownError} />
@@ -367,6 +424,7 @@ export function RunTracePage() {
             <FeedbackPanel runId={run.id} />
           </div>
           <div>
+            <ImprovementAnswerPanel run={run} improvement={improvement} />
             {supplemental && <SupplementalInterviewPanel run={run} record={supplemental} />}
             <RevisionPanel run={run} improvement={improvement} />
           </div>

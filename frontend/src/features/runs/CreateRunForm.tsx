@@ -14,6 +14,13 @@ function submissionId() {
   return `ui-run-${id}`;
 }
 
+function isAiAssistedSource(source: SourceSummary): boolean {
+  return (
+    source.metadata.origin === "ai_assisted" ||
+    typeof source.metadata.source_starter_run_id === "string"
+  );
+}
+
 export function CreateRunForm({ projectId, sources }: { projectId: string; sources: SourceSummary[] }) {
   const navigate = useNavigate();
   const retryRef = useRef<{ fingerprint: string; submissionId: string } | null>(null);
@@ -34,6 +41,15 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
   const [error, setError] = useState<unknown>(null);
 
   const selectedCount = factualIds.length + styleIds.length;
+  const factualSources = useMemo(
+    () => sources.filter((source) => source.source_type !== "writing_sample"),
+    [sources],
+  );
+  const eligibleStyleSources = useMemo(
+    () => sources.filter((source) => !isAiAssistedSource(source)),
+    [sources],
+  );
+  const hiddenAiStyleSourceCount = sources.length - eligibleStyleSources.length;
   const input = useMemo<CreateEpisodeRunInput>(() => ({
     topic,
     factualSourceIds: factualIds,
@@ -122,7 +138,7 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
       <fieldset>
         <legend>事实素材 <span>至少 1 份</span></legend>
         <div className="source-choice-list">
-          {sources.map((source) => (
+          {factualSources.map((source) => (
             <label className={`source-choice ${factualIds.includes(source.id) ? "selected" : ""}`} key={source.id}>
               <input
                 type="checkbox"
@@ -171,7 +187,7 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
           <fieldset>
             <legend>仅参考表达风格 <span>可选，不作为事实</span></legend>
             <div className="source-choice-list compact">
-              {sources.map((source) => (
+              {eligibleStyleSources.map((source) => (
                 <label className={`source-choice ${styleIds.includes(source.id) ? "selected style" : ""}`} key={source.id}>
                   <input
                     type="checkbox"
@@ -184,6 +200,11 @@ export function CreateRunForm({ projectId, sources }: { projectId: string; sourc
                 </label>
               ))}
             </div>
+            {hiddenAiStyleSourceCount > 0 && (
+              <p className="ai-style-boundary">
+                {hiddenAiStyleSourceCount} 份 AI 辅助素材未列入风格样本。风格模仿只使用你本人真实写过或说过的内容。
+              </p>
+            )}
           </fieldset>
           {styleIds.length > 0 && (
             <fieldset className="style-consent-panel">

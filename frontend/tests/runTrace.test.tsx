@@ -1,19 +1,28 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ArtifactView,
   MaterialReadinessView,
   RunView,
 } from "../src/api/types";
 import { HumanCheckpointPanel } from "../src/features/runs/RunActions";
-import { commitForCurrentRunRoute } from "../src/features/runs/RunTracePage";
+import {
+  commitForCurrentRunRoute,
+  partitionRunTaskErrors,
+  RunTaskNotices,
+} from "../src/features/runs/RunTracePage";
 import {
   latestMaterialReadiness,
   isCurrentRunGeneration,
+  loadSupplementalInterviewForRun,
   redactInternalIds,
+  runMarkdownAvailability,
   shouldLoadDerivedForRun,
+  shouldLoadSupplementalInterview,
   supportsSupplementalInterview,
 } from "../src/lib/runTrace";
+
+afterEach(cleanup);
 
 function artifact(
   id: string,
@@ -70,6 +79,16 @@ function run(overrides: Partial<RunView> = {}): RunView {
   };
 }
 
+function outputArtifact(id: string, kind: string): ArtifactView {
+  return {
+    id,
+    task_id: `task_${id}`,
+    kind,
+    created_at: "2026-07-31T00:00:00Z",
+    content_json: {},
+  };
+}
+
 describe("Run Trace loading guards", () => {
   it("loads derived records once per succeeded Run and supplemental plans only for v9", () => {
     const succeeded = run();
@@ -78,6 +97,84 @@ describe("Run Trace loading guards", () => {
     expect(shouldLoadDerivedForRun(run({ status: "running" }), null)).toBe(false);
     expect(supportsSupplementalInterview("v8")).toBe(false);
     expect(supportsSupplementalInterview("v9")).toBe(true);
+  });
+
+  it("exposes parent episode Markdown only when its persisted artifacts support it", () => {
+    const draft = outputArtifact("artifact_draft", "build_podcast_draft_result");
+    const parentEpisode = run({
+      output_artifact_id: draft.id,
+      artifacts: [
+        outputArtifact("artifact_scaffold", "build_interview_scaffold_result"),
+        draft,
+        outputArtifact("artifact_quality", "draft_quality_report"),
+      ],
+    });
+
+    expect(runMarkdownAvailability(parentEpisode)).toEqual({
+      scaffold: true,
+      draft: true,
+      "show-notes": true,
+      quality: true,
+    });
+  });
+
+  it("does not expose a parent-only scaffold on a revision Run", () => {
+    const draft = outputArtifact("artifact_revision", "revise_podcast_draft_result");
+    const revision = run({
+      parent_run_id: "run_parent",
+      workflow_type: "draft-revision",
+      workflow_version: "v9",
+      output_artifact_id: draft.id,
+      artifacts: [draft, outputArtifact("artifact_quality", "draft_quality_report")],
+    });
+
+    expect(runMarkdownAvailability(revision)).toEqual({
+      scaffold: false,
+      draft: true,
+      "show-notes": true,
+      quality: true,
+    });
+  });
+
+  it("does not fetch an optional supplemental plan merely because a Run is v9", async () => {
+    const revisionWithoutPlan = run({
+      parent_run_id: "run_parent",
+      workflow_type: "draft-revision",
+      workflow_version: "v9",
+    });
+    const load = vi.fn(async () => ({ plan: "unexpected" }));
+
+    expect(shouldLoadSupplementalInterview(revisionWithoutPlan)).toBe(false);
+    await expect(loadSupplementalInterviewForRun(revisionWithoutPlan, load)).resolves.toBeNull();
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it("fetches the supplemental plan when a succeeded planner Task advertises one", async () => {
+    const revisionWithPlan = run({
+      parent_run_id: "run_parent",
+      workflow_type: "draft-revision",
+      workflow_version: "v9",
+      tasks: [{
+        id: "task_plan",
+        parent_task_id: null,
+        kind: "plan_draft_supplemental_interview",
+        agent_type: "interviewer",
+        status: "succeeded",
+        attempt: 1,
+        max_attempts: 1,
+        output_artifact_id: "artifact_plan",
+        error_code: null,
+        error_message: null,
+        created_at: "2026-07-31T00:00:00Z",
+        updated_at: "2026-07-31T00:00:01Z",
+      }],
+    });
+    const load = vi.fn(async (runId: string) => ({ runId }));
+
+    expect(shouldLoadSupplementalInterview(revisionWithPlan)).toBe(true);
+    await expect(loadSupplementalInterviewForRun(revisionWithPlan, load))
+      .resolves.toEqual({ runId: revisionWithPlan.id });
+    expect(load).toHaveBeenCalledOnce();
   });
 
   it("rejects late responses from an older route generation", () => {
@@ -109,6 +206,65 @@ describe("Run Trace loading guards", () => {
     expect(commitForCurrentRunRoute(newRoute, newRoute, () => committed.push("current")))
       .toBe(true);
     expect(committed).toEqual(["current"]);
+  });
+});
+
+describe("Run task notices", () => {
+  const failedReviewer = {
+    id: "task_review",
+    parent_task_id: null,
+    kind: "review_podcast_draft",
+    agent_type: "quality_reviewer",
+    status: "failed",
+    attempt: 2,
+    max_attempts: 2,
+    output_artifact_id: null,
+    error_code: "invalid_model_review_evidence",
+    error_message: "model output failed strict validation",
+    created_at: "2026-07-31T00:00:00Z",
+    updated_at: "2026-07-31T00:00:01Z",
+  };
+  const unavailableQuality = {
+    report: {
+      decision: "automated_review_incomplete",
+      model_review_status: "unavailable",
+      model_review_unavailable_reason: "invalid_model_review_evidence",
+    },
+    artifact: artifact("quality_report", "2026-07-31T00:00:02Z", 0, 0),
+  };
+
+  it("treats a failed advisory Reviewer on a succeeded Run as a warning", () => {
+    const succeeded = run({ tasks: [failedReviewer] });
+    expect(partitionRunTaskErrors(succeeded, unavailableQuality)).toMatchObject({
+      blocking: [],
+      advisoryReview: [failedReviewer],
+      showReviewWarning: true,
+    });
+
+    render(<RunTaskNotices run={succeeded} quality={unavailableQuality} />);
+    expect(screen.getByText("自动质量审阅未完成")).toBeInTheDocument();
+    expect(screen.getByText(/口播稿已保留，Run 已正常完成/)).toBeInTheDocument();
+    expect(screen.queryByText("执行错误")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("does not flash a fatal error before the derived quality report loads", () => {
+    render(<RunTaskNotices run={run({ tasks: [failedReviewer] })} quality={null} />);
+    expect(screen.getByText("自动质量审阅未完成")).toBeInTheDocument();
+    expect(screen.queryByText("执行错误")).not.toBeInTheDocument();
+  });
+
+  it("keeps true failed Runs as blocking errors", () => {
+    const failed = run({ status: "failed", tasks: [failedReviewer] });
+    expect(partitionRunTaskErrors(failed, unavailableQuality)).toMatchObject({
+      blocking: [failedReviewer],
+      advisoryReview: [],
+      showReviewWarning: false,
+    });
+
+    render(<RunTaskNotices run={failed} quality={unavailableQuality} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("执行错误");
+    expect(screen.queryByText("自动质量审阅未完成")).not.toBeInTheDocument();
   });
 });
 

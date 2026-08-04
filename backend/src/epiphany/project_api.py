@@ -11,7 +11,13 @@ from epiphany.project_schemas import (
     ProjectSummaryView,
     ProjectView,
 )
-from epiphany.project_service import ProjectNotFound, ProjectService
+from epiphany.project_service import (
+    ProjectNotFound,
+    ProjectService,
+    SourceStarterConfirmationConflict,
+    SourceStarterConfirmationNotAllowed,
+    SourceStarterNotFound,
+)
 from epiphany.schemas import CreateSourceRequest, RunView
 from epiphany.services import (
     InvalidRunPayload,
@@ -19,6 +25,11 @@ from epiphany.services import (
     ProjectSourceNotLinked,
     RunService,
     RunSourceNotFound,
+)
+from epiphany.source_starter_schemas import (
+    ConfirmSourceStarterRequest,
+    CreateSourceStarterRequest,
+    SourceStarterConfirmationResponse,
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -125,3 +136,70 @@ async def create_project_run(
         response.status_code = status.HTTP_200_OK
         response.headers["X-Idempotent-Replay"] = "true"
     return result.run
+
+
+@router.post(
+    "/{project_id}/source-starters",
+    response_model=RunView,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_project_source_starter(
+    project_id: str,
+    body: CreateSourceStarterRequest,
+    response: Response,
+    service: RunServiceDependency,
+) -> RunView:
+    try:
+        result = await service.create_project_source_starter(
+            project_id=project_id,
+            submission_id=body.submission_id,
+            source_title=body.source_title,
+            source_type=body.source_type,
+            mode=body.mode,
+            intent=body.intent,
+        )
+    except ProjectNotFound as error:
+        raise HTTPException(status_code=404, detail="project not found") from error
+    except ProjectRunConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except InvalidRunPayload as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if result.idempotent_replay:
+        response.status_code = status.HTTP_200_OK
+        response.headers["X-Idempotent-Replay"] = "true"
+    return result.run
+
+
+@router.post(
+    "/{project_id}/source-starters/{run_id}/confirm",
+    response_model=SourceStarterConfirmationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def confirm_project_source_starter(
+    project_id: str,
+    run_id: str,
+    body: ConfirmSourceStarterRequest,
+    response: Response,
+    service: ProjectServiceDependency,
+) -> SourceStarterConfirmationResponse:
+    try:
+        result = await service.confirm_source_starter(
+            project_id,
+            run_id,
+            submission_id=body.submission_id,
+            title=body.title,
+            source_type=body.source_type,
+            text=body.text,
+        )
+    except ProjectNotFound as error:
+        raise HTTPException(status_code=404, detail="project not found") from error
+    except SourceStarterNotFound as error:
+        raise HTTPException(status_code=404, detail="source starter not found") from error
+    except SourceStarterConfirmationNotAllowed as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except SourceStarterConfirmationConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if result.idempotent_replay:
+        response.status_code = status.HTTP_200_OK
+        response.headers["X-Idempotent-Replay"] = "true"
+    return result

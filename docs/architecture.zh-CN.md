@@ -2,7 +2,7 @@
 
 状态：Draft
 
-日期：2026-07-31
+日期：2026-08-03
 
 ## 1. 目标
 
@@ -65,6 +65,42 @@ Subagent。
 
 ## 4. 第一个 Workflow
 
+M5.1 同时增加一条互不改变播客主 Workflow 的短流程，用于跨过 Source 空白页：
+
+```text
+POST Project source-starter
+  -> 服务端快照 Project 标题和说明
+  -> 创建 source-starter Run v1
+  -> queue one build_source_starter Task
+  -> reserve one ModelCall
+  -> Fake / DeepSeek Provider
+  -> strict SourceStarterCandidate validation
+  -> at most one model-output repair attempt
+  -> if still unsafe: server_line_grounding or server_safe_template
+  -> validate the repaired/fallback candidate with the same full contract
+  -> persist source_starter_candidate Artifact
+  -> Run waiting_for_user / awaiting_source_confirmation
+  -> 页面恢复候选并等待用户编辑与确认
+  -> POST confirm
+  -> one atomic transaction:
+       import Source + SourceSegments
+       + link ProjectSource
+       + persist server-owned source_starter_confirmation Artifact
+       + append confirmation/success Events
+       + Run succeeded / complete
+```
+
+候选 Artifact 与正式 Source 刻意分开。模型调用成功只说明有一份结构合法的写作
+起点，不说明它是用户经历或事实证据。确认 endpoint 才是 Source 写边界，并保存
+`ai_assisted` provenance。它使用普通文本编辑区，所以不依赖未来的 Scaffold /
+Draft 可视化编辑器。
+
+页面四步进度由同一条持久 Trace 翻译得到：Project 快照和 Task 开始表示“准备
+上下文”，ModelCall/Task 表示“模型生成”，候选 Artifact 与 workflow Event
+表示“校验结果”，checkbox 与 confirmation Artifact 表示“等待编辑确认”。最后
+一步不是计时器或伪装成运行中的模型 Task，而是真实的 durable Run checkpoint；
+checkbox 只代表本地意图，只有 confirmation Artifact/Event 能完成这一步。
+
 ```text
 create_run
   -> prepare factual Sources
@@ -83,8 +119,10 @@ create_run
   -> render Podcast Draft / Show Notes
   -> evaluate deterministic Draft metrics
   -> project + validate trusted deterministic facts
+  -> build bounded D/W evidence catalogs from persisted text
   -> review_podcast_draft (serial root Quality Reviewer)
-  -> validate location + verbatim quote evidence
+  -> hydrate selected opaque evidence IDs on the server
+  -> strictly validate location + verbatim quote + source scope
   -> synthesize code-owned Draft Quality Report + non-compensatory caps
   -> human final review
   -> complete
@@ -173,6 +211,19 @@ blocker 时 decision 仍为 `blocked`，否则为
 `automated_review_incomplete`。Run 正常完成，使已经通过来源合同的 Draft
 仍可导出。用户反馈通过独立 append-only Artifact 保存；当前 origin 是
 调用方自报的分类，E2E 的 `synthetic_test` 会明确标记为非真人信号。
+
+当前 Reviewer 不再要求模型自己复制容易出错的 `location`、逐字 quote 和内部
+Source reference。普通代码先从 Draft block 建立 `D001`、`D002`……目录；只有
+Writing Sample profile 已就绪时，才另建 style-only 的 `W001`、`W002`……目录。
+目录值仍由服务端掌握，模型只返回 opaque evidence ID。Provider 收到模型 JSON
+后，在进入公开输出 validator 以前把 ID hydration 成代码所有的精确位置、短逐字
+引文和引用范围。未知、重复或越界 ID 会被还原为空证据并触发原有严格校验，不会
+被猜测或静默接受。
+
+`review_podcast_draft` 对这类 Schema、逐字证据、引用范围或样本文风证据失败只允许
+一次 bounded repair。第二次调用拿到明确的修复 Prompt，但校验规则完全相同；若仍
+失败，就进入已有的 advisory Reviewer 降级路径，保留 Draft、确定性指标和失败
+provenance。所谓 repair 是再给模型一次满足同一合同的机会，不是放松合同。
 
 M3.5 为新质量 Run 使用 workflow v7，不增加 Task、Artifact 类型或
 migration。版本升级冻结了持久化语义：v6 继续使用 M3.4 的 Reviewer Task
@@ -293,18 +344,27 @@ gap code、限制说明和带 SourceReference 的追问。
 
 M3.4 的 Quality Reviewer 是一个独立串行 Task，但在默认配置下可能复用
 Editor 的同一个模型。它只读取 Draft 实际引用到的 SourceSegment，并通过
-strict schema 返回六张证据卡。`assessable=true` 时必须带 1–5 分、稳定
-location 和存在于该 block 中的 exact quote；无法可靠评价时必须使用
-`assessable=false` 并说明 limitation，不能编造证据。最终 decision 和
-60/40 实验性分数由普通代码计算，且无论结果如何都要求人工审稿。M3.5 又把
-确定性事实放进受校验的 Reviewer Task 输入，并在 60/40 结果之后应用
-代码所有的非补偿 cap；模型高分不能把 blocker 平均掉。
+strict schema 返回六张证据卡。当前合同中，`assessable=true` 时必须带 1–5 分并
+选择服务端给出的 `Dxxx` evidence ID；个人文风维度还必须选择 `Wxxx`。应用代码再
+hydration 成稳定 location、存在于该 block 中的 exact quote 和 Source 范围，并走
+不变的严格 validator。无法可靠评价时必须使用 `assessable=false` 并说明
+limitation，不能编造证据。输出不合格时只允许一次同合同 repair。
+
+最终 decision 和 60/40 实验性分数由普通代码计算，且无论结果如何都要求人工审稿。
+M3.5 又把确定性事实放进受校验的 Reviewer Task 输入，并在 60/40 结果之后应用代码
+所有的非补偿 cap；模型高分不能把 blocker 平均掉。
 
 M3.6 的 Revision Editor 同样是一个串行根 Task。它只读取父 Draft、用户明确
-选择的 feedback/gap/修订指令，以及允许的事实和 style-only 上下文。它必须
-返回完整的新候选而不是原地 patch，并且不能把父 Draft 当作新增事实来源。
-随后创建的 Reviewer Task 与 Revision Editor 属于同一个子 Run，因而预算、
-重试、取消、恢复和 trace 都不会借用父 Run。
+选择的 feedback/gap/修订指令，以及允许的事实和 style-only 上下文。一般 Revision
+仍必须返回完整的新候选，并且不能把父 Draft 当作新增事实来源。唯一例外是同时选择
+`reuse_unused_material` 且带有可信 `length_recovery_plan` 的 M3.8 长度恢复：这条
+路径返回小型 `podcast_revision_patch_v1`，由服务端在父 Draft 的深拷贝上追加受限
+paragraph / section，再把合并结果交给完整 Podcast Draft、引用范围、补充材料、
+Writing Sample 泄漏和 recovery-material 使用校验。模型不能借 patch 修改不可变父稿，
+其他 feedback、风格或补充回答 Revision 也不会偷偷改用 patch 合同。
+
+随后创建的 Reviewer Task 与 Revision Editor 属于同一个子 Run，因而预算、重试、
+取消、恢复和 trace 都不会借用父 Run。
 
 M3.8 没有增加新的 Agent、状态机循环、API 或数据库表。它收紧了
 `reuse_unused_material` 进入 Revision Editor 前的确定性输入：
@@ -315,6 +375,8 @@ M3.8 没有增加新的 Agent、状态机循环、API 或数据库表。它收�
 - 去除完全重复和已经复制进口播的文本后，普通代码最多选 12 个候选；
 - 候选按缺失 must-include、Scaffold gap、补充素材、数字/标点/长度等信号排序；
 - 普通代码根据 Creative Brief 生成当前、85% 最低、目标、115% 最高和缺口；
+- 仅这条带 Recovery Plan 的路径要求模型返回 `podcast_revision_patch_v1`；
+- 服务端合并父稿和 patch 后，仍执行与完整 Draft 相同的全部校验；
 - Revision 后沿用同一套 metrics、Reviewer、非补偿 cap 与 comparison。
 
 该盘点是 ref-level，不是 claim-level。只要一个 Segment 在任一口播单元被引用，
@@ -361,6 +423,19 @@ Planner 是增益步骤：最终失败或输出不合法时，Task 保留失败�
 `generation_mode=deterministic_fallback` 的问题计划。有效 Draft、质量报告和
 Run 成功状态不受影响。整个阶段复用现有 `runs`、`tasks`、`artifacts`、
 `model_calls`、`events` 和 Source 表，因此不需要新的 migration。
+
+2026-08-03 的固定合成 Persona + 真实 DeepSeek + 浏览器操作留下了以下回放证据：
+
+| Run | 角色 | 估算时长 | 结果 |
+| --- | --- | ---: | --- |
+| `run_c41c726fdcca4136bd1e317dbcbce21a` | 初始父稿 | 10.11 分钟 | 低于 15 分钟目标的 12.75 分钟下限 |
+| `run_c344c19e9cb844c29c4daac81434cb00` | grounded length recovery | 12.61 分钟 | patch 合并和完整校验成功；仍短，生成定向问题 |
+| `run_2fec917404234405b9ec7c2c9ab16802` | 四个回答后的显式 Revision | 14.59 分钟 | 引用覆盖 100%，最终分 79，`revision_recommended` |
+
+这条 lineage 不是自动无限扩写：第一条 child Run 来自用户显式选择已有材料恢复；
+第二条 child Run 来自四个问题的新增事实 Source 和另一份显式请求。12.61 分钟没有
+被四舍五入成“已达标”，14.59 分钟也没有因为时长合格就自动宣布可发布；确定性
+warning 仍把分数封顶为 79，最终由用户决定是否继续消除模板化表达或直接录制。
 
 ## 6. 持久化模型
 
@@ -490,6 +565,11 @@ Worker 循环：
 6. 使用当前 lease/fencing token 提交终态并追加 Event。
 7. 触发 Orchestrator 判断是否仍需等待，或执行确定性 fan-in。
 
+Worker 还支持可选的 `batch_cooldown_seconds`。默认值为 0；受限的真实 Provider
+账户可以在每个非空 batch 后等待一段时间，减少一个长调用刚结束就立即发起下一批
+调用的压力。它只是单进程运营节流，不替代 Provider rate limit、任务 retry、Token
+预算或分布式队列。Fake Provider 与普通开发测试始终使用 0。
+
 同一进程内并发上限固定为二。M2.2 的单 Worker 在一个短的 finalization
 临界区中串行提交 Child 终态，避免两个同时完成的 Child 都看见过期的
 兄弟状态；耗时的 Provider 调用仍然真实并发。未来多 Worker 需要借助
@@ -519,6 +599,8 @@ MVP 必须实现：
 - 有界 retry，默认只重试瞬时读取或模型网络错误；
 - parent cancel 标记；
 - Child 提交结果时验证 cancel 状态和 lease token；
+- 已取消 Task 的迟到 Provider 结果不得提交业务 Artifact，但底层调用仍可能已发生并
+  产生费用，因此 ModelCall ledger 必须保留真实结果；
 - 已完成只读 Artifact 可保留；
 - 模型输出经过 Pydantic 严格校验；
 - 单 Run 调用和并发上限；
@@ -640,6 +722,8 @@ POST /projects
 GET  /projects
 GET  /projects/{id}
 POST /projects/{id}/sources
+POST /projects/{id}/source-starters
+POST /projects/{id}/source-starters/{run_id}/confirm
 POST /projects/{id}/runs
 GET  /runs?project_id={id}
 GET  /runs/{id}
@@ -674,7 +758,8 @@ Event，再以短轮询读取 SQLite 中的新 Event；客户端可以用 `after
 ### 本地 Console 的职责边界
 
 - `/projects`：创建、列出并重新打开本地 Project；
-- `/projects/{id}`：导入/查看 Source、配置 Run、查看不可变 Run 历史；
+- `/projects/{id}`：导入/查看 Source；可创建 AI 起步候选、查看四步状态，并在
+  用户编辑确认后把候选导入；配置 Run、查看不可变 Run 历史；
 - `/runs/{id}`：展示 Event Timeline、Task、Artifact、ModelCall、错误与费用；
 - 在人工检查点把文字保存为新 Source，再显式 Resume；
 - 查看 Scaffold、Draft、Show Notes、质量报告，并显式提交反馈或 Revision。
@@ -682,6 +767,50 @@ Event，再以短轮询读取 SQLite 中的新 Event；客户端可以用 `after
 Console 当前不是部署后的多用户产品：没有登录、权限、协作、可视化 Scaffold
 编辑器、音频上传、STT，也不承担数据库备份。Docker 与单机部署仍属于未完成的
 M5 切片。
+
+### Source Starter 的持久化边界
+
+`POST /projects/{id}/source-starters` 使用 Project-scoped `submission_id` 和请求
+fingerprint 创建或重放一个 `source-starter` Run。Run input 保存服务端读取的
+Project 快照、素材设置和可选 intent；浏览器不能把另一份 Project 上下文偷偷
+塞进这个 Run。普通 Worker 为唯一 Task 复用 lease、retry、cancel、fencing、
+调用预算和 ModelCall 账本。这里的“严格输出”不只验证 JSON Schema：确定性 guard
+还会剥离 `[待补充]` / `[待核实]` 区域，逐句拒绝服务端输入无法支持的第一人称
+陈述、直接引语、预设经历和未标注外部事实。第一次 live Provider 验收正是通过发现
+这一缺口，推动了 Prompt 与代码双层修复；被拒绝的原句不会进入持久错误信息。
+
+Hosted model 返回不合格候选时，恢复路径有明确上限：第一次失败只排队一次带修复
+Prompt 的模型重试；第二次若 JSON 结构合法但仍触发安全 guard，普通代码执行
+`server_line_grounding`，保留逐行验证通过的主题内容，只把失败行改成显式
+`[待补充]` 候选；如果结构本身无效、逐行处理失败，或处理后的整体候选仍不合法，
+则使用完全由服务端生成的 `server_safe_template`。两种本地结果都必须再次通过同一
+完整 validator 才能持久化。Candidate Artifact 的 `_execution.fallback` 和
+`model_output_validation_error` 会记录 `server_line_grounding` /
+`server_safe_template` provenance；它们不会伪装成未经修改的模型输出，也不会自动
+成为事实 Source。
+
+候选通过后，Run 进入
+`waiting_for_user / awaiting_source_confirmation`，且仍不会写 Source。
+`POST .../{run_id}/confirm` 要求候选属于同一 Project、Run 处在该确认检查点、
+类型未改变，并对最终标题/类型/正文做语义 fingerprint；`submission_id` 不参与
+内容身份，而是单独追加到 confirmation Artifact 的 `submission_ids` 审计列表。
+
+确认路径和 Cancel 等 Run 写操作共享 mutation lock。`SourceService` 提供不自行
+commit 的 in-session 导入 primitive，使 Source/Segments、ProjectSource、确认
+Artifact、确认/成功 Events 与 Run 状态能在同一数据库事务中提交。任一步异常
+都会整体回滚到等待检查点；相同语义内容换一个 submission ID 重试返回原结果，
+已经确认后改变正文返回 409。模型不能生成这个 Artifact，通用 Source 导入也
+不能伪造它与候选 Run 的 lineage。
+
+前端恢复只读取已有 Project/Run/Event/Artifact。轮询失败后的按钮只重试 GET，
+不会再次创建 Run 或 ModelCall。刷新可以恢复服务端 Candidate Artifact，但不能
+恢复尚未确认、只存在 React 状态中的编辑；恢复结果也不能覆盖页面打开后用户新
+输入的正文。候选一旦被编辑，前端禁止自动清除或叠加新生成版本。
+
+AI-assisted Source 保留 `origin=ai_assisted`。它可以作为用户确认过的事实或
+头脑风暴素材，但不能作为 Writing Sample：创建 Project Run、hydrate
+Editor/Reviewer style profile、Revision 继承/新增风格上下文以及前端选择器都会
+重复检查这个 provenance，避免 AI 文字反过来成为“用户文风”的身份依据。
 
 ### 输出与审稿 API
 

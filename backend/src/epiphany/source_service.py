@@ -41,19 +41,16 @@ class SourceService:
         created = False
         try:
             async with self.database.sessions() as session, session.begin():
-                source = await self._find_by_hash(session, segmentation.content_sha256)
-                if source is None:
-                    source = self._build_source(
-                        title=title.strip(),
-                        source_type=source_type,
-                        metadata=metadata,
-                        segmentation=segmentation,
-                    )
-                    session.add(source)
-                    await session.flush()
-                    created = True
-
-                view = self._to_view(source)
+                result = await self.import_text_in_session(
+                    session,
+                    title=title,
+                    source_type=source_type,
+                    text=text,
+                    metadata=metadata,
+                    segmentation=segmentation,
+                )
+                created = result.created
+                view = result.source
         except IntegrityError:
             # A concurrent retry may win the unique-content insert after our
             # initial read. Re-read the committed Source and return it.
@@ -75,6 +72,39 @@ class SourceService:
             },
         )
         return ImportSourceResponse(created=created, source=view)
+
+    async def import_text_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        title: str,
+        source_type: str,
+        text: str,
+        metadata: dict[str, object],
+        segmentation: SegmentationResult | None = None,
+    ) -> ImportSourceResponse:
+        """Import or deduplicate a Source inside the caller's transaction.
+
+        This lower-level primitive deliberately does not commit, catch an
+        ``IntegrityError``, or emit a success log.  It lets a workflow make the
+        Source, its Project link, provenance Artifact, events, and Run state one
+        atomic durable change.  The public ``import_text`` method remains the
+        convenient standalone transaction boundary.
+        """
+
+        resolved_segmentation = segmentation or segment_source_text(text)
+        source = await self._find_by_hash(session, resolved_segmentation.content_sha256)
+        created = source is None
+        if source is None:
+            source = self._build_source(
+                title=title.strip(),
+                source_type=source_type,
+                metadata=metadata,
+                segmentation=resolved_segmentation,
+            )
+            session.add(source)
+            await session.flush()
+        return ImportSourceResponse(created=created, source=self._to_view(source))
 
     async def get_source(self, source_id: str) -> SourceView:
         async with self.database.sessions() as session:

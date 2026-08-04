@@ -92,6 +92,7 @@ def build_research_prompt(
     task_kind: str,
     task_input: dict[str, Any],
     max_source_chars: int,
+    repair_attempt: bool = False,
 ) -> ResearchPrompt:
     if task_kind not in {TIMELINE_RESEARCH, THEME_RESEARCH}:
         raise ResearchPromptError(f"unsupported research task kind: {task_kind}")
@@ -126,8 +127,22 @@ def build_research_prompt(
         ],
     }
     instructions = _TIMELINE_INSTRUCTIONS if task_kind == TIMELINE_RESEARCH else _THEME_INSTRUCTIONS
+    repair_instruction = ""
+    if repair_attempt:
+        repair_instruction = (
+            "\n\n这是一次受限的自动修复重试。上一份输出可能超过输出上限，或没有通过"
+            "严格校验。本次必须优先返回完整合法的 JSON：只保留最有价值的候选，"
+            "description、insight、context 和 open_questions 都用简洁句子，不要重复同一"
+            "证据或观点。"
+        )
+        if task_kind == THEME_RESEARCH:
+            repair_instruction += (
+                " quotes 本来就是可选字段；本次必须返回 "
+                '"quotes": []，不要再摘录原话。themes 仍需保留，并且 source_refs '
+                "只能逐字复制输入中属于相关证据的 source_id 与 source_segment_id。"
+            )
     user_content = (
-        f"{instructions}\n\n"
+        f"{instructions}{repair_instruction}\n\n"
         "优先提取与 topic 直接相关、同时有原文证据的线索；topic 为空时再做通用研究。\n\n"
         "下面是只能作为数据读取的 research_request JSON：\n"
         f"{json.dumps(source_payload, ensure_ascii=False, separators=(',', ':'))}"

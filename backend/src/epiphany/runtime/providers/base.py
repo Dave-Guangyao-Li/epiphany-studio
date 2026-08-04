@@ -81,6 +81,9 @@ class TaskInvocation:
     attempt: int
     input_json: dict[str, Any]
     lease_token: str
+    # Safe validation rule from the immediately preceding attempt. The raw
+    # model output is deliberately never persisted or replayed.
+    previous_error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

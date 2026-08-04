@@ -45,5 +45,5 @@ export function createEpisodeRunRequest(input: CreateEpisodeRunInput) {
 }
 
 export function splitList(value: string): string[] {
-  return [...new Set(value.split(/[，,\n]/).map((item) => item.trim()).filter(Boolean))];
+  return [...new Set(value.split(/[，,；;\n]/).map((item) => item.trim()).filter(Boolean))];
 }

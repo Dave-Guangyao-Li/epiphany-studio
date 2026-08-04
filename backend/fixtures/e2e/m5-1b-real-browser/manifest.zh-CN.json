@@ -1,0 +1,81 @@
+{
+  "schema_version": "m5_1b_real_browser_fixture_v2",
+  "fixture_kind": "synthetic_non_sensitive",
+  "locale": "zh-CN",
+  "normalization": {
+    "escaped_newline_sequences": "converted_to_real_markdown_blank_lines",
+    "semantic_text_changed": false,
+    "byte_identical_to_local_database": false
+  },
+  "project": {
+    "title": "一个人吃晚饭｜真实浏览器 E2E 2026-08-03",
+    "description": "一个合成的个人叙事项目：30 岁广告策划徐棠在结束七年关系后，从北京搬到杭州并第一次独居。"
+  },
+  "persona": {
+    "name": "徐棠",
+    "age": 30,
+    "occupation": "广告策划",
+    "context": "结束七年关系后从北京搬到杭州，第一次独居。",
+    "voice": ["具体", "诚实", "有一点自嘲", "不强行治愈"]
+  },
+  "creative_brief": {
+    "topic": "一个人吃晚饭：我怎样停止把独处理解成被剩下",
+    "target_duration_minutes": 15,
+    "speaking_rate_chars_per_minute": 280,
+    "scenario": "narrative_solo",
+    "target_audience": "25—35 岁，刚经历分手、搬家或第一次独居，害怕独处等于被剩下的人",
+    "communication_goal": "用三个月里几顿具体晚饭和几个小关系，呈现从逃避空房间到愿意照顾自己的变化；不把独处包装成励志答案",
+    "tone": ["具体", "诚实", "有一点自嘲"],
+    "must_include": [
+      "3月19日焦掉的番茄炒蛋",
+      "文二路菜市场的半把葱",
+      "蓝边碗",
+      "602邻居借开瓶器",
+      "母亲视频和速冻水饺"
+    ],
+    "avoid_patterns": [
+      "空泛总结",
+      "大量排比",
+      "强行升华",
+      "不是……而是……的模板句",
+      "把写作样本里的公交经历当成事实"
+    ]
+  },
+  "sources": [
+    {"path": "source-a-timeline.md", "source_type": "journal", "role": "factual"},
+    {"path": "source-b-reflection.md", "source_type": "journal", "role": "factual"},
+    {"path": "source-c-voice-note.md", "source_type": "voice_note_transcript", "role": "factual"},
+    {"path": "writing-sample.md", "source_type": "writing_sample", "role": "style_only"},
+    {"path": "supplemental-01-neighbor.md", "source_type": "voice_note_transcript", "role": "supplemental"},
+    {"path": "supplemental-02-dinner-details.md", "source_type": "voice_note_transcript", "role": "supplemental"},
+    {"path": "improvement-answers.md", "source_type": "voice_note_transcript", "role": "historical_draft_improvement"},
+    {"path": "targeted-interview-answers-round-1.md", "source_type": "voice_note_transcript", "role": "draft_aware_interview"}
+  ],
+  "expected_revision_chain": [
+    {
+      "workflow_type": "episode-research",
+      "purpose": "source-grounded parent draft"
+    },
+    {
+      "workflow_type": "podcast-revision",
+      "action": "reuse_unused_material",
+      "contract": "podcast_revision_patch_v1",
+      "purpose": "one bounded, evidence-grounded length recovery"
+    },
+    {
+      "workflow_type": "podcast-revision",
+      "action": "add_supplemental_material",
+      "answered_question_ids": ["q1", "q2", "q4", "q6"],
+      "source_path": "targeted-interview-answers-round-1.md",
+      "purpose": "full-draft revision using new user-supplied facts"
+    }
+  ],
+  "expected_quality_boundaries": {
+    "minimum_duration_ratio": 0.85,
+    "citation_coverage_ratio": 1.0,
+    "exact_duplicate_paragraphs": 0,
+    "writing_sample_must_not_be_used_as_factual_evidence": true,
+    "duration_pass_does_not_imply_publishable": true
+  },
+  "source_starter_fixture": "source-starter-scenario.zh-CN.json"
+}

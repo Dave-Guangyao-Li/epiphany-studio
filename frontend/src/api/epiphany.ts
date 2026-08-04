@@ -2,7 +2,9 @@ import { apiOptional, apiRequest, apiText } from "./client";
 import type {
   CreateEpisodeRunInput,
   CreateRevisionResponse,
+  CreateSourceStarterRequest,
   EventView,
+  ConfirmSourceStarterResponse,
   ImportSourceResponse,
   ImprovementPlanRecord,
   ProjectDetail,
@@ -11,6 +13,7 @@ import type {
   ResumeRunResponse,
   RunView,
   SourceDetail,
+  SourceStarterSourceType,
   SourceType,
   SupplementalInterviewPlanRecord,
   UserFeedbackRequest,
@@ -33,6 +36,25 @@ export const projectsApi = {
       method: "POST",
       body: JSON.stringify({ ...body, metadata: {} }),
     }),
+  createSourceStarter: (projectId: string, body: CreateSourceStarterRequest) =>
+    apiRequest<RunView>(`/projects/${projectId}/source-starters`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  confirmSourceStarter: (
+    projectId: string,
+    runId: string,
+    body: {
+      submission_id: string;
+      title: string;
+      source_type: SourceStarterSourceType;
+      text: string;
+    },
+  ) =>
+    apiRequest<ConfirmSourceStarterResponse>(
+      `/projects/${projectId}/source-starters/${runId}/confirm`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   createRun: (projectId: string, input: CreateEpisodeRunInput, submissionId: string) =>
     apiRequest<RunView>(`/projects/${projectId}/runs`, {
       method: "POST",

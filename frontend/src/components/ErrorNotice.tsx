@@ -17,7 +17,7 @@ export function ErrorNotice({ error, onRetry }: { error: unknown; onRetry?: () =
           </dl>
         )}
       </div>
-      {onRetry && <button className="button secondary" onClick={onRetry}>重试</button>}
+      {onRetry && <button type="button" className="button secondary" onClick={onRetry}>重试</button>}
     </section>
   );
 }

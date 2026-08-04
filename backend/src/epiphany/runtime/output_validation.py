@@ -16,6 +16,7 @@ from epiphany.revision_schemas import (
     REVISE_PODCAST_DRAFT,
     validate_podcast_revision_output,
 )
+from epiphany.source_starter_schemas import BUILD_SOURCE_STARTER, validate_source_starter_output
 from epiphany.supplemental_interview_schemas import (
     PLAN_DRAFT_SUPPLEMENTAL_INTERVIEW,
     validate_supplemental_interview_output,
@@ -47,6 +48,8 @@ def validate_task_output(
             task_input=task_input,
             content=content,
         )
+    if task_kind == BUILD_SOURCE_STARTER:
+        return validate_source_starter_output(task_input=task_input, content=content)
     if task_kind == BUILD_PODCAST_DRAFT:
         return validate_podcast_draft_output(
             task_input=task_input,

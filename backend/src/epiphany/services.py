@@ -96,6 +96,12 @@ from epiphany.schemas import (
     RunView,
     TaskView,
 )
+from epiphany.source_starter_schemas import (
+    BUILD_SOURCE_STARTER,
+    SOURCE_STARTER_WORKFLOW_TYPE,
+    SOURCE_STARTER_WORKFLOW_VERSION,
+    SourceStarterTaskInput,
+)
 from epiphany.state_machine import (
     RunStatus,
     TaskStatus,
@@ -192,7 +198,13 @@ class SupplementalInterviewPlanNotReady(ValueError):
 
 
 class RunService:
-    def __init__(self, database: Database, orchestrator: Orchestrator) -> None:
+    def __init__(
+        self,
+        database: Database,
+        orchestrator: Orchestrator,
+        *,
+        mutation_lock: asyncio.Lock | None = None,
+    ) -> None:
         self.database = database
         self.orchestrator = orchestrator
         # The MVP is explicitly single-process. Every Run mutation that can
@@ -202,7 +214,7 @@ class RunService:
         # escape. The Artifact unique key remains the durable duplicate-data
         # guard for Resume in SQLite. Cross-process replay semantics are a later
         # deployment concern.
-        self._run_mutation_lock = asyncio.Lock()
+        self._run_mutation_lock = mutation_lock or asyncio.Lock()
 
     async def _load_writing_style_task_fields(
         self,
@@ -233,6 +245,8 @@ class RunService:
             if source_ids
             else []
         )
+        if any(_source_is_ai_assisted(source) for source in sources):
+            raise RunResumeNotAllowed("AI-assisted Sources cannot be used as writing-style samples")
         segments_by_key = {
             (source.id, segment.id): segment for source in sources for segment in source.segments
         }
@@ -272,6 +286,14 @@ class RunService:
                 raise ProjectNotFound(project_id)
             research_source_segments: list[dict[str, str]] | None = None
             writing_style_profile: WritingStyleProfile | None = None
+            if workflow_type == SOURCE_STARTER_WORKFLOW_TYPE:
+                try:
+                    starter_input = SourceStarterTaskInput.model_validate(
+                        {"task_kind": BUILD_SOURCE_STARTER, **payload}
+                    )
+                except ValidationError as error:
+                    raise InvalidRunPayload("invalid source-starter payload") from error
+                payload = starter_input.model_dump(mode="json", exclude={"task_kind"})
             if workflow_type == "episode-research":
                 try:
                     research_payload = EpisodeResearchPayload.model_validate(payload)
@@ -306,11 +328,30 @@ class RunService:
                 ]
                 if missing_source_ids:
                     raise RunSourceNotFound(missing_source_ids[0])
+                factual_writing_sample_ids = [
+                    source_id
+                    for source_id in research_payload.source_ids
+                    if sources_by_id[source_id].source_type == "writing_sample"
+                ]
+                if factual_writing_sample_ids:
+                    raise InvalidRunPayload(
+                        "writing_sample Sources are style-only and cannot be used as "
+                        "factual source_ids"
+                    )
                 missing_style_source_ids = [
                     source_id for source_id in style_source_ids if source_id not in sources_by_id
                 ]
                 if missing_style_source_ids:
                     raise RunSourceNotFound(missing_style_source_ids[0])
+                ai_assisted_style_source_ids = [
+                    source_id
+                    for source_id in style_source_ids
+                    if _source_is_ai_assisted(sources_by_id[source_id])
+                ]
+                if ai_assisted_style_source_ids:
+                    raise InvalidRunPayload(
+                        "AI-assisted Sources cannot be used as writing-style samples"
+                    )
                 if project_id is not None:
                     linked_source_ids = set(
                         (
@@ -359,10 +400,16 @@ class RunService:
                 ]
 
             initial_step = (
-                "research_fan_out" if workflow_type == "episode-research" else "prepare_sources"
+                BUILD_SOURCE_STARTER
+                if workflow_type == SOURCE_STARTER_WORKFLOW_TYPE
+                else "research_fan_out"
+                if workflow_type == "episode-research"
+                else "prepare_sources"
             )
             workflow_version = (
-                (
+                SOURCE_STARTER_WORKFLOW_VERSION
+                if workflow_type == SOURCE_STARTER_WORKFLOW_TYPE
+                else (
                     (
                         QUALITY_REVIEW_WORKFLOW_VERSION
                         if research_payload.draft_quality is not None
@@ -473,6 +520,63 @@ class RunService:
             run = await self.create_run(
                 workflow_type=workflow_type,
                 payload=payload,
+                project_id=project_id,
+                submission_id=submission_id,
+                request_fingerprint=fingerprint,
+            )
+            return CreateProjectRunResult(run=run, idempotent_replay=False)
+
+    async def create_project_source_starter(
+        self,
+        *,
+        project_id: str,
+        submission_id: str,
+        source_title: str | None,
+        source_type: str,
+        mode: str,
+        intent: str | None,
+    ) -> CreateProjectRunResult:
+        request_payload: dict[str, object] = {
+            "source_title": source_title,
+            "source_type": source_type,
+            "mode": mode,
+            "intent": intent,
+        }
+        fingerprint = _project_run_request_fingerprint(
+            workflow_type=SOURCE_STARTER_WORKFLOW_TYPE,
+            payload=request_payload,
+        )
+        async with self._run_mutation_lock:
+            async with self.database.sessions() as session:
+                project = await session.get(Project, project_id)
+                if project is None:
+                    raise ProjectNotFound(project_id)
+                existing = (
+                    await session.execute(
+                        select(Run).where(
+                            Run.project_id == project_id,
+                            Run.submission_id == submission_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                project_snapshot = {
+                    "project_id": project.id,
+                    "title": project.title,
+                    "description": project.description,
+                }
+            if existing is not None:
+                if existing.request_fingerprint != fingerprint:
+                    raise ProjectRunConflict(
+                        "submission_id was already used with a different source-starter request"
+                    )
+                return CreateProjectRunResult(
+                    run=await self.get_run(existing.id),
+                    idempotent_replay=True,
+                )
+
+            run = await self.create_run(
+                workflow_type=SOURCE_STARTER_WORKFLOW_TYPE,
+                payload={"project": project_snapshot, **request_payload},
                 project_id=project_id,
                 submission_id=submission_id,
                 request_fingerprint=fingerprint,
@@ -1307,6 +1411,21 @@ class RunService:
                             [],
                         )
                     }
+                    persisted_style_sources = (
+                        (
+                            await session.execute(
+                                select(Source).where(Source.id.in_(style_source_ids))
+                            )
+                        )
+                        .scalars()
+                        .all()
+                        if style_source_ids
+                        else []
+                    )
+                    if any(_source_is_ai_assisted(source) for source in persisted_style_sources):
+                        raise DraftRevisionNotAllowed(
+                            "AI-assisted Sources cannot be used as writing-style samples"
+                        )
                     duplicate_source_ids = [
                         source_id
                         for source_id in request.source_ids
@@ -2066,8 +2185,10 @@ class RunService:
                             "run does not have a valid interview scaffold checkpoint"
                         ) from error
 
+                    initial_source_ids = list(run.input_json["source_ids"])
                     source_ids_to_load = sorted(
                         {
+                            *initial_source_ids,
                             *source_ids,
                             *(source_id for source_id, _ in scaffold_reference_keys),
                         }
@@ -2089,6 +2210,16 @@ class RunService:
                     ]
                     if missing_source_ids:
                         raise RunSourceNotFound(missing_source_ids[0])
+                    writing_sample_source_ids = [
+                        source_id
+                        for source_id in source_ids
+                        if sources_by_id[source_id].source_type == "writing_sample"
+                    ]
+                    if writing_sample_source_ids:
+                        raise RunResumeNotAllowed(
+                            "writing_sample Sources are style-only and cannot be submitted "
+                            "as factual material"
+                        )
 
                     source_refs = [
                         {
@@ -2104,9 +2235,16 @@ class RunService:
                     submission_artifact_id = new_id("art")
 
                     if run.workflow_version == EDITOR_RESEARCH_WORKFLOW_VERSION:
+                        factual_initial_source_ids = [
+                            source_id
+                            for source_id in initial_source_ids
+                            if source_id in sources_by_id
+                            and sources_by_id[source_id].source_type != "writing_sample"
+                        ]
                         segments_by_key = {
                             (source.id, segment.id): segment
-                            for source in sources
+                            for source_id in factual_initial_source_ids
+                            for source in [sources_by_id[source_id]]
                             for segment in source.segments
                         }
                         missing_scaffold_references = [
@@ -2117,14 +2255,10 @@ class RunService:
                                 "interview scaffold source material is unavailable"
                             )
 
-                        initial_source_segments = [
-                            {
-                                "source_id": source_id,
-                                "source_segment_id": segment_id,
-                                "text": segments_by_key[(source_id, segment_id)].text,
-                            }
-                            for source_id, segment_id in scaffold_reference_keys
-                        ]
+                        initial_source_segments = _segments_for_sources(
+                            factual_initial_source_ids,
+                            sources_by_id,
+                        )
                         supplemental_source_segments = [
                             {
                                 "source_id": source.id,
@@ -2411,29 +2545,48 @@ class RunService:
                     ]
                     if missing_source_ids:
                         raise RunSourceNotFound(missing_source_ids[0])
+                    writing_sample_source_ids = [
+                        source_id
+                        for source_id in source_ids
+                        if sources_by_id[source_id].source_type == "writing_sample"
+                    ]
+                    if writing_sample_source_ids:
+                        raise RunResumeNotAllowed(
+                            "writing_sample Sources are style-only and cannot be submitted "
+                            "as factual material"
+                        )
 
-                    segments_by_key = {
+                    factual_initial_source_ids = [
+                        source_id
+                        for source_id in initial_source_ids
+                        if source_id in sources_by_id
+                        and sources_by_id[source_id].source_type != "writing_sample"
+                    ]
+                    initial_segments_by_key = {
                         (source.id, segment.id): segment
-                        for source in sources
+                        for source_id in factual_initial_source_ids
+                        for source in [sources_by_id[source_id]]
                         for segment in source.segments
                     }
                     missing_scaffold_references = [
-                        key for key in scaffold_reference_keys if key not in segments_by_key
+                        key for key in scaffold_reference_keys if key not in initial_segments_by_key
                     ]
                     if missing_scaffold_references:
                         raise RunResumeNotAllowed(
                             "interview scaffold source material is unavailable"
                         )
-                    initial_segments = [
-                        {
-                            "source_id": source_id,
-                            "source_segment_id": segment_id,
-                            "text": segments_by_key[(source_id, segment_id)].text,
-                        }
-                        for source_id, segment_id in scaffold_reference_keys
+                    initial_segments = _segments_for_sources(
+                        factual_initial_source_ids,
+                        sources_by_id,
+                    )
+                    factual_supplemental_source_ids = [
+                        source_id
+                        for source_id in supplemental_source_ids
+                        if source_id in sources_by_id
+                        and sources_by_id[source_id].source_type != "writing_sample"
                     ]
                     supplemental_segments = _segments_for_sources(
-                        supplemental_source_ids,
+                        factual_supplemental_source_ids,
                         sources_by_id,
                     )
                     if len(supplemental_segments) > MAX_EDITOR_SUPPLEMENTAL_SEGMENTS:
@@ -2689,6 +2842,12 @@ def _stable_unique(values: list[str]) -> list[str]:
         seen.add(value)
         ordered.append(value)
     return ordered
+
+
+def _source_is_ai_assisted(source: Source) -> bool:
+    """Treat server-owned provenance as a hard style-identity trust boundary."""
+
+    return source.metadata_json.get("origin") == "ai_assisted"
 
 
 def _project_run_request_fingerprint(

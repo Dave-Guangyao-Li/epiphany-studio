@@ -1,6 +1,6 @@
 # MVP 路线图
 
-更新时间：2026-07-31
+更新时间：2026-08-04
 
 路线图按可演示的纵向切片推进，不按“先把所有基础设施搭完”推进。
 
@@ -524,6 +524,7 @@ Event `sequence` 从 SQLite 回放，再轮询新事件；空闲连接发送 hea
 
 - [x] Project/Source 页面
 - [x] Run trace 页面
+- [x] M5.1 AI 起步助手：持久候选、四步进度、用户确认与 Source provenance
 - [ ] Scaffold 编辑与恢复
 - [ ] Dockerfile
 - [ ] 单机部署
@@ -534,6 +535,55 @@ Event `sequence` 从 SQLite 回放，再轮询新事件；空闲连接发送 hea
 检查点还能粘贴补充口述并 Resume。Project 创建 Run 使用调用方稳定的
 `submission_id` 防止双击或网络重试产生两个 Run。Scaffold 仍然只能查看/导出，
 还没有可视化编辑器；Docker、单机部署和生产备份也没有完成，因此不提前勾选。
+
+M5.1 先解决空 Project 的第一笔：只允许日记、播客旧稿和其他纯文本创建独立
+`source-starter` Run；候选在普通文本框中编辑，因此不依赖 Scaffold 富文本
+编辑器。页面把 Run/Task/ModelCall/Artifact/Event 翻译成“准备上下文、模型
+生成、校验、用户确认”四步。生成成功后 Run 会持久化停在
+`waiting_for_user / awaiting_source_confirmation`，而不是提前成功。只有用户
+核对后，服务端才在同一事务中导入正文、关联 Project、写 confirmation
+Artifact/Event 并让 Run 成功。确认按标题/类型/正文做语义幂等，重试 ID 单独
+审计；网络重试只 GET 同一 Run，不重复模型调用。写作样本和口述转写禁用这条
+路径，确认后的 AI-assisted Source 也不能作为后续 Writing Sample。
+
+M5.1b 将 live 失败边界收紧为“至多一次模型 repair → `server_line_grounding` →
+安全模板”：逐行 grounding 只保留通过确定性校验的主题内容，危险部分变成显式待
+补充/待核实；完整候选随后仍需再次校验和人工确认。页面刷新还能从 Run input 恢复
+原 `mode` 与 `intent`。
+
+Playwright/DeepSeek 在零 Source 的潜水 Project 上验证了两种模式：探索提纲 Run
+`run_3c637233a17843119f546c1521ec0024` 一次通过后未导入；示例草稿 Run
+`run_8eda93938e4b4a1881eb47453bd5073f` 经 line grounding 后，由模拟用户编辑并确认
+成 516 字 Source。另一条三段口播 Run 链最终达到 14.59 分钟与 100% 段落引用，
+但因平行对照句式过多仍被限制为 79 分和 `revision_recommended`。这证明 UI、持久
+状态、人工检查点、Revision 与质量刹车能一起工作，不代表内容自动达到发布质量。
+
+M5.1c 又用《Obsession》(2026) Bear 视角的转换性合成人设跑了一次更长的真实浏览器
+验收。一个 Project 最终持久化 9 Sources / 82 Segments、10 Runs、27 Tasks、47
+Artifacts、257 Events 与 31 ModelCalls。成功主链经过已有素材复用、两轮围绕最新稿
+的具体追问和一次人工反馈 Revision，最终达到 4,055 个口播字符、14.48 分钟、24/24
+段落引用和零重复段落。人工审阅先发现 Reviewer 漏掉的 Bear 死后全知叙述，反馈
+Revision 修复后又发现一句元编辑话语跳出人设，因此最终仍为 79 分、
+`revision_recommended`、`would_record_as_is=false`。这证明真人反馈会改变候选稿，而
+不是替机器分数背书。
+
+本次同时暴露两个后续 UI/可靠性工作：保存反馈后页面尚未暴露
+`apply_selected_feedback`，以及取消 Task 后外部 Provider 仍可能迟到完成并产生费用。
+二者进入 M5 后续小步，不为了结束实验而伪装成已解决。真实 `.env` 还曾让普通测试
+继承 30 秒 cooldown 与 80,000 字 bundle；测试环境现已固定 Fake Provider、零
+cooldown 和默认 bundle 边界。当前验证基线为 443 项 backend pytest、Ruff、43 项
+frontend tests 与 production build。
+
+当前 442 项 backend pytest、Ruff、43 项 frontend tests 与 production build 已通过。
+因此 M5.1 已完成；可视化 Scaffold/Draft 编辑、Docker、部署和备份仍是未勾选的
+后续独立项。完整实验见
+[`docs/experiments/m5-1b-real-browser-e2e.zh-CN.md`](experiments/m5-1b-real-browser-e2e.zh-CN.md)，
+复现素材见
+[`backend/fixtures/e2e/m5-1b-real-browser/`](../backend/fixtures/e2e/m5-1b-real-browser/)。
+Bear 内容质量实验、最终候选和机器可读账本见
+[`docs/experiments/m5-1c-obsession-bear-browser-e2e.zh-CN.md`](experiments/m5-1c-obsession-bear-browser-e2e.zh-CN.md)
+与
+[`backend/fixtures/e2e/m5-1c-obsession-bear-browser/`](../backend/fixtures/e2e/m5-1c-obsession-bear-browser/)。
 
 演示：在本地浏览器从 Project/Source 走到 Run Trace，并完成一次人工暂停与
 恢复。线上部署留在后续独立切片。

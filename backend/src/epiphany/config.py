@@ -21,8 +21,16 @@ class Settings(BaseSettings):
     worker_enabled: bool = True
     worker_poll_interval_seconds: float = Field(default=0.25, gt=0)
     worker_max_concurrency: int = Field(default=2, ge=1, le=2)
+    # Optional operator throttle between Worker batches. Keep the default at
+    # zero for Fake runs and normal deployments. Constrained hosted-model
+    # accounts can opt into a gap so a large successful request is not followed
+    # immediately by another request or an instant 503 retry.
+    worker_batch_cooldown_seconds: float = Field(default=0, ge=0, le=300)
     worker_lease_seconds: int = Field(default=30, gt=0)
-    task_timeout_seconds: float = Field(default=30, gt=0)
+    # Long-form Editor and Revision outputs can legitimately take longer than
+    # short research calls. Keep one bounded deadline, but do not make a
+    # healthy 15-minute draft fail at the old 30-second boundary.
+    task_timeout_seconds: float = Field(default=120, gt=0)
     task_max_attempts: int = Field(default=2, ge=1, le=5)
     model_max_calls_per_run: int = Field(default=6, ge=1, le=100)
     model_provider: Literal["fake", "deepseek"] = "fake"
@@ -62,6 +70,8 @@ class Settings(BaseSettings):
         ),
     )
     deepseek_max_tokens: int = Field(default=2_000, ge=1, le=20_000)
+    deepseek_research_max_tokens: int = Field(default=4_000, ge=1, le=20_000)
+    deepseek_interview_max_tokens: int = Field(default=4_000, ge=1, le=20_000)
     deepseek_editor_max_tokens: int = Field(default=20_000, ge=1, le=20_000)
     deepseek_quality_review_max_tokens: int = Field(default=6_000, ge=1, le=20_000)
     deepseek_max_source_chars: int = Field(default=24_000, ge=1, le=1_000_000)

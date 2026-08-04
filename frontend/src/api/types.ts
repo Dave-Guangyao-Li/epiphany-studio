@@ -61,6 +61,39 @@ export interface ImportSourceResponse {
   source: SourceDetail;
 }
 
+export type SourceStarterMode = "exploration_outline" | "starter_draft";
+export type SourceStarterSourceType = "journal" | "podcast_draft" | "other";
+
+export interface CreateSourceStarterRequest {
+  submission_id: string;
+  source_title: string | null;
+  source_type: SourceStarterSourceType;
+  mode: SourceStarterMode;
+  intent: string | null;
+}
+
+export interface SourceStarterCandidate {
+  schema_version: "source-starter-candidate.v1";
+  mode: SourceStarterMode;
+  source_title: string | null;
+  source_type: SourceStarterSourceType;
+  starter_text: string;
+  questions: string[];
+  uncertainties: string[];
+  safety: {
+    requires_user_confirmation: true;
+    factual_claims_require_verification: true;
+  };
+  _execution?: Record<string, unknown>;
+}
+
+export interface ConfirmSourceStarterResponse extends ImportSourceResponse {
+  idempotent_replay: boolean;
+  source_starter_run_id: string;
+  candidate_artifact_id: string;
+  confirmation_artifact_id: string;
+}
+
 export interface RunSummary {
   id: string;
   project_id: string | null;
@@ -197,6 +230,15 @@ export interface ImprovementPlanRecord {
       suggested_target_duration_minutes?: number | null;
     }>;
     gaps?: Array<{ code: string; severity: string; explanation: string }>;
+    targeted_questions?: Array<{
+      prompt: string;
+      purpose: string;
+      anchor_kind: "material_gap" | "scaffold_question";
+      anchor_path: string;
+      anchor_text: string;
+      keywords: string[];
+      source_refs: Array<{ source_id: string; source_segment_id: string }>;
+    }>;
     [key: string]: unknown;
   };
   artifact: ArtifactView;

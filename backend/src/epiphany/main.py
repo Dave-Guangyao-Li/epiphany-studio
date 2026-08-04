@@ -43,6 +43,8 @@ def _build_deepseek_provider(
         model=model,
         billing_currency=settings.deepseek_billing_currency,
         max_tokens=settings.deepseek_max_tokens,
+        research_max_tokens=settings.deepseek_research_max_tokens,
+        interview_max_tokens=settings.deepseek_interview_max_tokens,
         editor_max_tokens=settings.deepseek_editor_max_tokens,
         max_source_chars=settings.deepseek_max_source_chars,
         max_interview_bundle_chars=settings.deepseek_max_interview_bundle_chars,
@@ -85,9 +87,14 @@ def create_app(
     resolved_settings = settings or Settings()
     database = Database(resolved_settings.database_url)
     orchestrator = Orchestrator(task_max_attempts=resolved_settings.task_max_attempts)
-    run_service = RunService(database, orchestrator)
+    run_mutation_lock = asyncio.Lock()
+    run_service = RunService(database, orchestrator, mutation_lock=run_mutation_lock)
     source_service = SourceService(database)
-    project_service = ProjectService(database, source_service)
+    project_service = ProjectService(
+        database,
+        source_service,
+        mutation_lock=run_mutation_lock,
+    )
     resolved_provider = provider or build_provider(resolved_settings)
     resolved_reviewer_provider = reviewer_provider
     if resolved_reviewer_provider is None and provider is None:
@@ -104,6 +111,7 @@ def create_app(
         timeout_seconds=resolved_settings.task_timeout_seconds,
         poll_interval_seconds=resolved_settings.worker_poll_interval_seconds,
         max_concurrency=resolved_settings.worker_max_concurrency,
+        batch_cooldown_seconds=resolved_settings.worker_batch_cooldown_seconds,
         max_model_calls_per_run=resolved_settings.model_max_calls_per_run,
     )
 

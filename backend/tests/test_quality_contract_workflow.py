@@ -15,10 +15,11 @@ async def _import_material(
     *,
     title: str,
     text: str,
+    source_type: str = "voice_note_transcript",
 ) -> str:
     imported = await SourceService(database).import_text(
         title=title,
-        source_type="voice_note_transcript",
+        source_type=source_type,
         text=text,
         metadata={
             "synthetic": True,
@@ -57,6 +58,12 @@ async def test_v5_keeps_waiting_across_insufficient_rounds_then_queues_one_edito
         title="合成初始素材 B",
         text="乙" * 500,
     )
+    writing_sample = await _import_material(
+        database,
+        title="只用于文风的写作样本",
+        text="。".join(f"这是写作样本句子{index}" * 12 for index in range(8)),
+        source_type="writing_sample",
+    )
     created = await service.create_run(
         workflow_type="episode-research",
         payload={
@@ -73,6 +80,18 @@ async def test_v5_keeps_waiting_across_insufficient_rounds_then_queues_one_edito
                 "avoid_patterns": ["空泛排比", "强行金句"],
             },
             "draft_quality": {"enabled": False},
+            "writing_style_reference": {
+                "version": "writing_style_reference_v1",
+                "samples": [
+                    {
+                        "source_id": writing_sample,
+                        "sample_kind": "spoken_transcript",
+                    }
+                ],
+                "ownership_attested": True,
+                "model_processing_consent": True,
+                "usage": "style_only",
+            },
         },
     )
 
@@ -91,6 +110,26 @@ async def test_v5_keeps_waiting_across_insufficient_rounds_then_queues_one_edito
     ][0]
     assert initial_report.content_json["status"] == "needs_more_material"
     assert initial_report.content_json["counts"]["supplemental_char_count"] == 0
+    expected_initial_segment_count = 0
+    for source_id in [initial_a, initial_b]:
+        expected_initial_segment_count += (
+            await SourceService(database).get_source(source_id)
+        ).segment_count
+    assert initial_report.content_json["counts"]["initial_source_count"] == 2
+    assert (
+        initial_report.content_json["counts"]["initial_segment_count"]
+        == expected_initial_segment_count
+    )
+
+    before_style_only_resume = await _run_state_ids(service, created.id)
+    with pytest.raises(RunResumeNotAllowed, match="style-only"):
+        await service.resume_run(
+            created.id,
+            checkpoint="material_readiness",
+            submission_id="style-only-round",
+            source_ids=[writing_sample],
+        )
+    assert await _run_state_ids(service, created.id) == before_style_only_resume
 
     too_short = await _import_material(
         database,
@@ -194,11 +233,26 @@ async def test_v5_keeps_waiting_across_insufficient_rounds_then_queues_one_edito
             (segment["source_id"], segment["source_segment_id"])
             for segment in persisted_editor.input_json["initial_source_segments"]
         }
-        assert editor_initial_keys == scaffold_keys
-        initial_segment_count = (
-            await SourceService(database).get_source(initial_a)
-        ).segment_count + (await SourceService(database).get_source(initial_b)).segment_count
-        assert len(editor_initial_keys) < initial_segment_count
+        selected_initial_sources = [
+            await SourceService(database).get_source(source_id)
+            for source_id in [initial_a, initial_b]
+        ]
+        selected_initial_keys = {
+            (source.id, segment.id)
+            for source in selected_initial_sources
+            for segment in source.segments
+        }
+        assert editor_initial_keys == selected_initial_keys
+        assert scaffold_keys < editor_initial_keys
+        assert writing_sample not in {
+            segment["source_id"]
+            for segment in persisted_editor.input_json["initial_source_segments"]
+        }
+        assert writing_sample not in {
+            segment["source_id"]
+            for segment in persisted_editor.input_json["supplemental_source_segments"]
+        }
+        assert len(editor_initial_keys) == expected_initial_segment_count
 
 
 async def test_v5_rejects_reused_sources_without_mutating_the_run(

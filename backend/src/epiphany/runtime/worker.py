@@ -5,21 +5,41 @@ import logging
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from epiphany.db import Database
-from epiphany.draft_quality_schemas import REVIEW_PODCAST_DRAFT
+from epiphany.draft_quality_schemas import (
+    REVIEW_PODCAST_DRAFT,
+    ModelSelfReviewOutputError,
+)
 from epiphany.events import append_event
 from epiphany.ids import new_id
 from epiphany.models import Artifact, Run, Task
+from epiphany.research_schemas import (
+    THEME_RESEARCH,
+    TIMELINE_RESEARCH,
+    QuoteSourceMismatch,
+)
+from epiphany.revision_schemas import (
+    REVISE_PODCAST_DRAFT,
+    PodcastRevisionOutputError,
+)
 from epiphany.runtime.model_call_ledger import ModelCallLeaseLost, ModelCallLedger
 from epiphany.runtime.orchestrator import Orchestrator
 from epiphany.runtime.output_validation import validate_task_output
 from epiphany.runtime.providers import (
     ModelProvider,
+    ProviderOutputTruncatedError,
     ProviderTimeoutError,
     RetryableProviderError,
     TaskInvocation,
+)
+from epiphany.source_starter_schemas import (
+    BUILD_SOURCE_STARTER,
+    SourceStarterOutputValidationError,
+    build_safe_source_starter_candidate,
+    ground_source_starter_candidate,
 )
 from epiphany.state_machine import (
     RunStatus,
@@ -38,6 +58,104 @@ class StaleLease(RuntimeError):
     pass
 
 
+class SanitizedTaskOutputError(ValueError):
+    """Persistable validation failure that never includes model-returned values."""
+
+    def __init__(self, *, code: str) -> None:
+        self.code = code
+        super().__init__(f"model output failed strict validation ({code})")
+
+
+class RetryableSanitizedTaskOutputError(RetryableProviderError):
+    """A bounded model-output repair that preserves only a safe rule code."""
+
+    def __init__(self, *, code: str) -> None:
+        self.code = code
+        super().__init__(f"model output failed strict validation ({code})")
+
+
+def _sanitized_task_output_error(
+    error: Exception,
+    *,
+    retryable: bool = False,
+) -> SanitizedTaskOutputError | RetryableSanitizedTaskOutputError:
+    raw_code = getattr(error, "code", "task_output_invalid")
+    code = raw_code if isinstance(raw_code, str) else "task_output_invalid"
+    if (
+        not code
+        or len(code) > 80
+        or any(character != "_" and not character.isalnum() for character in code)
+    ):
+        code = "task_output_invalid"
+    error_type = RetryableSanitizedTaskOutputError if retryable else SanitizedTaskOutputError
+    return error_type(code=code)
+
+
+def _is_repairable_source_starter_output_error(
+    *,
+    task_kind: str,
+    error: Exception,
+) -> bool:
+    """Identify only strict Source Starter output-contract failures.
+
+    ``SourceStarterOutputValidationError`` covers the custom grounding and
+    safety rules that run after schema parsing. ``ValidationError`` covers the
+    Pydantic contract itself (missing fields, forbidden extra fields, wrong
+    literals, and so on). Both describe a successfully returned model payload
+    that the product cannot safely expose, so the Source Starter gets one
+    bounded repair and then a server-owned fallback.
+
+    Provider/network failures happen before this boundary and deliberately do
+    not match. Programming errors and a missing validator also remain fatal
+    instead of being hidden behind the fallback.
+    """
+
+    return task_kind == BUILD_SOURCE_STARTER and isinstance(
+        error,
+        (SourceStarterOutputValidationError, ValidationError),
+    )
+
+
+def _is_repairable_revision_output_error(
+    *,
+    task_kind: str,
+    error: Exception,
+) -> bool:
+    """Give one strict Revision candidate a bounded repair attempt.
+
+    A valid hosted-model response can still ignore the explicit edit and return
+    the immutable parent Draft.  That is a model-output contract failure, not a
+    provider/network failure and not a reason to weaken grounding.  Revision
+    Tasks already have two attempts; the second prompt is an explicit repair,
+    after which the normal failure boundary remains intact.
+    """
+
+    return task_kind == REVISE_PODCAST_DRAFT and isinstance(
+        error,
+        PodcastRevisionOutputError,
+    )
+
+
+def _is_repairable_quality_review_output_error(
+    *,
+    task_kind: str,
+    error: Exception,
+) -> bool:
+    """Allow one bounded repair without weakening Reviewer evidence rules.
+
+    Schema, verbatim quote, reference-scope, and writing-style evidence errors
+    all belong to ``ModelSelfReviewOutputError``.  The second model call gets a
+    repair-specific prompt.  If that output is still invalid, the existing
+    advisory-Reviewer degradation path preserves the Draft and deterministic
+    quality report.
+    """
+
+    return task_kind == REVIEW_PODCAST_DRAFT and isinstance(
+        error,
+        ModelSelfReviewOutputError,
+    )
+
+
 class Worker:
     def __init__(
         self,
@@ -50,6 +168,7 @@ class Worker:
         timeout_seconds: float,
         poll_interval_seconds: float,
         max_concurrency: int = 2,
+        batch_cooldown_seconds: float = 0,
         max_model_calls_per_run: int = 6,
     ) -> None:
         self.database = database
@@ -60,6 +179,7 @@ class Worker:
         self.timeout_seconds = timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
         self.max_concurrency = max_concurrency
+        self.batch_cooldown_seconds = batch_cooldown_seconds
         self._finalization_lock = asyncio.Lock()
         self.model_call_ledger = ModelCallLedger(
             database,
@@ -126,6 +246,7 @@ class Worker:
             task.attempt += 1
             task.lease_token = new_id("lease")
             task.lease_expires_at = datetime.now(UTC) + timedelta(seconds=self.lease_seconds)
+            previous_error_code = task.error_code
             task.error_code = None
             task.error_message = None
             run.current_step = task.kind
@@ -143,6 +264,7 @@ class Worker:
                 attempt=task.attempt,
                 input_json=task.input_json,
                 lease_token=task.lease_token,
+                previous_error_code=previous_error_code,
             )
         logger.info(
             "Worker claimed task",
@@ -163,6 +285,7 @@ class Worker:
         content: dict[str, object],
         provider: str,
         model: str,
+        execution_metadata: dict[str, object] | None = None,
     ) -> None:
         async with self._finalization_lock:
             await self._complete(
@@ -170,6 +293,7 @@ class Worker:
                 content=content,
                 provider=provider,
                 model=model,
+                execution_metadata=execution_metadata,
             )
 
     async def _complete(
@@ -179,6 +303,7 @@ class Worker:
         content: dict[str, object],
         provider: str,
         model: str,
+        execution_metadata: dict[str, object] | None = None,
     ) -> None:
         async with self.database.sessions() as session, session.begin():
             task = await session.get(Task, invocation.task_id)
@@ -204,13 +329,18 @@ class Worker:
                 artifact = Artifact(
                     run_id=run.id,
                     task_id=task.id,
-                    kind=f"{task.kind}_result",
+                    kind=(
+                        "source_starter_candidate"
+                        if task.kind == BUILD_SOURCE_STARTER
+                        else f"{task.kind}_result"
+                    ),
                     content_json={
                         **content,
                         "_execution": {
                             "provider": provider,
                             "model": model,
                             "attempt": task.attempt,
+                            **(execution_metadata or {}),
                         },
                     },
                     idempotency_key=idempotency_key,
@@ -271,13 +401,19 @@ class Worker:
             if run.status == RunStatus.CANCELLED:
                 return
 
-            retryable = isinstance(error, RetryableProviderError)
+            research_output_truncated = isinstance(
+                error, ProviderOutputTruncatedError
+            ) and task.kind in {TIMELINE_RESEARCH, THEME_RESEARCH}
+            retryable = isinstance(error, RetryableProviderError) or research_output_truncated
+            retry_limit = (
+                min(task.max_attempts, 2) if research_output_truncated else task.max_attempts
+            )
             task.error_code = getattr(error, "code", "task_execution_error")
             task.error_message = str(error)
             task.lease_token = None
             task.lease_expires_at = None
 
-            if retryable and task.attempt < task.max_attempts:
+            if retryable and task.attempt < retry_limit:
                 validate_task_transition(task.status, TaskStatus.QUEUED)
                 task.status = TaskStatus.QUEUED
                 await append_event(
@@ -484,17 +620,104 @@ class Worker:
             duration_ms=duration_ms,
             result=result,
         )
+        execution_metadata: dict[str, object] | None = None
         try:
             validated_content = validate_task_output(
                 task_kind=invocation.kind,
                 task_input=invocation.input_json,
                 content=result.content,
             )
+        except Exception as error:
+            source_starter_output_error = _is_repairable_source_starter_output_error(
+                task_kind=invocation.kind,
+                error=error,
+            )
+            revision_output_error = _is_repairable_revision_output_error(
+                task_kind=invocation.kind,
+                error=error,
+            )
+            quality_review_output_error = _is_repairable_quality_review_output_error(
+                task_kind=invocation.kind,
+                error=error,
+            )
+            if source_starter_output_error and invocation.attempt > 1:
+                # The hosted model has already had one bounded repair attempt.
+                # A common live failure is useful brainstorming expressed as
+                # an unsupported ``我……`` assertion. Preserve the rest of that
+                # candidate and make only those lines visibly provisional.
+                # Every other contract failure still uses the fully
+                # server-owned safe template.
+                validation_error_code = _sanitized_task_output_error(error).code
+                fallback_kind = "server_safe_template"
+                fallback_content: dict[str, object]
+                if isinstance(error, SourceStarterOutputValidationError):
+                    try:
+                        fallback_content = ground_source_starter_candidate(
+                            task_input=invocation.input_json,
+                            content=result.content,
+                        )
+                        # Do not trust the local transformation by itself. It
+                        # must pass the same complete output contract as a
+                        # hosted-model response.
+                        validate_task_output(
+                            task_kind=invocation.kind,
+                            task_input=invocation.input_json,
+                            content=fallback_content,
+                        )
+                        fallback_kind = "server_line_grounding"
+                    except (SourceStarterOutputValidationError, ValidationError):
+                        fallback_content = build_safe_source_starter_candidate(
+                            task_input=invocation.input_json
+                        )
+                else:
+                    fallback_content = build_safe_source_starter_candidate(
+                        task_input=invocation.input_json
+                    )
+                validated_content = validate_task_output(
+                    task_kind=invocation.kind,
+                    task_input=invocation.input_json,
+                    content=fallback_content,
+                )
+                execution_metadata = {
+                    "fallback": fallback_kind,
+                    "model_output_validation_error": validation_error_code,
+                }
+                logger.warning(
+                    "Worker repaired invalid Source Starter output with a bounded fallback",
+                    extra={
+                        "event": "worker.source_starter.safe_fallback",
+                        "run_id": invocation.run_id,
+                        "task_id": invocation.task_id,
+                        "task_kind": invocation.kind,
+                        "attempt": invocation.attempt,
+                        "error_code": execution_metadata["model_output_validation_error"],
+                    },
+                )
+            else:
+                await self.fail(
+                    invocation,
+                    _sanitized_task_output_error(
+                        error,
+                        retryable=(
+                            source_starter_output_error
+                            or revision_output_error
+                            or quality_review_output_error
+                            or (
+                                invocation.kind == THEME_RESEARCH
+                                and isinstance(error, QuoteSourceMismatch)
+                            )
+                        ),
+                    ),
+                )
+                return
+
+        try:
             await self.complete(
                 invocation,
                 content=validated_content,
                 provider=result.provider,
                 model=result.model,
+                execution_metadata=execution_metadata,
             )
         except StaleLease:
             logger.warning(
@@ -560,6 +783,21 @@ class Worker:
                 # leave the durable Task stuck in ``running`` forever.
                 await self.recover_expired()
                 if await self.run_batch():
+                    if self.batch_cooldown_seconds > 0:
+                        logger.info(
+                            "Worker cooling down between task batches",
+                            extra={
+                                "event": "worker.batch.cooldown",
+                                "duration_seconds": self.batch_cooldown_seconds,
+                            },
+                        )
+                        try:
+                            await asyncio.wait_for(
+                                stop_event.wait(),
+                                timeout=self.batch_cooldown_seconds,
+                            )
+                        except TimeoutError:
+                            pass
                     continue
                 try:
                     await asyncio.wait_for(

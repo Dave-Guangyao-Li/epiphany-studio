@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import unicodedata
 from collections.abc import Sequence
 from decimal import Decimal
@@ -70,6 +71,35 @@ def _normalize_overlap_text(value: str) -> str:
     return "".join(character for character in normalized if character.isalnum())
 
 
+_MARKDOWN_HEADING_ONLY = re.compile(r"^\s{0,3}#{1,6}\s+\S.*$")
+
+
+def _is_substantive_recovery_candidate(value: str) -> bool:
+    """Exclude document scaffolding that cannot add spoken information.
+
+    Source segmentation intentionally keeps headings and horizontal rules so
+    the imported document remains auditable.  Those structural fragments are
+    not factual material, however, and counting them toward a duration-recovery
+    budget can turn a genuinely partial shortlist into a falsely "sufficient"
+    one.  Keep the rule language-independent and deliberately narrow: reject
+    heading-only segments, separator-only segments, and fragments without even
+    a minimal amount of alphanumeric content.  Full prose that happens to
+    contain a heading on its first line remains eligible.
+    """
+
+    lines = [line for line in value.splitlines() if line.strip()]
+    if not lines:
+        return False
+    if all(_MARKDOWN_HEADING_ONLY.fullmatch(line) for line in lines):
+        return False
+
+    compact = "".join(character for character in value if not character.isspace())
+    if len(compact) >= 3 and set(compact) <= {"-", "_", "*", "=", "—", "–"}:
+        return False
+
+    return len(_normalize_overlap_text(value)) >= 4
+
+
 def _select_priority_candidate_segments(
     *,
     unused_segments: Sequence[ResearchSourceSegment],
@@ -107,6 +137,8 @@ def _select_priority_candidate_segments(
     scored: list[tuple[tuple[int, ...], ResearchSourceSegment]] = []
     seen_normalized_texts: set[str] = set()
     for source_order, segment in enumerate(unused_segments):
+        if not _is_substantive_recovery_candidate(segment.text):
+            continue
         normalized = _normalize_overlap_text(segment.text)
         if not normalized or normalized in seen_normalized_texts:
             continue

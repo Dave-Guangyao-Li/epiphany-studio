@@ -54,6 +54,13 @@ M3.8 已经解决了第一层问题：稿子偏短时，先检查并利用已有
 把追问塞进 Reviewer 会混淆“判断”和“采集材料”。独立 Planner Task 可以单独
 记录模型调用、重试、失败回退、问题产物和轮次。
 
+当前 Reviewer 的“证据化建议”也有独立工程边界：普通代码先从 Draft 生成 bounded
+`D001`、`D002`……证据目录；Writing Sample 已就绪时另生成 style-only 的
+`W001`、`W002`……目录。模型只选择 opaque ID，服务端 hydration 成精确 location、
+逐字 quote 和引用范围以后，仍执行原有严格 validator。输出不合格最多获得一次同
+合同 repair；第二次仍失败就标记自动审阅不完整，不会放宽证据要求，也不会妨碍已经
+通过来源合同的 Draft 和确定性报告被保存。
+
 ## 4. “根据具体行文提问”怎样由代码保证
 
 只在 Prompt 里写“请具体提问”不够。模型可能仍返回泛泛的：
@@ -277,7 +284,27 @@ Ruff lint passed
 git diff --check passed
 ```
 
-## 12. 关键模块
+## 12. 真实浏览器闭环验证
+
+2026-08-03，固定合成 Persona 通过真实页面和 DeepSeek 完成了 M3.8 → M3.9 的
+三代 Run：
+
+| Run | 阶段 | 估算时长 | 结果 |
+| --- | --- | ---: | --- |
+| `run_c41c726fdcca4136bd1e317dbcbce21a` | 初始父稿 | 10.11 分钟 | 低于 12.75 分钟下限 |
+| `run_c344c19e9cb844c29c4daac81434cb00` | 已有材料 grounded recovery | 12.61 分钟 | 仍短，生成最新稿锚定问题 |
+| `run_2fec917404234405b9ec7c2c9ab16802` | 四个回答后的显式 Revision | 14.59 分钟 | 引用覆盖 100%，分数 79，`revision_recommended` |
+
+四个回答不是泛泛的“再多说一点”，而是围绕最新稿具体行文补充灯光、童年饮食规则、
+未发送照片和删除共享清单后的步行现场。回答先作为新的事实 Source 导入，随后才创建
+下一条 child Revision。最终稿进入时长区间，证明 Anchor → 问题 → Source → Revision
+链路确实增加了有来源的信息；79 分和 `revision_recommended` 又证明时长达标没有覆盖
+并列/对照表达等语言 warning。
+
+这仍不是自动循环：每条 child Run 都由显式请求创建，新增事实来自用户回答；系统没有
+在 12.61 分钟以后拿同一批材料继续无限扩写，也没有在 14.59 分钟以后自动发布。
+
+## 13. 关键模块
 
 | 文件 | 作用 |
 | --- | --- |
@@ -290,15 +317,18 @@ git diff --check passed
 | `api.py` | Plan GET 与 Revision API |
 | `revision_schemas.py` | v2 Revision Request、回答 Source 和新增材料契约 |
 
-## 13. 本阶段没有做什么
+## 14. 本阶段没有做什么
 
 - 没有麦克风录音和语音转文字；
-- 没有问题填写 UI；
+- 原始 M3.9 切片没有问题填写 UI；后续 M4/M5 本地 Console 已补上回答面板；
 - 没有自动创建 child Revision；
 - 没有无限 Agent loop；
 - 没有 Claim-level “已引用但展开不足”的完整语义分析；
 - 没有新的数据库或大框架；
-- 没有在本次实现中发起新的付费 DeepSeek E2E。
+- M3.9 原始实现切片当时没有发起新的付费 DeepSeek E2E；后续 M5.1 浏览器验收已补上
+  上述真实三代 Run 证据。
 
-下一步回到 M4：先做可回放 Trace/SSE，再用最小 Web UI 把 Draft、质量报告、问题、
-Source 回答和 child Revision 的关系真正展示出来。
+M3.9 原始切片完成时，下一步是 M4 可回放 Trace/SSE 与 M5.1 最小 Web UI。后续浏览器
+闭环已经把 Draft、质量报告、定向问题、Source 回答和 child Revision lineage 展示
+出来；当前仍待真人验证的是问题是否真正触发个人回忆，以及 14.59 分钟估算与实录
+时长、可录性的差异。

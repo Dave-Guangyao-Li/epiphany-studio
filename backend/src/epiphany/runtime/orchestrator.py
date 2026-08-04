@@ -44,6 +44,11 @@ from epiphany.models import Artifact, Run, Source, Task
 from epiphany.quality_contract_schemas import DURATION_TOLERANCE_RATIO
 from epiphany.research_schemas import THEME_RESEARCH, TIMELINE_RESEARCH
 from epiphany.revision_schemas import REVISE_PODCAST_DRAFT, duration_character_bounds
+from epiphany.source_starter_schemas import (
+    BUILD_SOURCE_STARTER,
+    SOURCE_STARTER_WORKFLOW_TYPE,
+    SOURCE_STARTER_WORKFLOW_VERSION,
+)
 from epiphany.state_machine import (
     RunStatus,
     TaskStatus,
@@ -105,6 +110,19 @@ class Orchestrator:
         *,
         research_source_segments: list[dict[str, str]] | None = None,
     ) -> list[Task]:
+        if run.workflow_type == SOURCE_STARTER_WORKFLOW_TYPE:
+            if run.workflow_version != SOURCE_STARTER_WORKFLOW_VERSION:
+                raise ValueError("unsupported source-starter workflow version")
+            return [
+                await self._enqueue_task(
+                    session,
+                    run=run,
+                    kind=BUILD_SOURCE_STARTER,
+                    agent_type="source_starter",
+                    parent_task_id=None,
+                    input_json={"task_kind": BUILD_SOURCE_STARTER, **run.input_json},
+                )
+            ]
         if run.workflow_type == "fake-podcast":
             return [await self._enqueue_fake_initial_task(session, run)]
         if run.workflow_type == "episode-research":
@@ -125,6 +143,49 @@ class Orchestrator:
         completed_task: Task,
         artifact: Artifact,
     ) -> Task | None:
+        if run.workflow_type == SOURCE_STARTER_WORKFLOW_TYPE:
+            if completed_task.kind != BUILD_SOURCE_STARTER:
+                raise ValueError("unexpected source-starter task")
+            run.output_artifact_id = artifact.id
+            await append_event(
+                session,
+                run_id=run.id,
+                task_id=completed_task.id,
+                event_type="workflow.source_starter.completed",
+                payload={"output_artifact_id": artifact.id},
+            )
+            validate_run_transition(run.status, RunStatus.WAITING_FOR_USER)
+            run.status = RunStatus.WAITING_FOR_USER
+            run.current_step = "awaiting_source_confirmation"
+            await append_event(
+                session,
+                run_id=run.id,
+                event_type="workflow.user_input.requested",
+                payload={
+                    "checkpoint": "source_confirmation",
+                    "output_artifact_id": artifact.id,
+                },
+            )
+            await append_event(
+                session,
+                run_id=run.id,
+                event_type="run.waiting_for_user",
+                payload={
+                    "checkpoint": "source_confirmation",
+                    "output_artifact_id": artifact.id,
+                },
+            )
+            logger.info(
+                "Source starter waiting for user confirmation",
+                extra={
+                    "event": "run.waiting_for_user",
+                    "run_id": run.id,
+                    "task_id": completed_task.id,
+                    "artifact_id": artifact.id,
+                    "checkpoint": "source_confirmation",
+                },
+            )
+            return None
         if run.workflow_type == "fake-podcast":
             return await self._advance_fake_workflow(
                 session,
@@ -1850,8 +1911,25 @@ class Orchestrator:
             .scalars()
             .all()
         )
+        sources_by_id = {source.id: source for source in sources}
+        # ``source_ids`` is the user-approved factual scope.  The Interviewer is
+        # allowed to cite only a useful subset of that scope, but an omission in
+        # the scaffold must not silently hide the remaining selected evidence
+        # from material readiness or the downstream Editor.  Keep the explicit
+        # Source order and each Source's stable segment order.  The source-type
+        # check is a defence-in-depth boundary for legacy/malformed Runs: writing
+        # samples may shape style, never factual content.
+        factual_initial_source_ids = [
+            source_id
+            for source_id in run.input_json["source_ids"]
+            if source_id in sources_by_id
+            and sources_by_id[source_id].source_type != "writing_sample"
+        ]
         segments_by_key = {
-            (source.id, segment.id): segment for source in sources for segment in source.segments
+            (source.id, segment.id): segment
+            for source_id in factual_initial_source_ids
+            for source in [sources_by_id[source_id]]
+            for segment in source.segments
         }
         reference_keys = interview_scaffold_reference_keys(
             _without_execution(scaffold.content_json)
@@ -1861,11 +1939,13 @@ class Orchestrator:
             raise ValueError("interview scaffold references unavailable initial source material")
         initial_segments = [
             {
-                "source_id": source_id,
-                "source_segment_id": segment_id,
-                "text": segments_by_key[(source_id, segment_id)].text,
+                "source_id": source.id,
+                "source_segment_id": segment.id,
+                "text": segment.text,
             }
-            for source_id, segment_id in reference_keys
+            for source_id in factual_initial_source_ids
+            for source in [sources_by_id[source_id]]
+            for segment in sorted(source.segments, key=lambda item: item.position)
         ]
         follow_up_questions = [
             ReadinessFollowUpQuestion(
