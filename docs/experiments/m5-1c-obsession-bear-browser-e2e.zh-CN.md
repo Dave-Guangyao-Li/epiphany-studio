@@ -389,17 +389,31 @@ child 没有产生计费 Token。
 
 ## 11. 故障、根因与操作性修复
 
-### 11.1 连续 DeepSeek 503
+### 11.1 DeepSeek 503 与证据边界
 
 现象：三个父 Run 的 Timeline/Theme 研究和一个 child Revision 遭遇
-`provider_overloaded`。
+`provider_overloaded`。这只能证明 DeepSeek 返回了 HTTP 503，不能单凭错误码断言
+是账户并发额度、模型瞬时容量、请求大小或某个应用逻辑造成的。
 
-根因判断：同一 worker 批次中相邻真实调用过密，Provider 在测试时返回 503。不能在
-没有 Provider 内部证据时把它描述成应用逻辑错误。
+本地账本还提供了两组反证：
 
-操作性修复：Live E2E 使用单 worker concurrency，并为真实模型调用批次增加 30 秒
-cooldown。cooldown 可配置，默认仍为 0，不拖慢 Fake Provider 和普通本地测试。每次
-503 和 retry 都继续出现在 Trace 中。
+- 前一天的真实浏览器 Run `run_c41c…21a` 中，Timeline 与 Theme 在相差约 42ms
+  时启动，Provider 调用重叠约 10.6 秒，二者都在 attempt 1 成功。因此
+  `max_concurrency=2` 并非 503 的充分条件，真实并发过去确实成功过；
+- 本次 `run_0ef9…9159` 的 Theme 在 Timeline 完成后才开始，仍连续两次 503；
+  `run_2359…0011` 只有一个 Revision Editor，两个 attempt 还相隔约 30 秒，也都
+  返回 503。因此并发也不是本次 503 的必要条件。
+
+后续成功时同时改变了模型档位、Worker concurrency、cooldown、执行时间等多个变量，
+不是受控单变量实验，不能把成功归因给其中任何一个设置。更准确的结论是：这是一组
+Provider 侧瞬时不可用的观测，精确根因未知；降低请求压力只是一种保守的运营缓解，
+不是已被证明的根因修复。
+
+为完成这次 Live E2E，临时使用单 worker concurrency，并为真实模型调用批次增加
+30 秒 cooldown。产品默认仍保持 concurrency 2、cooldown 0，不因这一次实验退化为
+串行。每次 503 和 retry 都继续出现在 Trace 中；若以后需要评估并发与 503 的相关性，
+必须固定模型、输入、重试和 cooldown，随机交错运行多次 concurrency 1/2 对照，且仍
+只能得到相关性证据，不能代替 Provider 内部诊断。
 
 ### 11.2 Editor bundle 超过 33,930 字
 
