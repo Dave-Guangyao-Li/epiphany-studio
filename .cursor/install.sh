@@ -27,6 +27,7 @@ mkdir -p data
 alembic upgrade head
 deactivate
 
-# Frontend: install pinned npm dependencies from the committed lockfile.
+# Frontend: install pinned npm dependencies strictly from the committed
+# lockfile. `npm ci` is reproducible and does not rewrite package-lock.json.
 cd "$REPO_ROOT/frontend"
-npm install
+npm ci
