@@ -530,10 +530,17 @@ Event `sequence` 从 SQLite 回放，再轮询新事件；空闲连接发送 hea
 - [x] Project/Source 页面
 - [x] Run trace 页面
 - [x] M5.1 AI 起步助手：持久候选、四步进度、用户确认与 Source provenance
-- [ ] Scaffold 编辑与恢复
+- [ ] Scaffold 编辑与恢复（M5.2 已完成**文本编辑 + 导出接入**；结构编辑、
+  Editor 接入与恢复仍待做）
 - [ ] Dockerfile
 - [ ] 单机部署
 - [ ] 健康检查、结构化日志、备份说明
+
+M5.2（2026-08-20）：采访脚手架现在可在 Console 里编辑面向人的文字。每次保存
+写入一条不可变的 `interview_scaffold_human_edit` Artifact（Plan A / ADR-0002），
+原始 AI 脚手架不变，导出使用最新人工版；来源引用、结构与标题由后端签名校验，
+人工只能改文字。仅接入导出，Resume → Editor 仍用原始脚手架（见 ADR-0002 的推迟
+项）。详见 [M5.2 学习章节](learning/m5-2-scaffold-editing.zh-CN.md)。
 
 当前本地 Console 已能创建 Project、导入/查看 Source、配置并创建 Run，随后
 查看 Event、Task、Artifact、ModelCall、错误、费用和 Markdown 输出；在人工

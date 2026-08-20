@@ -151,9 +151,11 @@ Official references:
 - [Architecture](docs/architecture.zh-CN.md)
 - [MVP roadmap](docs/roadmap.zh-CN.md)
 - [Architecture decision: lightweight orchestration](docs/adr/0001-lightweight-orchestration.zh-CN.md)
+- [Architecture decision: human-edited scaffold artifact](docs/adr/0002-human-edited-scaffold-artifact.zh-CN.md)
 - [Development log](docs/devlog.md)
 - [M4/M5 local Console learning chapter](docs/learning/m4-m5-local-console.zh-CN.md)
 - [M5.1 AI Source Starter learning chapter](docs/learning/m5-1-source-starter.zh-CN.md)
+- [M5.2 Interview Scaffold editing learning chapter](docs/learning/m5-2-scaffold-editing.zh-CN.md)
 
 ## Run the local Console
 
@@ -190,9 +192,16 @@ heartbeats while idle, and closes at a terminal Run state. Human checkpoints,
 Markdown outputs, quality feedback, and explicit Revision actions reuse the
 existing backend contracts.
 
-This is still a local development Console. It does not yet include a visual
-Scaffold editor, authentication, Docker packaging, production deployment,
-audio upload, speech-to-text, or voice cloning.
+The Interview Scaffold's human-facing text can now be edited in the Console
+(M5.2): saving creates a new immutable `interview_scaffold_human_edit` Artifact
+(the original AI scaffold is never overwritten), citations/structure/title are
+preserved, and the exported scaffold uses the latest human edit. Editing is
+text-only for now; wiring the edited scaffold into the downstream Editor,
+structural edits, and Draft editing remain open.
+
+This is still a local development Console. It does not yet include Draft editing,
+authentication, Docker packaging, production deployment, audio upload,
+speech-to-text, or voice cloning.
 
 ## Status
 

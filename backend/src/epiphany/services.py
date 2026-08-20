@@ -87,6 +87,14 @@ from epiphany.runtime.orchestrator import (
     QUALITY_REVIEW_WORKFLOW_VERSIONS,
     Orchestrator,
 )
+from epiphany.scaffold_edit_schemas import (
+    INTERVIEW_SCAFFOLD_HUMAN_EDIT_KIND,
+    INTERVIEW_SCAFFOLD_RESULT_KIND,
+    InterviewScaffoldEditRequest,
+    InterviewScaffoldEditResponse,
+    InterviewScaffoldHumanEdit,
+    validate_scaffold_edit_preserves_grounding,
+)
 from epiphany.schemas import (
     ArtifactView,
     EventView,
@@ -170,6 +178,14 @@ class DraftFeedbackNotAllowed(ValueError):
 
 
 class DraftFeedbackConflict(ValueError):
+    pass
+
+
+class InterviewScaffoldEditNotAllowed(ValueError):
+    pass
+
+
+class InterviewScaffoldEditConflict(ValueError):
     pass
 
 
@@ -812,6 +828,184 @@ class RunService:
                 ]
             except ValidationError as error:
                 raise DraftFeedbackConflict("persisted feedback artifact is invalid") from error
+
+    @staticmethod
+    def _scaffold_base_content(artifact: Artifact) -> dict[str, Any]:
+        # Worker metadata belongs to runtime tracing, not the product artifact.
+        return {key: value for key, value in artifact.content_json.items() if key != "_execution"}
+
+    async def _load_effective_scaffold(
+        self,
+        session: Any,
+        run_id: str,
+    ) -> tuple[dict[str, Any], str, str | None] | None:
+        """Return (content, source_artifact_id, edited_artifact_id).
+
+        Resolves the effective Interview Scaffold: the latest human-edited version
+        when one exists, otherwise the original AI Artifact. Returns ``None`` when
+        the Run has no scaffold yet. An unreadable edit falls back to the base so a
+        corrupt edit never hides the original.
+        """
+
+        base = (
+            await session.execute(
+                select(Artifact)
+                .where(
+                    Artifact.run_id == run_id,
+                    Artifact.kind == INTERVIEW_SCAFFOLD_RESULT_KIND,
+                )
+                .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if base is None:
+            return None
+        base_content = self._scaffold_base_content(base)
+        edit = (
+            await session.execute(
+                select(Artifact)
+                .where(
+                    Artifact.run_id == run_id,
+                    Artifact.kind == INTERVIEW_SCAFFOLD_HUMAN_EDIT_KIND,
+                )
+                .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if edit is None:
+            return base_content, base.id, None
+        try:
+            parsed_edit = InterviewScaffoldHumanEdit.model_validate(edit.content_json)
+        except ValidationError:
+            return base_content, base.id, None
+        return parsed_edit.scaffold.model_dump(mode="json"), base.id, edit.id
+
+    async def save_interview_scaffold_edit(
+        self,
+        run_id: str,
+        *,
+        request: InterviewScaffoldEditRequest,
+    ) -> InterviewScaffoldEditResponse:
+        """Persist one immutable human-edited Interview Scaffold version.
+
+        The original AI Artifact is never mutated. The edit must preserve every
+        citation, the structural shape, and the topic-bound title; only
+        human-facing text may change.
+        """
+
+        async with self._run_mutation_lock:
+            async with self.database.sessions() as session, session.begin():
+                run = await session.get(Run, run_id)
+                if run is None:
+                    raise RunNotFound(run_id)
+
+                base = (
+                    await session.execute(
+                        select(Artifact)
+                        .where(
+                            Artifact.run_id == run.id,
+                            Artifact.kind == INTERVIEW_SCAFFOLD_RESULT_KIND,
+                        )
+                        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if base is None:
+                    raise InterviewScaffoldEditNotAllowed(
+                        "run does not have an interview scaffold to edit"
+                    )
+                if request.base_artifact_id != base.id:
+                    raise InterviewScaffoldEditNotAllowed(
+                        "base_artifact_id does not match the current interview scaffold"
+                    )
+                try:
+                    base_scaffold = InterviewScaffoldOutput.model_validate(
+                        self._scaffold_base_content(base)
+                    )
+                except ValidationError as error:
+                    raise InterviewScaffoldEditNotAllowed(
+                        "persisted interview scaffold is invalid"
+                    ) from error
+
+                # Grounding, structure, and the topic-bound title must be preserved;
+                # only human-facing text may change. Raises InterviewScaffoldEditError.
+                validate_scaffold_edit_preserves_grounding(
+                    base=base_scaffold,
+                    edited=request.scaffold,
+                )
+
+                edit = InterviewScaffoldHumanEdit(
+                    submission_id=request.submission_id,
+                    base_artifact_id=base.id,
+                    scaffold=request.scaffold,
+                )
+                content_json = edit.model_dump(mode="json")
+                edit_key = stable_id(
+                    "scaffold-edit",
+                    f"{run.id}:{request.submission_id}",
+                )
+                idempotency_key = f"scaffold-edit:{edit_key}"
+                artifact = (
+                    await session.execute(
+                        select(Artifact).where(Artifact.idempotency_key == idempotency_key)
+                    )
+                ).scalar_one_or_none()
+                idempotent_replay = artifact is not None
+                if artifact is not None:
+                    try:
+                        existing = InterviewScaffoldHumanEdit.model_validate(artifact.content_json)
+                    except ValidationError as error:
+                        raise InterviewScaffoldEditConflict(
+                            "existing scaffold edit artifact is invalid"
+                        ) from error
+                    if existing.model_dump(mode="json") != content_json:
+                        raise InterviewScaffoldEditConflict(
+                            "submission_id was already used with a different scaffold edit"
+                        )
+                else:
+                    artifact = Artifact(
+                        run_id=run.id,
+                        task_id=None,
+                        kind=INTERVIEW_SCAFFOLD_HUMAN_EDIT_KIND,
+                        content_json=content_json,
+                        idempotency_key=idempotency_key,
+                    )
+                    session.add(artifact)
+                    await session.flush()
+                    await append_event(
+                        session,
+                        run_id=run.id,
+                        event_type="workflow.interview_scaffold.human_edited",
+                        payload={
+                            "edit_artifact_id": artifact.id,
+                            "base_artifact_id": base.id,
+                            "submission_id": request.submission_id,
+                        },
+                    )
+                artifact_view = ArtifactView.model_validate(artifact)
+
+        logger.info(
+            (
+                "Interview scaffold edit replay returned existing artifact"
+                if idempotent_replay
+                else "Interview scaffold edit recorded"
+            ),
+            extra={
+                "event": (
+                    "workflow.interview_scaffold.human_edit_replayed"
+                    if idempotent_replay
+                    else "workflow.interview_scaffold.human_edited"
+                ),
+                "run_id": run_id,
+                "artifact_id": artifact_view.id,
+                "base_artifact_id": edit.base_artifact_id,
+            },
+        )
+        return InterviewScaffoldEditResponse(
+            idempotent_replay=idempotent_replay,
+            edit=edit,
+            artifact=artifact_view,
+        )
 
     async def get_draft_quality_report(
         self,
@@ -1894,25 +2088,13 @@ class RunService:
             run = await session.get(Run, run_id)
             if run is None:
                 raise RunNotFound(run_id)
-            artifact = (
-                await session.execute(
-                    select(Artifact)
-                    .where(
-                        Artifact.run_id == run.id,
-                        Artifact.kind == "build_interview_scaffold_result",
-                    )
-                    .order_by(Artifact.created_at.desc(), Artifact.id.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            if artifact is None:
+            # Use the effective scaffold: the latest human-edited version when one
+            # exists, otherwise the original AI Artifact.
+            effective = await self._load_effective_scaffold(session, run.id)
+            if effective is None:
                 raise InterviewScaffoldExportNotReady("interview scaffold is not ready for export")
-
-            # Worker metadata belongs to runtime tracing, not the strict product
-            # artifact rendered for the user.
-            content = {
-                key: value for key, value in artifact.content_json.items() if key != "_execution"
-            }
+            content, base_artifact_id, edited_artifact_id = effective
+            source_artifact_id = edited_artifact_id or base_artifact_id
             try:
                 reference_keys = interview_scaffold_reference_keys(content)
             except (ValueError, TypeError) as error:
@@ -1957,7 +2139,8 @@ class RunService:
             extra={
                 "event": "run.interview_scaffold_markdown.exported",
                 "run_id": run_id,
-                "artifact_id": artifact.id,
+                "artifact_id": source_artifact_id,
+                "scaffold_edited": edited_artifact_id is not None,
                 "markdown_char_count": len(markdown),
                 "source_citation_count": len(reference_keys),
             },

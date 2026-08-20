@@ -291,3 +291,63 @@ export interface UserFeedbackRequest {
   observed_duration_minutes: number | null;
   comment: string | null;
 }
+
+export interface ScaffoldSourceRef {
+  source_id: string;
+  source_segment_id: string;
+}
+
+export interface ScaffoldStatement {
+  text: string;
+  source_refs: ScaffoldSourceRef[];
+}
+
+export interface ScaffoldQuestion {
+  prompt: string;
+  purpose: string;
+  keywords: string[];
+  source_refs: ScaffoldSourceRef[];
+}
+
+export interface ScaffoldSection {
+  title: string;
+  source_refs: ScaffoldSourceRef[];
+  known_context: ScaffoldStatement[];
+  transition: ScaffoldStatement;
+  questions: ScaffoldQuestion[];
+}
+
+export interface ScaffoldMaterialGap {
+  gap: string;
+  why_it_matters: string;
+  source_refs: ScaffoldSourceRef[];
+}
+
+export interface InterviewScaffold {
+  title: string;
+  episode_intent: ScaffoldStatement;
+  opening: ScaffoldStatement;
+  sections: ScaffoldSection[];
+  material_gaps: ScaffoldMaterialGap[];
+  closing: ScaffoldStatement;
+}
+
+export interface InterviewScaffoldEditRequest {
+  submission_id: string;
+  base_artifact_id: string;
+  scaffold: InterviewScaffold;
+}
+
+export interface InterviewScaffoldHumanEdit {
+  schema_version: "interview_scaffold_human_edit_v1";
+  submission_id: string;
+  base_artifact_id: string;
+  editor_origin: "human";
+  scaffold: InterviewScaffold;
+}
+
+export interface InterviewScaffoldEditResponse {
+  idempotent_replay: boolean;
+  edit: InterviewScaffoldHumanEdit;
+  artifact: ArtifactView;
+}
