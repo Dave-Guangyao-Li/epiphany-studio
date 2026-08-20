@@ -391,6 +391,11 @@ Run；只有用户明确提交 `POST /runs/{run_id}/revisions` 才会开始一�
 和 comparison。M3.6 尚未进行真实 DeepSeek E2E；在得到真实模型与人工内容
 复核证据前，不把 Fake 结果表述为真实生成质量验收。
 
+修复（2026-08-20）：无写作样本的父 Run 创建 Revision 时会因
+`writing_style_segments` 为显式 `null` 而崩溃（HTTP 500）。已改为把该可选字段
+按空列表兜底，并补充针对“无写作样本父 Run”的回归测试。详见开发日志与
+[M3.6 学习章节](learning/m3-6-guided-revision-writing-style.zh-CN.md) 第 17 节。
+
 ### M3.7：写作样本受控 A/B 验证
 
 #### M3.7a：冻结输入与零费用预检

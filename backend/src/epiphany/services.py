@@ -1406,10 +1406,7 @@ class RunService:
                     )
                     style_source_ids = {
                         str(segment["source_id"])
-                        for segment in base_editor_input.get(
-                            "writing_style_segments",
-                            [],
-                        )
+                        for segment in (base_editor_input.get("writing_style_segments") or [])
                     }
                     persisted_style_sources = (
                         (

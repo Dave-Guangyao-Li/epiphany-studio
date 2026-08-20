@@ -1,5 +1,43 @@
 # Development Log
 
+## 2026-08-20
+
+### Fix: Revision creation crashed for parents without a writing-style sample
+
+- Root cause: `RunService.create_draft_revision` derived the parent's
+  style-source ids with `base_editor_input.get("writing_style_segments", [])`.
+  A completed Editor task serializes `writing_style_segments` as an explicit
+  `null` when no Writing Sample was selected, so the key is present with value
+  `None`; `dict.get(key, [])` returned that `None`, and iterating it raised
+  `TypeError: 'NoneType' object is not iterable`. Every Revision creation from
+  such a parent (targeted-supplement, reuse-unused-material, and
+  apply-selected-feedback) failed with HTTP 500. This was the common case,
+  because most Runs have no writing sample.
+- Fix: coalesce the optional field with `... or []` so a `None` value behaves
+  like the absent-key default. The change is one line in
+  `backend/src/epiphany/services.py`.
+- Why it was not caught earlier: every existing Revision workflow test built the
+  parent with `_create_completed_parent_with_style`, whose Editor input carries
+  a populated `writing_style_segments` list. Tests that construct parent input
+  by hand omit the key entirely, so `.get(key, [])` returned `[]` and never hit
+  the `None` path.
+- Regression: added `test_targeted_supplement_revision_from_parent_without_writing_style`,
+  which drives a real Fake v8 Run to completion without a Writing Sample, asserts
+  the persisted Editor task really carries `writing_style_segments is None`, and
+  then creates a v9 supplemental-interview Revision. The test fails with the old
+  code (`TypeError` at the same line) and passes with the fix.
+- Verification: `ruff check`, `alembic check` (no drift), and the full backend
+  suite (444 passed) all pass. Note: one settings test
+  (`test_settings_accept_legacy_key_name_and_redacts_it`) only fails when a real
+  `EPIPHANY_DEEPSEEK_API_KEY` secret is present in the shell environment, because
+  the injected secret outranks the test's monkeypatched legacy key; it passes
+  when that secret is unset and is unrelated to this fix.
+- Discovered while manually exercising the full live-DeepSeek product loop in the
+  Console (create Project -> import Source -> Run -> material checkpoint -> resume
+  -> Editor -> quality report -> feedback -> answer targeted questions -> create
+  Revision); the crash appeared at the "answer targeted questions -> create
+  Revision" step.
+
 ## 2026-08-04
 
 ### M5.1c Obsession/Bear realistic browser E2E

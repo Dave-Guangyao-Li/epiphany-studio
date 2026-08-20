@@ -318,6 +318,77 @@ async def _create_completed_parent_with_style(
     return created.id, style_source_id, supplemental_source_id
 
 
+async def _create_completed_parent_without_style(
+    database: Database,
+    service: RunService,
+    worker: Worker,
+    *,
+    supplemental_paragraph_count: int = 10,
+) -> tuple[str, str]:
+    """Complete a v8 quality Run that never selected a writing-style sample.
+
+    A real Editor task then serializes ``writing_style_segments`` as ``None``
+    (an explicit null, not an omitted key). Parents built *with* a style sample
+    carry a populated list instead, so they cannot reproduce the shape that
+    regressed revision creation.
+    """
+
+    initial_source_id = await _import_source(
+        database,
+        title="无写作样本·初始生活记录",
+        source_type="journal",
+        text=_factual_material("初始事实", paragraph_count=5, detail_count=7),
+    )
+    created = await service.create_run(
+        workflow_type="episode-research",
+        payload={
+            "topic": "五年后重新开始记录生活",
+            "source_ids": [initial_source_id],
+            "creative_brief": {
+                "target_duration_minutes": 15,
+                "speaking_rate_chars_per_minute": 280,
+                "scenario": "reflective_solo",
+                "target_audience": "正在经历人生转折、想重新开始记录的普通听众",
+                "communication_goal": "用具体经历解释为什么重新开始记录",
+                "tone": ["真诚", "克制", "自然口语"],
+                "must_include": ["重新开始"],
+                "avoid_patterns": ["空泛排比", "强行金句"],
+            },
+        },
+    )
+    assert created.workflow_version == GUIDED_REVISION_WORKFLOW_VERSION
+
+    assert await worker.run_until_idle() == 3
+    waiting = await service.get_run(created.id)
+    assert waiting.status == "waiting_for_user"
+    assert waiting.current_step == "awaiting_more_material"
+
+    supplemental_source_id = await _import_source(
+        database,
+        title="无写作样本·补充口述",
+        source_type="voice_note_transcript",
+        text=_factual_material(
+            "补充口述",
+            paragraph_count=supplemental_paragraph_count,
+            detail_count=10,
+        ),
+    )
+    resumed = await service.resume_run(
+        created.id,
+        checkpoint="material_readiness",
+        submission_id="no-style-material-round-1",
+        source_ids=[supplemental_source_id],
+    )
+    assert resumed.resumed is True
+    assert resumed.run.current_step == BUILD_PODCAST_DRAFT
+
+    assert await worker.run_until_idle() == 2
+    completed = await service.get_run(created.id)
+    assert completed.status == "succeeded"
+    assert completed.model_call_count == 5
+    return created.id, supplemental_source_id
+
+
 async def _constrain_parent_to_partial_unused_material(
     database: Database,
     *,
@@ -475,6 +546,55 @@ async def test_v8_targeted_supplement_creates_v9_child_without_interview_plan(
     assert replayed.idempotent_replay is True
     assert replayed.run.id == created.run.id
     assert replayed.request_artifact_id == created.request_artifact_id
+
+
+async def test_targeted_supplement_revision_from_parent_without_writing_style(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    """A v8 parent with no writing-style sample must still spawn a revision.
+
+    Regression: the persisted Editor task carries ``writing_style_segments`` as
+    an explicit ``None``. ``dict.get(key, [])`` returns that ``None`` because the
+    key is present, so iterating it raised ``TypeError`` and every revision
+    creation from such a parent failed with HTTP 500. Existing revision tests
+    only used parents built *with* a style sample, so the crash went unnoticed.
+    """
+
+    database, service, worker = runtime
+    (
+        parent_run_id,
+        _supplemental_source_id,
+    ) = await _create_completed_parent_without_style(database, service, worker)
+
+    # Reproduce the exact regressing shape: an explicit null, not a missing key.
+    async with database.sessions() as session:
+        parent = await session.get(Run, parent_run_id)
+        assert parent is not None and parent.output_artifact_id is not None
+        parent_draft = await session.get(Artifact, parent.output_artifact_id)
+        assert parent_draft is not None and parent_draft.task_id is not None
+        editor_task = await session.get(Task, parent_draft.task_id)
+        assert editor_task is not None
+        assert "writing_style_segments" in editor_task.input_json
+        assert editor_task.input_json["writing_style_segments"] is None
+
+    answer_source_id = await _import_source(
+        database,
+        title="无写作样本·初稿后的定向补充回答",
+        source_type="voice_note_transcript",
+        text=_supplemental_answer_material(round_number=1),
+    )
+    request = CreateDraftRevisionRequest(
+        submission_id="no-style-targeted-supplement",
+        selected_actions=["add_supplemental_material"],
+        source_ids=[answer_source_id],
+    )
+
+    created = await service.create_draft_revision(parent_run_id, request=request)
+
+    assert created.idempotent_replay is False
+    assert created.run.parent_run_id == parent_run_id
+    assert created.run.workflow_version == DRAFT_AWARE_INTERVIEW_WORKFLOW_VERSION
+    assert answer_source_id in created.run.input_json["source_ids"]
 
 
 async def test_targeted_supplement_requires_new_grounded_spoken_text_and_repairs_once(
