@@ -1,0 +1,16 @@
+{
+  "name": "Epiphany Studio",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "backend",
+      "command": "cd backend && source .venv/bin/activate && alembic upgrade head && uvicorn epiphany.main:app --host 127.0.0.1 --port 8000"
+    },
+    {
+      "name": "frontend",
+      "command": "cd frontend && npm run dev -- --host 127.0.0.1 --port 5173"
+    }
+  ],
+  "ports": [8000, 5173]
+}
