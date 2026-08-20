@@ -291,3 +291,28 @@ export interface UserFeedbackRequest {
   observed_duration_minutes: number | null;
   comment: string | null;
 }
+
+export type FeedbackOrigin = "human" | "synthetic_test";
+export type FeedbackDecision = "accepted" | "needs_revision" | "rejected";
+
+export interface DraftUserFeedback {
+  schema_version: "draft_user_feedback_v1";
+  submission_id: string;
+  draft_artifact_id: string;
+  feedback_origin: FeedbackOrigin;
+  human_signal_eligible: boolean;
+  decision: FeedbackDecision;
+  overall_rating: number;
+  voice_match_rating: number;
+  recordability_rating: number;
+  usefulness_rating: number;
+  tone_fit_rating: number;
+  would_record_as_is: boolean;
+  observed_duration_minutes: number | null;
+  comment: string | null;
+}
+
+export interface DraftUserFeedbackRecord {
+  feedback: DraftUserFeedback;
+  artifact: ArtifactView;
+}

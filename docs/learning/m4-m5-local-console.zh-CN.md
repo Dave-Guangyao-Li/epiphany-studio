@@ -402,3 +402,28 @@ Reviewer 与输出读取可以在真实浏览器中串成一条链。它**不证
 所以这一阶段的准确名称是**本地开发 Console**，不是“已经上线的产品”。下一步
 应该先用真实个人素材走一遍 UI，记录具体摩擦，再决定优先做 Scaffold 编辑器、
 本地打包，还是 Docker/单机部署，而不是一次把所有平台能力补齐。
+
+## 13. 修订记录
+
+### 2026-08-20：暴露 apply_selected_feedback（把反馈变成 Revision）
+
+- 背景：M5.1c 记录了一个缺口——用户在 Console 保存人工反馈后，页面没有入口
+  把反馈应用成下一版草稿；反馈变成了死胡同。后端其实早已支持
+  `apply_selected_feedback` + `selected_feedback_artifact_ids`，缺的只是前端。
+- 变更：
+  - `runsApi.feedbackList` 拉取 `GET /runs/{id}/quality-feedback`，返回
+    `DraftUserFeedbackRecord[]`；`RunTracePage` 在加载 quality/improvement/
+    supplemental 的同时加载反馈列表，并在 `FeedbackPanel` 保存成功后（新增可选
+    `onSaved` 回调）重新拉取，保证新反馈立刻出现在下方面板。
+  - 新增 `ApplyFeedbackPanel`：列出已保存的人工反馈，勾选要应用的条目并可填一段
+    给 Editor 的补充说明，然后用 `selected_actions=["apply_selected_feedback"]`
+    和所选 `selected_feedback_artifact_ids` 创建保留原稿的子 Revision。
+  - `synthetic_test` 反馈被过滤，不会出现在面板里，也不可被当作人工判断应用。
+  - 面板仅在“已有持久化 Improvement Plan”且“至少一条人工反馈”时出现；一次
+    `submission_id` 在重试间复用，网络重试不会创建两个子 Run。
+- 测试：前端 `applyFeedbackPanel.test.tsx`（请求形状、合成反馈排除、未选禁用、
+  重试幂等、空态不渲染）；后端
+  `test_apply_selected_feedback_only_creates_and_completes_revision`（面板发送的
+  单一 `apply_selected_feedback` 请求端到端跑通 Editor 与 Reviewer）。
+- 边界：这一步只做“应用已保存反馈”的入口；`RevisionPanel` 的其它显式选项、
+  以及取消 Task 后迟到 Provider 计费防护，仍是后续小步。

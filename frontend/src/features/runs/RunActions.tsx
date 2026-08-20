@@ -1,6 +1,7 @@
 import { type FormEvent, useMemo, useRef, useState } from "react";
 import { projectsApi, runsApi, sourcesApi } from "../../api/epiphany";
 import type {
+  DraftUserFeedbackRecord,
   EventView,
   ImprovementPlanRecord,
   MaterialReadinessView,
@@ -143,7 +144,13 @@ export function HumanCheckpointPanel({
   );
 }
 
-export function FeedbackPanel({ runId }: { runId: string }) {
+export function FeedbackPanel({
+  runId,
+  onSaved,
+}: {
+  runId: string;
+  onSaved?: () => void | Promise<void>;
+}) {
   const [overall, setOverall] = useState(4);
   const [voice, setVoice] = useState(4);
   const [recordability, setRecordability] = useState(4);
@@ -175,6 +182,7 @@ export function FeedbackPanel({ runId }: { runId: string }) {
     try {
       await runsApi.feedback(runId, body);
       setNotice("反馈已作为独立记录保存，不会覆盖原稿。需要修改时可在下方显式创建 Revision。");
+      await onSaved?.();
     } catch (submitError) {
       setError(submitError);
     }
@@ -376,6 +384,128 @@ export function RevisionPanel({ run, improvement }: { run: RunView; improvement:
           </button>
         ))}
       </div>
+      <ErrorNotice error={error} />
+    </section>
+  );
+}
+
+const FEEDBACK_DECISION_LABELS: Record<string, string> = {
+  accepted: "接受",
+  needs_revision: "建议修订",
+  rejected: "不采用",
+};
+
+export function ApplyFeedbackPanel({
+  run,
+  improvement,
+  feedback,
+}: {
+  run: RunView;
+  improvement: ImprovementPlanRecord | null;
+  feedback: DraftUserFeedbackRecord[];
+}) {
+  const navigate = useNavigate();
+  const [selected, setSelected] = useState<string[]>([]);
+  const [instruction, setInstruction] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const retryRef = useRef<{ fingerprint: string; id: string } | null>(null);
+
+  // Only human feedback can drive a Revision. synthetic_test feedback is stored
+  // as product-ineligible and must never be applied as if it were a person's
+  // judgment.
+  const humanFeedback = feedback.filter(
+    (record) => record.feedback.feedback_origin === "human",
+  );
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!selected.length) return;
+    const fingerprint = `${[...selected].sort().join(",")}\n${instruction}`;
+    if (retryRef.current?.fingerprint !== fingerprint) {
+      retryRef.current = { fingerprint, id: stableId("ui-apply-feedback") };
+    }
+    setCreating(true);
+    setError(null);
+    try {
+      const response = await runsApi.revision(run.id, {
+        submission_id: retryRef.current.id,
+        selected_actions: ["apply_selected_feedback"],
+        selected_feedback_artifact_ids: selected,
+        selected_gap_codes: [],
+        source_ids: [],
+        answered_question_ids: [],
+        supplemental_interview_plan_artifact_id: null,
+        target_duration_minutes: null,
+        revision_instruction: instruction.trim() || null,
+      });
+      navigate(`/runs/${response.run.id}`);
+    } catch (submitError) {
+      setError(submitError);
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  // A persisted Improvement Plan is required so the child Revision inherits the
+  // parent Draft and Quality Report; without saved human feedback there is
+  // nothing to apply.
+  if (!improvement || humanFeedback.length === 0) return null;
+
+  return (
+    <section className="action-card">
+      <p className="eyebrow">APPLY YOUR FEEDBACK</p>
+      <h3>把你保存的反馈用到下一版。</h3>
+      <p>勾选要应用的反馈，创建一个保留原稿的候选修订。合成测试反馈不会出现在这里。</p>
+      <form onSubmit={submit}>
+        <div className="source-choice-list">
+          {humanFeedback.map((record) => {
+            const feedbackArtifactId = record.artifact.id;
+            const detail = record.feedback;
+            const checked = selected.includes(feedbackArtifactId);
+            return (
+              <label
+                className={`source-choice ${checked ? "selected" : ""}`}
+                key={feedbackArtifactId}
+              >
+                <input
+                  type="checkbox"
+                  aria-label={`应用反馈 ${feedbackArtifactId}`}
+                  checked={checked}
+                  onChange={() =>
+                    setSelected((current) =>
+                      current.includes(feedbackArtifactId)
+                        ? current.filter((id) => id !== feedbackArtifactId)
+                        : [...current, feedbackArtifactId],
+                    )
+                  }
+                />
+                <span>
+                  <strong>
+                    {FEEDBACK_DECISION_LABELS[detail.decision] ?? detail.decision}
+                    {" · 整体 "}
+                    {detail.overall_rating}/5
+                    {detail.would_record_as_is ? " · 愿意直接录" : ""}
+                  </strong>
+                  <small>{detail.comment ?? "（无文字说明）"}</small>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+        <label>
+          给 Editor 的补充说明 <span className="optional">可选</span>
+          <textarea
+            rows={3}
+            value={instruction}
+            onChange={(event) => setInstruction(event.target.value)}
+            placeholder="比如：重点解决“像我”偏低的问题，多留具体场景，不要新增没有来源的结论。"
+          />
+        </label>
+        <button className="button primary" disabled={creating || !selected.length}>
+          {creating ? "正在创建 Revision…" : `用 ${selected.length} 条反馈创建下一版`}
+        </button>
+      </form>
       <ErrorNotice error={error} />
     </section>
   );
