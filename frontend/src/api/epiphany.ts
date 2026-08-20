@@ -5,6 +5,7 @@ import type {
   CreateSourceStarterRequest,
   EventView,
   ConfirmSourceStarterResponse,
+  DraftUserFeedbackRecord,
   ImportSourceResponse,
   ImprovementPlanRecord,
   ProjectDetail,
@@ -110,6 +111,8 @@ export const runsApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  feedbackList: (runId: string) =>
+    apiRequest<DraftUserFeedbackRecord[]>(`/runs/${runId}/quality-feedback`),
   revision: (runId: string, body: Record<string, unknown>) =>
     apiRequest<CreateRevisionResponse>(`/runs/${runId}/revisions`, {
       method: "POST",

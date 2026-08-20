@@ -574,7 +574,14 @@ Revision 修复后又发现一句元编辑话语跳出人设，因此最终仍�
 
 本次同时暴露两个后续 UI/可靠性工作：保存反馈后页面尚未暴露
 `apply_selected_feedback`，以及取消 Task 后外部 Provider 仍可能迟到完成并产生费用。
-二者进入 M5 后续小步，不为了结束实验而伪装成已解决。真实 `.env` 还曾让普通测试
+二者进入 M5 后续小步，不为了结束实验而伪装成已解决。
+
+更新（2026-08-20）：第一个 UI 缺口已修复——Console 现在提供
+`ApplyFeedbackPanel`，可以列出已保存的人工反馈、勾选后以
+`apply_selected_feedback` 创建保留原稿的子 Revision（`synthetic_test`
+反馈不可用）。已补前后端测试。取消 Task 的迟到 Provider 计费防护仍未做。
+详见开发日志与
+[M4/M5 本地工作台学习章节](learning/m4-m5-local-console.zh-CN.md)。真实 `.env` 还曾让普通测试
 继承 30 秒 cooldown 与 80,000 字 bundle；测试环境现已固定 Fake Provider、零
 cooldown 和默认 bundle 边界。当前验证基线为 443 项 backend pytest、Ruff、43 项
 frontend tests 与 production build。

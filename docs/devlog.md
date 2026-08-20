@@ -2,6 +2,36 @@
 
 ## 2026-08-20
 
+### Feature: Apply saved feedback to create a Revision from the Console
+
+- Closes the M5.1c UI gap: after saving human feedback, the Console had no way
+  to turn it into a Revision. The backend already supported
+  `apply_selected_feedback` with `selected_feedback_artifact_ids`; only the UI
+  was missing, so the saved feedback was a dead end.
+- Frontend: added `runsApi.feedbackList` (GET `/runs/{id}/quality-feedback`) and
+  `DraftUserFeedbackRecord`/`DraftUserFeedback` types; `RunTracePage` now loads
+  the feedback list alongside quality/improvement/supplemental and refetches it
+  after `FeedbackPanel` saves (new optional `onSaved` callback). A new
+  `ApplyFeedbackPanel` lists saved human feedback, lets the user select which
+  entries to apply plus an optional instruction, and creates a child Revision
+  with `selected_actions=["apply_selected_feedback"]` and the chosen
+  `selected_feedback_artifact_ids`. `synthetic_test` feedback is filtered out and
+  can never be applied as if it were a person's judgment. The panel renders only
+  when a persisted Improvement Plan and at least one human feedback record exist,
+  and it reuses one `submission_id` across retries so a network retry cannot
+  create two child Runs.
+- Tests: frontend `applyFeedbackPanel.test.tsx` covers the created request shape,
+  synthetic-feedback exclusion, disabled-until-selected, retry idempotency, and
+  the null-render guards. Backend
+  `test_apply_selected_feedback_only_creates_and_completes_revision` exercises the
+  exact request the panel sends (apply_selected_feedback alone, one feedback
+  artifact, no new Sources) end to end through Editor and Reviewer; existing
+  backend coverage only combined the action with `lower_target_duration`.
+- Verification: `ruff` clean, backend suite 445 passed, frontend 46 passed, and
+  `npm run build` succeeds. Also retested live in the Console against DeepSeek.
+- This slice depends on the revision-creation crash fix below (a no-writing-sample
+  parent is the common case), so it is stacked on that branch.
+
 ### Fix: Revision creation crashed for parents without a writing-style sample
 
 - Root cause: `RunService.create_draft_revision` derived the parent's

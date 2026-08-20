@@ -188,7 +188,10 @@ and imports it. Writing samples and voice-note transcripts cannot use this
 path. Its SSE stream replays durable SQLite Events after reconnect, emits
 heartbeats while idle, and closes at a terminal Run state. Human checkpoints,
 Markdown outputs, quality feedback, and explicit Revision actions reuse the
-existing backend contracts.
+existing backend contracts. Saved human feedback can also be turned into a
+child Revision directly from the Run page: an "apply my feedback" panel lists
+the saved human feedback, and creating a Revision from it uses the
+`apply_selected_feedback` action (`synthetic_test` feedback is excluded).
 
 This is still a local development Console. It does not yet include a visual
 Scaffold editor, authentication, Docker packaging, production deployment,

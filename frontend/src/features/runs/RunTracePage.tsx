@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiEventStreamUrl } from "../../api/client";
 import { runsApi } from "../../api/epiphany";
 import type {
+  DraftUserFeedbackRecord,
   EventView,
   ImprovementPlanRecord,
   QualityReportRecord,
@@ -23,6 +24,7 @@ import {
   shouldLoadDerivedForRun,
 } from "../../lib/runTrace";
 import {
+  ApplyFeedbackPanel,
   FeedbackPanel,
   HumanCheckpointPanel,
   ImprovementAnswerPanel,
@@ -128,6 +130,7 @@ export function RunTracePage() {
   const [quality, setQuality] = useState<QualityReportRecord | null>(null);
   const [improvement, setImprovement] = useState<ImprovementPlanRecord | null>(null);
   const [supplemental, setSupplemental] = useState<SupplementalInterviewPlanRecord | null>(null);
+  const [feedback, setFeedback] = useState<DraftUserFeedbackRecord[]>([]);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [error, setError] = useState<unknown>(null);
   const [cancelling, setCancelling] = useState(false);
@@ -148,15 +151,18 @@ export function RunTracePage() {
     if (!shouldLoadDerivedForRun(nextRun, derivedRequestedRunRef.current)) return;
     derivedRequestedRunRef.current = nextRun.id;
     try {
-      const [qualityResult, improvementResult, supplementalResult] = await Promise.all([
-        runsApi.quality(nextRun.id),
-        runsApi.improvement(nextRun.id),
-        loadSupplementalInterviewForRun(nextRun, runsApi.supplemental),
-      ]);
+      const [qualityResult, improvementResult, supplementalResult, feedbackResult] =
+        await Promise.all([
+          runsApi.quality(nextRun.id),
+          runsApi.improvement(nextRun.id),
+          loadSupplementalInterviewForRun(nextRun, runsApi.supplemental),
+          runsApi.feedbackList(nextRun.id),
+        ]);
       if (!isCurrentRunGeneration(requestedRoute, currentRouteGeneration())) return;
       setQuality(qualityResult);
       setImprovement(improvementResult);
       setSupplemental(supplementalResult);
+      setFeedback(feedbackResult);
     } catch (loadError) {
       // A transient failure must remain retryable through the page retry action.
       if (derivedRequestedRunRef.current === nextRun.id) {
@@ -200,6 +206,13 @@ export function RunTracePage() {
     return request;
   }, [currentRouteGeneration, loadDerived, runId]);
 
+  const reloadFeedback = useCallback(async () => {
+    const requestedRoute = currentRouteGeneration();
+    const records = await runsApi.feedbackList(activeRunIdRef.current);
+    if (!isCurrentRunGeneration(requestedRoute, currentRouteGeneration())) return;
+    setFeedback(records);
+  }, [currentRouteGeneration]);
+
   const scheduleRefresh = useCallback((delay = 180) => {
     if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
     refreshTimerRef.current = window.setTimeout(() => {
@@ -219,6 +232,7 @@ export function RunTracePage() {
     setQuality(null);
     setImprovement(null);
     setSupplemental(null);
+    setFeedback([]);
     setCancelling(false);
     setMarkdown(null);
     setMarkdownError(null);
@@ -421,11 +435,12 @@ export function RunTracePage() {
                 <pre>{JSON.stringify(quality.report, null, 2)}</pre>
               </section>
             )}
-            <FeedbackPanel runId={run.id} />
+            <FeedbackPanel runId={run.id} onSaved={reloadFeedback} />
           </div>
           <div>
             <ImprovementAnswerPanel run={run} improvement={improvement} />
             {supplemental && <SupplementalInterviewPanel run={run} record={supplemental} />}
+            <ApplyFeedbackPanel run={run} improvement={improvement} feedback={feedback} />
             <RevisionPanel run={run} improvement={improvement} />
           </div>
         </div>

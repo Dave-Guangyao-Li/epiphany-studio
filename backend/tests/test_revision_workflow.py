@@ -597,6 +597,70 @@ async def test_targeted_supplement_revision_from_parent_without_writing_style(
     assert answer_source_id in created.run.input_json["source_ids"]
 
 
+async def test_apply_selected_feedback_only_creates_and_completes_revision(
+    runtime: tuple[Database, RunService, Worker],
+) -> None:
+    """The Console's feedback-driven Revision uses apply_selected_feedback alone.
+
+    Exercises the exact request the ``ApplyFeedbackPanel`` sends: one
+    ``apply_selected_feedback`` action carrying a saved human feedback artifact,
+    with no new Sources, no length recovery, and no duration change. The child
+    Revision must be created idempotently and complete through the Editor and
+    Reviewer. The parent runs without a writing sample, the common case.
+    """
+
+    database, service, worker = runtime
+    parent_run_id, _supplemental_source_id = await _create_completed_parent_without_style(
+        database,
+        service,
+        worker,
+    )
+    # A persisted Improvement Plan must exist before a Revision can be created.
+    await service.get_draft_improvement_plan(parent_run_id)
+
+    feedback = await service.submit_draft_feedback(
+        parent_run_id,
+        feedback=DraftUserFeedbackRequest(
+            submission_id="apply-feedback-only-human-1",
+            feedback_origin="human",
+            decision="needs_revision",
+            overall_rating=3,
+            voice_match_rating=3,
+            recordability_rating=3,
+            usefulness_rating=4,
+            tone_fit_rating=4,
+            would_record_as_is=False,
+            observed_duration_minutes=7.5,
+            comment="结尾几段有点空泛，缺一个像醪糟蛋花汤那样具体的场景。",
+        ),
+    )
+
+    request = CreateDraftRevisionRequest(
+        submission_id="apply-feedback-only-revision-1",
+        selected_actions=["apply_selected_feedback"],
+        selected_feedback_artifact_ids=[feedback.artifact.id],
+        revision_instruction="重点解决结尾空泛的问题，多留具体场景，不要新增没有来源的结论。",
+    )
+    created = await service.create_draft_revision(parent_run_id, request=request)
+
+    assert created.idempotent_replay is False
+    assert created.run.parent_run_id == parent_run_id
+    assert created.run.workflow_type == "podcast-revision"
+    assert created.run.current_step == REVISE_PODCAST_DRAFT
+    assert [task.kind for task in created.run.tasks] == [REVISE_PODCAST_DRAFT]
+
+    replay = await service.create_draft_revision(parent_run_id, request=request)
+    assert replay.idempotent_replay is True
+    assert replay.run.id == created.run.id
+
+    assert await worker.run_until_idle() >= 1
+    completed = await service.get_run(created.run.id)
+    assert completed.status == "succeeded"
+    assert any(
+        artifact.kind == f"{REVISE_PODCAST_DRAFT}_result" for artifact in completed.artifacts
+    )
+
+
 async def test_targeted_supplement_requires_new_grounded_spoken_text_and_repairs_once(
     runtime: tuple[Database, RunService, Worker],
 ) -> None:
