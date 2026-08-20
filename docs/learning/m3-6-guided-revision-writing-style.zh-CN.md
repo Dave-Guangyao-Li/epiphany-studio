@@ -444,6 +444,7 @@ M3.6 的自动化目标是减少机械工作，不是夺走编辑决定。
 | 子 Run 一直 `queued` | 确认 Worker 已启用并查看 Task claim 日志；不要用重复提交来催促 |
 | Comparison 返回 409 | 等子 Run 生成新 Draft 和新 Quality Report |
 | `podcast_draft_writing_style_sample_leak` | 模型复制了样本独特长句；减少模仿式指令后再显式修订 |
+| 创建 Revision 返回 500 / `TypeError: 'NoneType' object is not iterable` | 见下方“修订记录”，已在 2026-08-20 修复；升级到含该修复的版本即可 |
 | `no such table` 或缺少 `parent_run_id` | 在 `backend` 激活 `.venv` 后执行 `alembic upgrade head`；M3.6 迁移为 `0004_run_lineage` |
 
 ## 16. 本阶段学到什么
@@ -451,3 +452,23 @@ M3.6 的自动化目标是减少机械工作，不是夺走编辑决定。
 M3.6 把“更像我”拆成了显式授权、风格/事实隔离、确定性 Profile、固定 Prompt
 优先级、输出校验、人工选择、不可变父子 Run、幂等请求和独立预算。模型评价
 不能替代硬规则与真人选择；最终“这像不像我、我愿不愿意录”仍由用户回答。
+
+## 17. 修订记录
+
+### 2026-08-20：修复无写作样本时创建 Revision 崩溃
+
+- 现象：父 Run 没有选择写作样本时，任何方式创建 Revision（定向补充、复用
+  未用素材、应用所选反馈）都会返回 HTTP 500。
+- 根因：`RunService.create_draft_revision` 用
+  `base_editor_input.get("writing_style_segments", [])` 取父稿的风格来源。已完成
+  的 Editor Task 在没有写作样本时会把 `writing_style_segments` 序列化为显式
+  `null`，键存在但值为 `None`，因此 `.get(键, [])` 返回的是 `None` 而不是默认
+  的 `[]`，对 `None` 迭代抛出 `TypeError`。
+- 修复：改为 `... or []`，让 `None` 与“键缺失”表现一致（`services.py` 一行）。
+- 为什么之前没发现：既有 Revision 测试都用带写作样本的父 Run，其
+  `writing_style_segments` 是非空列表；手工构造父输入的测试又直接省略该键，
+  两者都走不到 `None` 分支。
+- 回归：`test_targeted_supplement_revision_from_parent_without_writing_style`
+  用 Fake 跑通一个无写作样本的 v8 父 Run，断言其 Editor Task 的
+  `writing_style_segments is None`，再创建 v9 补充采访 Revision；旧代码会在同一行
+  抛 `TypeError`，修复后通过。
