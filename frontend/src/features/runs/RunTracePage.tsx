@@ -29,6 +29,7 @@ import {
   RevisionPanel,
   SupplementalInterviewPanel,
 } from "./RunActions";
+import { ScaffoldEditorPanel } from "./ScaffoldEditor";
 import { ArtifactViewer, EventTimeline, ModelCallTable, TaskList } from "./TracePanels";
 
 type ConnectionState = "connecting" | "live" | "reconnecting" | "closed";
@@ -406,6 +407,10 @@ export function RunTracePage() {
           <div className="panel-heading"><h2>{markdown.kind}</h2><button className="icon-button" onClick={() => setMarkdown(null)}>×</button></div>
           <pre>{markdown.text}</pre>
         </section>
+      )}
+
+      {markdownAvailability.scaffold && (
+        <ScaffoldEditorPanel run={run} onSaved={refresh} />
       )}
 
       {run.status === "waiting_for_user" && (

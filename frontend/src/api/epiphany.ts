@@ -7,6 +7,8 @@ import type {
   ConfirmSourceStarterResponse,
   ImportSourceResponse,
   ImprovementPlanRecord,
+  InterviewScaffoldEditRequest,
+  InterviewScaffoldEditResponse,
   ProjectDetail,
   ProjectSummary,
   QualityReportRecord,
@@ -112,6 +114,11 @@ export const runsApi = {
     }),
   revision: (runId: string, body: Record<string, unknown>) =>
     apiRequest<CreateRevisionResponse>(`/runs/${runId}/revisions`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  saveScaffoldEdit: (runId: string, body: InterviewScaffoldEditRequest) =>
+    apiRequest<InterviewScaffoldEditResponse>(`/runs/${runId}/interview-scaffold-edits`, {
       method: "POST",
       body: JSON.stringify(body),
     }),

@@ -2,6 +2,38 @@
 
 ## 2026-08-20
 
+### M5.2: Human text-editing for the Interview Scaffold (human-edited Artifact)
+
+- The Interview Scaffold was view/export only. Added an in-Console editor for its
+  human-facing text (episode intent, opening, section titles, transitions,
+  question prompts and purposes, closing).
+- Design (ADR-0002 / Plan A): each save writes a new immutable
+  `interview_scaffold_human_edit` Artifact carrying the edited scaffold,
+  `base_artifact_id`, `editor_origin=human`, and `submission_id`. The original
+  `build_interview_scaffold_result` Artifact is never mutated. The effective
+  scaffold is the latest human edit, else the original. No migration (reuses the
+  `artifacts` table + `idempotency_key`).
+- Grounding is protected: `scaffold_grounding_signature` compares the title, the
+  structural shape, and every `source_refs` list; an edit must match it, so a
+  human can change text only — not citations, structure, or the topic-bound
+  title. Saves are idempotent by `submission_id` (same content replays, different
+  content conflicts).
+- Export `interview-scaffold.md` now renders the effective (latest human) scaffold
+  and logs a `scaffold_edited` flag.
+- Backend: `scaffold_edit_schemas.py`, `RunService.save_interview_scaffold_edit`
+  + effective-scaffold resolver + export wiring, and
+  `POST /runs/{id}/interview-scaffold-edits`. Frontend: `ScaffoldEditor.tsx`
+  panel wired into `RunTracePage` (refetches the run after save).
+- Tests: backend `test_interview_scaffold_edit.py` (create/immutable/export,
+  rejected ref/citation/title/base-mismatch changes, idempotency + conflict);
+  frontend `scaffoldEditor.test.tsx` (render/backfill, save request shape with
+  preserved refs/structure, edited badge, empty-state). `ruff` clean,
+  `alembic check` no drift, backend full suite green (one pre-existing flaky
+  concurrency test unrelated to this change), frontend 46 passed + build.
+- Deliberately deferred (see ADR-0002): wiring the human-edited scaffold into the
+  Resume -> Editor path (needs the Improvement Plan / Material Readiness
+  scaffold-consistency checks updated too), structural edits, and Draft editing.
+
 ### Fix: Revision creation crashed for parents without a writing-style sample
 
 - Root cause: `RunService.create_draft_revision` derived the parent's

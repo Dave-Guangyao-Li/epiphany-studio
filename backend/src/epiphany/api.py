@@ -20,6 +20,11 @@ from epiphany.revision_schemas import (
     DraftImprovementPlanRecord,
     DraftRevisionComparisonRecord,
 )
+from epiphany.scaffold_edit_schemas import (
+    InterviewScaffoldEditError,
+    InterviewScaffoldEditRequest,
+    InterviewScaffoldEditResponse,
+)
 from epiphany.schemas import (
     CreateRunRequest,
     EventView,
@@ -35,6 +40,8 @@ from epiphany.services import (
     DraftRevisionComparisonNotReady,
     DraftRevisionConflict,
     DraftRevisionNotAllowed,
+    InterviewScaffoldEditConflict,
+    InterviewScaffoldEditNotAllowed,
     InterviewScaffoldExportNotReady,
     InvalidRunPayload,
     PodcastDraftExportNotReady,
@@ -374,6 +381,25 @@ async def list_draft_feedback(
         raise HTTPException(status_code=404, detail="run not found") from error
     except DraftFeedbackConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post(
+    "/runs/{run_id}/interview-scaffold-edits",
+    response_model=InterviewScaffoldEditResponse,
+)
+async def save_interview_scaffold_edit(
+    run_id: str,
+    body: InterviewScaffoldEditRequest,
+    service: RunServiceDependency,
+) -> InterviewScaffoldEditResponse:
+    try:
+        return await service.save_interview_scaffold_edit(run_id, request=body)
+    except RunNotFound as error:
+        raise HTTPException(status_code=404, detail="run not found") from error
+    except InterviewScaffoldEditConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (InterviewScaffoldEditNotAllowed, InterviewScaffoldEditError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @router.post("/runs/{run_id}/resume", response_model=ResumeRunResponse)

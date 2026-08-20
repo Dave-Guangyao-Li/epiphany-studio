@@ -62,7 +62,8 @@ Epiphany Studio 不只是一个等待 AI 帮忙完成的产品，也是一个用
 26. [M5.1：AI 起步助手与可见的四步进度](m5-1-source-starter.zh-CN.md)
 27. [M5.1b：真实浏览器全流程 E2E](../experiments/m5-1b-real-browser-e2e.zh-CN.md)
 28. [M5.1c：《Obsession》Bear 视角真实浏览器与内容质量 E2E](../experiments/m5-1c-obsession-bear-browser-e2e.zh-CN.md)
-29. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
+29. [M5.2：采访脚手架的人工文本编辑（人工编辑版 Artifact）](m5-2-scaffold-editing.zh-CN.md)
+30. [SQLite 数据与排查指南](sqlite-data-guide.zh-CN.md)
 
 ## 当前进度
 
